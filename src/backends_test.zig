@@ -448,3 +448,37 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
         try testing.expectEqual(@as(u32, 0), try l.run(.once));
     }
 }
+
+test "a descriptor closed outside the loop and announced with closing is waited on afresh when its number comes back" {
+    for (readiness) |backend| {
+        var l: Loop = undefined;
+        try loopOf(&l, backend);
+        defer l.deinit(testing.allocator);
+        const sys = Io.Threaded.global_single_threaded.io();
+        const first = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        // A wait registers the read end, then is cancelled.
+        var waiting: Loop.Op = .{ .kind = .{ .wait = .{ .readable = first[0] } } };
+        try l.submit(&waiting);
+        _ = try l.run(.nowait);
+        l.cancel(&waiting);
+        _ = try l.run(.nowait);
+        var out: [4]*Loop.Op = undefined;
+        try testing.expectError(error.Canceled, l.reap(&out)[0].result.wait);
+        // Closed behind the loop's back, announced; the number comes back.
+        Loop.closing(first[0]);
+        _ = posix.system.close(first[0]);
+        _ = posix.system.close(first[1]);
+        const second = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        defer for (second) |fd| {
+            _ = posix.system.close(fd);
+        };
+        try testing.expectEqual(first[0], second[0]);
+        var again: Loop.Op = .{ .kind = .{ .wait = .{ .readable = second[0] } } };
+        try l.submit(&again);
+        _ = try l.run(.nowait);
+        _ = posix.system.write(second[1], "x", 1);
+        const deadline = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
+        try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = deadline }));
+        try l.reap(&out)[0].result.wait;
+    }
+}

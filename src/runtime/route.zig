@@ -1,6 +1,6 @@
-//! Slots that run std's own `Threaded` code: on a lane, per `files`, or borrowed on the
-//! worker. Each generator makes a function with the slot's exact
-//! signature from the slot's name.
+//! Slots that run std's own `Threaded` code: on a lane, per `files`, or
+//! borrowed on the worker. Each generator makes a function with the slot's
+//! exact signature from the slot's name.
 const std = @import("std");
 const Io = std.Io;
 

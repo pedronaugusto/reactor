@@ -7,6 +7,10 @@
 //!
 //! One owner thread at a time; on io_uring the thread that called `init`,
 //! for the loop's whole life. Only `wake` is safe from any thread.
+//!
+//! On epoll and kqueue a regular file has no readiness: positional reads
+//! and writes, syncs, and streaming calls on such a file are made in place,
+//! inside `submit`.
 const Loop = @This();
 
 const builtin = @import("builtin");
