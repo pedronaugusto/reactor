@@ -1,7 +1,7 @@
 //! Running a call where it holds up no worker: on a lane, the task parked
-//! meanwhile; inline when the runtime has no lanes, the lane's queue is
-//! full, or the caller is a thread outside the runtime; or "borrowed": std's
-//! code run on the worker itself, for calls that never block.
+//! meanwhile; inline when the runtime has no lanes or the caller is a
+//! thread outside the runtime; or "borrowed": std's code run on the worker
+//! itself, for calls that never block.
 const std = @import("std");
 const Io = std.Io;
 
@@ -43,7 +43,6 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
         task: *Task,
         scheduler: *Scheduler,
         lanes: *Lanes,
-        refused: bool = false,
         hook: Task.Hook = .{ .cancel = cancelHook },
 
         fn run(job: *Lanes.Job) void {
@@ -64,10 +63,9 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
 
         /// Off the task's stack: hand the call to the lane.
         fn submit(context: *anyopaque, task: *Task) void {
+            _ = task;
             const c: *Self = @ptrCast(@alignCast(context)); // safe: `call` passed its `Call`
-            if (c.lanes.submit(&c.job)) return;
-            c.refused = true;
-            c.scheduler.ready(task, .completed);
+            c.lanes.submit(&c.job);
         }
     };
     var c: Call = .{
@@ -81,7 +79,6 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     if (comptime cancelable(R)) t.enterWait(&c.hook) catch return error.Canceled;
     Scheduler.park(.{ .func = Call.submit, .context = &c });
     t.leaveWait();
-    if (c.refused) return direct(lanes, lane, func, args);
     // The executor lets go of the job's group just after the call returns.
     while (c.job.held()) Scheduler.yield();
     if (comptime cancelable(R)) {
