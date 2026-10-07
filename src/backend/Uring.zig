@@ -207,6 +207,7 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
     switch (o.kind) {
         .io => |*operation| u.submitIo(o, operation, ud),
         .accept => |fd| {
+            o.state.scratch = .{ .io_uring = .{ .address = undefined } };
             const a = &o.state.scratch.io_uring.address;
             a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
             const sqe = u.entry();
@@ -214,6 +215,7 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
         .connect => |c| {
+            o.state.scratch = .{ .io_uring = .{ .address = undefined } };
             const a = &o.state.scratch.io_uring.address;
             a.* = .{ .storage = undefined, .len = 0 };
             a.len = switch (c.address) {
@@ -246,6 +248,7 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
         .timer => |deadline| {
+            o.state.scratch = .{ .io_uring = .{ .timespec = undefined } };
             const ts = &o.state.scratch.io_uring.timespec;
             ts.* = timespecOf(deadline.raw.nanoseconds);
             const clock_flag: u32 = switch (deadline.clock) {
@@ -279,11 +282,13 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
         .net_read => |r| if (r.control.len == 0) {
             sqe.prep_recv(r.socket_handle, firstBuffer(r.data), 0);
         } else {
+            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.scratch.io_uring.message;
             m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = gather(&m.iovecs, r.data), .control = r.control.ptr, .controllen = @intCast(r.control.len), .flags = 0 };
             sqe.prep_recvmsg(r.socket_handle, &m.header, posix.MSG.CMSG_CLOEXEC);
         },
         .net_write => |w| {
+            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.scratch.io_uring.message;
             const count = scatter(&m.iovecs, &m.splat, w.header, w.data, w.splat);
             if (count == 1 and w.control.len == 0) {
@@ -294,6 +299,7 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
             }
         },
         .net_receive => |r| {
+            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.scratch.io_uring.message;
             const message = &r.message_buffer[0];
             m.iovecs[0] = .{ .base = r.data_buffer.ptr, .len = r.data_buffer.len };
@@ -301,6 +307,7 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
             sqe.prep_recvmsg(r.socket_handle, &m.header, receiveFlags(r.flags));
         },
         .net_send => |s| {
+            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.scratch.io_uring.message;
             const message = &s.messages[0];
             m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len }; // safe: the kernel only reads what a send gives it
