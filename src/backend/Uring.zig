@@ -101,6 +101,8 @@ wake_buffer: u64 = 0,
 wake_pending: std.atomic.Value(bool) = .init(false),
 notify_fd: ?linux.fd_t = null,
 enabled: bool,
+/// The kernel flags the ring when completions wait to be run.
+taskrun_flag: bool = false,
 
 pub fn init(options: Options) InitError!Uring {
     var u: Uring = .{
@@ -110,7 +112,7 @@ pub fn init(options: Options) InitError!Uring {
         .wake_fd = undefined,
         .enabled = !options.disabled,
     };
-    u.ring = try setup(options, &u.features);
+    u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
     const efd = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
@@ -120,13 +122,17 @@ pub fn init(options: Options) InitError!Uring {
 }
 
 /// The ring, with every flag the kernel takes, dropping them one by one.
-fn setup(options: Options, features: *Features) InitError!linux.IoUring {
+fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!linux.IoUring {
     const want_defer = !options.off.defer_taskrun;
-    const tries = [_]struct { flags: u32, defer_taskrun: bool }{
-        .{ .flags = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_DEFER_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL, .defer_taskrun = true },
-        .{ .flags = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL, .defer_taskrun = false },
-        .{ .flags = linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL, .defer_taskrun = false },
-        .{ .flags = 0, .defer_taskrun = false },
+    // TASKRUN_FLAG: the kernel marks the ring when completions wait to be
+    // run, so a poll that has nothing to submit or wait for can skip the
+    // syscall.
+    const taskrun = linux.IORING_SETUP_TASKRUN_FLAG;
+    const tries = [_]struct { flags: u32, defer_taskrun: bool, taskrun_flag: bool }{
+        .{ .flags = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_DEFER_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL | taskrun, .defer_taskrun = true, .taskrun_flag = true },
+        .{ .flags = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL | taskrun, .defer_taskrun = false, .taskrun_flag = true },
+        .{ .flags = linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_SUBMIT_ALL, .defer_taskrun = false, .taskrun_flag = false },
+        .{ .flags = 0, .defer_taskrun = false, .taskrun_flag = false },
     };
     for (tries) |t| {
         if (t.defer_taskrun and !want_defer) continue;
@@ -147,6 +153,7 @@ fn setup(options: Options, features: *Features) InitError!linux.IoUring {
             return error.BackendUnavailable;
         }
         features.defer_taskrun = t.defer_taskrun;
+        taskrun_flag.* = t.taskrun_flag;
         return ring;
     }
     return error.BackendUnavailable;
@@ -405,8 +412,9 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
     };
     const to_submit = u.ring.flush_sq();
     // Nothing to submit and nothing to wait for: no syscall, unless the
-    // kernel defers completions until asked.
-    if (to_submit == 0 and min == 0 and !u.features.defer_taskrun and !u.ring.cq_ring_needs_flush()) return;
+    // kernel holds completions back until asked (deferred task work, or an
+    // overflow), which it flags when it can.
+    if (to_submit == 0 and min == 0 and !u.pendingInKernel()) return;
     const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG;
     while (true) {
         const rc = linux.io_uring_enter(u.ring.fd, to_submit, min, flags, @ptrCast(&arg)); // safe: the kernel reads the wait argument during the call
@@ -418,6 +426,14 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
             else => |err| return posix.unexpectedErrno(err),
         }
     }
+}
+
+fn pendingInKernel(u: *Uring) bool {
+    const flags = @atomicLoad(u32, u.ring.sq.flags, .acquire);
+    if (flags & linux.IORING_SQ_CQ_OVERFLOW != 0) return true;
+    if (u.taskrun_flag) return flags & linux.IORING_SQ_TASKRUN != 0;
+    // Without the flag, a deferring ring must be asked every time.
+    return u.features.defer_taskrun;
 }
 
 fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {

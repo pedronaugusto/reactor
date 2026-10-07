@@ -46,10 +46,27 @@ pub fn build(b: *std.Build) !void {
     } else |err| needed = err;
     // CI wiring. preflight is lazy and only the root build asks for it.
     if (b.lazyImport(@This(), "preflight")) |preflight| {
-        preflight.addCi(b, .{ .tests = test_step, .portable_tests = true });
+        preflight.addCi(b, .{
+            .tests = test_step,
+            .portable_tests = true,
+            .bench = .{
+                .programs = &.{.{ .name = "bench", .source = "bench/main.zig" }},
+                .imports = benchImports,
+                .target = target,
+                .optimize = optimize,
+            },
+        });
         // A project that depends on reactor by path, with no packages to
         // fetch: the build a consumer gets.
         preflight.addConsumerCheck(b, .{ .package = "reactor", .program = b.path("ci/consumer.zig") });
     }
     return needed;
+}
+
+/// reactor again, in the mode a benchmark builds in: an imported module keeps
+/// its own mode, so a ReleaseFast benchmark over the Debug module would
+/// time the Debug module.
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const reactor = b.createModule(.{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize });
+    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "reactor", .module = reactor }}) catch @panic("OOM");
 }
