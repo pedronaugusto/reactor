@@ -251,15 +251,19 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
 pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
     const r = Core.of(userdata);
     const p = Scheduler.processor() orelse return borrowed(r, "netConnectIp", .{ address, options });
-    const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol) catch |err| return narrow(net.IpAddress.ConnectError, err);
+    // On epoll and kqueue the socket connects in non-blocking mode, made so
+    // at its creation, and is put back once connected.
+    const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
+    const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol, start) catch |err| return narrow(net.IpAddress.ConnectError, err);
     errdefer socket.close(fd);
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* } } } };
+    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } };
     perform.run(&r.scheduler, &o, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => error.Timeout,
         error.SystemResources => error.SystemResources,
     };
     o.result.connect catch |err| return narrow(net.IpAddress.ConnectError, err);
+    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.IpAddress.ConnectError, err);
     return .{ .handle = fd, .address = socket.localAddress(fd) catch |err| return narrow(net.IpAddress.ConnectError, err) };
 }
 
@@ -280,18 +284,20 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
     const r = Core.of(userdata);
     _ = Scheduler.processor() orelse return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
-    const fd = socket.open(posix.AF.UNIX, .stream, null) catch |err| return switch (err) {
+    const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
+    const fd = socket.open(posix.AF.UNIX, .stream, null, start) catch |err| return switch (err) {
         error.ProtocolUnsupportedByAddressFamily, error.ProtocolUnsupportedBySystem => error.AddressFamilyUnsupported,
         else => |e| narrow(net.UnixAddress.ConnectError, e),
     };
     errdefer socket.close(fd);
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address } } } };
+    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } };
     perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
     o.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
+    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
     return fd;
 }
 

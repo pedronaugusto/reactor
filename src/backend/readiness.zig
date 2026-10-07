@@ -270,7 +270,7 @@ pub fn Readiness(comptime Poller: type) type {
                     return self.park(w, fd, .read, .call);
                 },
                 .connect => |c| {
-                    w.restore = calls.makeNonblocking(c.socket) catch |err| {
+                    w.restore = !c.nonblocking and calls.makeNonblocking(c.socket) catch |err| {
                         o.result = .{ .connect = err };
                         return true;
                     };

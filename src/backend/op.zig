@@ -27,6 +27,9 @@ pub const Kind = union(enum) {
 pub const Connect = struct {
     socket: Io.net.Socket.Handle,
     address: Address,
+    /// The socket is in non-blocking mode already, and its owner puts it
+    /// back: a readiness backend need not look.
+    nonblocking: bool = false,
 
     pub const Address = union(enum) {
         ip: Io.net.IpAddress,
