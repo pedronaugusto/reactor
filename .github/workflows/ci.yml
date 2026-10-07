@@ -1,3 +1,5 @@
+# The family's gate (preflight's reusable workflows): fast per push, merge once
+# per wave, release before a cut.
 name: CI
 on:
   push:
