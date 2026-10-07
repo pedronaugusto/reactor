@@ -6,6 +6,7 @@ test {
     _ = @import("runtime_test.zig");
     _ = @import("uring_test.zig");
     _ = @import("backends_test.zig");
+    _ = @import("handoff_test.zig");
     _ = @import("backend/readiness/records_test.zig");
     _ = @import("threaded_test.zig");
 }

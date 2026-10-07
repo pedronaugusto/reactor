@@ -1,7 +1,9 @@
 //! Running a call where it holds up no worker: on a lane, the task parked
 //! meanwhile; inline when the runtime has no lanes, the lane's queue is
-//! full, or the caller is a thread outside the runtime; or "borrowed": std's
-//! code run on the worker itself, for calls that never block.
+//! full, or the caller is a thread outside the runtime; on the worker inside
+//! a blocking bracket, which the monitor rescues by handing the processor
+//! on; or "borrowed": std's code run on the worker itself, for calls that
+//! never block.
 const std = @import("std");
 const Io = std.Io;
 
@@ -94,6 +96,18 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
 fn direct(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
     lanes.countInline(lane);
     return @call(.auto, func, args);
+}
+
+/// std's code run on the calling worker, inside a blocking call's bracket:
+/// should it block, the monitor hands the worker's processor to a spare
+/// thread and the task goes on wherever it lands. For calls that may block
+/// on a disk but never call back into their own `Io`. Null when no bracket
+/// can be had here (no handoff, the home processor): nothing ran.
+pub fn onWorker(func: anytype, args: anytype) ?ReturnOf(@TypeOf(func)) {
+    var b = Scheduler.enterBlocking() orelse return null;
+    const result = borrow(func, args);
+    Scheduler.leaveBlocking(&b);
+    return result;
 }
 
 /// std's code run on the calling worker: for calls that never block and

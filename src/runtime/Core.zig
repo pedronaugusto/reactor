@@ -122,6 +122,9 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0 });
     errdefer c.lanes.deinit(gpa);
 
+    try c.initMonitor(workers);
+    errdefer c.deinitMonitor();
+
     c.home_stack = memory.reserve(home_stack_size) catch return error.SystemResources;
     errdefer memory.release(c.home_stack);
     memory.protect(c.home_stack[0..memory.pageSize()]) catch return error.SystemResources;
@@ -132,6 +135,29 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     c.root.processor = home;
     home.current = &c.root;
     Scheduler.enter(home);
+}
+
+/// The monitor, as the options ask, and the spare pool handoff draws on.
+/// Handoff needs a poller any thread may wait on (epoll, kqueue), workers
+/// to hand from, and tasks free to move (`stealing`).
+fn initMonitor(c: *Core, workers: u16) InitError!void {
+    const kind = c.backendKind();
+    const readiness = kind == .epoll or kind == .kqueue;
+    const on = c.options.monitor orelse (workers > 0 and readiness);
+    if (!on) return;
+    const handoff = readiness and workers > 0 and c.scheduler.scheduling == .stealing;
+    const cap: u16 = if (handoff) c.options.spares orelse @max(workers / 2, 1) else 0;
+    c.scheduler.spares = try .init(c.gpa, c.processors.len, cap);
+    errdefer c.scheduler.spares.deinit(c.gpa);
+    c.scheduler.monitor = try .init(c.gpa, c.processors.len, handoff, c.options.handoff_after, c.options.report_after);
+}
+
+fn deinitMonitor(c: *Core) void {
+    if (c.scheduler.monitor) |*m| {
+        m.deinit(c.gpa);
+        c.scheduler.spares.deinit(c.gpa);
+        c.scheduler.monitor = null;
+    }
 }
 
 fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
@@ -161,6 +187,9 @@ pub fn start(c: *Core) StartError!void {
     for (c.processors[1..]) |*p| {
         p.thread = std.Thread.spawn(.{ .stack_size = 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
     }
+    if (c.scheduler.monitor) |*m| {
+        m.thread = std.Thread.spawn(.{ .stack_size = 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
+    }
     c.started = true;
 }
 
@@ -182,6 +211,11 @@ pub fn stop(c: *Core) void {
     assert(c.scheduler.live.load(.acquire) == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
+    if (c.scheduler.monitor) |*m| {
+        m.stop();
+        // Spares, and workers waiting as spares, see the stop.
+        c.scheduler.spares.stop();
+    }
     for (c.processors[1..]) |*p| if (p.thread) |t| t.join();
     c.started = false;
 }
@@ -190,6 +224,7 @@ pub fn deinit(c: *Core) void {
     c.stop();
     assert(c.scheduler.live.load(.acquire) == 0);
     Scheduler.leave();
+    c.deinitMonitor();
     c.lanes.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
     memory.release(c.home_stack);

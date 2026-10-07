@@ -40,6 +40,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/scheduler/Task.zig",
         "src/scheduler/run_queue.zig",
         "src/scheduler/inbox.zig",
+        "src/scheduler/Monitor.zig",
+        "src/scheduler/Spares.zig",
     } },
     .{ .name = "operations", .patterns = &.{
         "src/ops.zig",

@@ -31,6 +31,17 @@ fn onLane(r: *Core, comptime lane: Lanes.Lane, comptime name: []const u8, args: 
     return lane_call.call(&r.scheduler, &r.lanes, lane, @field(lane_io.vtable, name), .{lane_io.userdata} ++ args);
 }
 
+/// A file call per `Options.files` where it is no ring operation: on the
+/// worker inside a blocking bracket where handoff can rescue it, else on
+/// the `general` lane.
+fn perFiles(r: *Core, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
+    if (r.options.files == .auto) {
+        const b = r.lanes.borrowedIo();
+        if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ args)) |result| return result;
+    }
+    return onLane(r, .general, name, args);
+}
+
 fn borrowed(r: *Core, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
     const b = r.lanes.borrowedIo();
     return lane_call.borrow(@field(b.vtable, name), .{b.userdata} ++ args);
@@ -73,7 +84,7 @@ fn fileOnRing(r: *Core) bool {
 
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return onLane(r, .general, "fileReadPositional", .{ file, data, offset });
+    if (!fileOnRing(r)) return perFiles(r, "fileReadPositional", .{ file, data, offset });
     // A positional read may be short: the first buffer with room.
     const buffer = for (data) |d| {
         if (d.len > 0) break d;
@@ -103,7 +114,7 @@ fn cachedRead(fd: posix.fd_t, buffer: []u8, offset: u64) ?usize {
 
 pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return onLane(r, .general, "fileWritePositional", .{ file, header, data, splat, offset });
+    if (!fileOnRing(r)) return perFiles(r, "fileWritePositional", .{ file, header, data, splat, offset });
     // A positional write may be short: the first bytes there are.
     const bytes = first: {
         if (header.len > 0) break :first header;
