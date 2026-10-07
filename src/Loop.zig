@@ -34,7 +34,7 @@ pub const Options = struct {
     /// The thread that will own the loop.
     owner: Owner = .caller,
     /// Windows: the host's completion port, which the loop shares. The host
-    /// waits on it and hands the entries that carry `completion_key` to
+    /// waits on it and hands the entries that carry `completionKey()` to
     /// `complete`; `run` then waits on nothing, so the host calls
     /// `run(.nowait)` for timers and work queued meanwhile.
     port: if (builtin.os.tag == .windows) ?std.os.windows.HANDLE else void = if (builtin.os.tag == .windows) null else {},

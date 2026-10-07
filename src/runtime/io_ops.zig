@@ -57,10 +57,7 @@ fn outsideBorrowed(r: *Core) bool {
 /// a thread outside the runtime, on a processor it hands the operation to.
 fn run(r: *Core, o: *Loop.Op, options: perform.Options) perform.Error!void {
     if (Scheduler.processor() != null) return perform.run(&r.scheduler, o, options);
-    return perform.runElsewhere(&r.scheduler, elsewhere(r), o, options.deadline) catch |err| switch (err) {
-        error.Timeout => error.Timeout,
-        error.SystemResources => error.SystemResources,
-    };
+    return perform.runElsewhere(elsewhere(r), o, options.deadline);
 }
 
 /// The processor a thread outside the runtime has run its operations:

@@ -170,9 +170,8 @@ pub fn deadline(p: *Processor, timeout: Io.Timeout) ?Io.Clock.Timestamp {
 /// From a thread outside the runtime: `o` runs on processor `p`, and the
 /// thread waits for it on a kernel futex. Nothing cancels such a thread;
 /// a deadline ends the operation as it does a task's.
-pub fn runElsewhere(s: *Scheduler, p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ Timeout, SystemResources }!void {
+pub fn runElsewhere(p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ Timeout, SystemResources }!void {
     var e: Elsewhere = .{ .op = o, .deadline = at };
-    _ = s;
     p.send(&e.errand);
     const system = Scheduler.system();
     while (e.done.load(.acquire) == 0) system.futexWaitUncancelable(u32, &e.done.raw, 0);
