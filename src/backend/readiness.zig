@@ -350,11 +350,17 @@ pub fn Readiness(comptime Poller: type) type {
                 .other => false,
                 .short_write => true,
                 .read => |read| drained: {
-                    if (read.got < read.asked) break :drained true;
-                    const available = r.available orelse break :drained false;
-                    if (read.got >= available) break :drained true;
-                    r.available = available - read.got;
-                    break :drained false;
+                    if (r.available) |available| {
+                        if (read.got >= available) break :drained true;
+                        r.available = available - read.got;
+                        break :drained false;
+                    }
+                    // Without a count, a short read drains a byte stream
+                    // alone: a datagram or a sequenced packet leaves the
+                    // next one queued.
+                    if (read.got >= read.asked) break :drained false;
+                    if (r.stream == null) r.stream = calls.isStream(r.fd);
+                    break :drained r.stream.?;
                 },
             };
             if (drained) {

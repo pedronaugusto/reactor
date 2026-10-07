@@ -284,6 +284,34 @@ test "datagrams: a receive waits for one, a send delivers it" {
     }
 }
 
+test "short reads of datagrams queued together each return one, none waits for more" {
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 1);
+        defer r.deinit();
+        const io = r.io();
+        const any: net.IpAddress = .{ .ip4 = .loopback(0) };
+        var a = try any.bind(io, .{ .mode = .dgram });
+        defer a.close(io);
+        var b = try any.bind(io, .{ .mode = .dgram });
+        defer b.close(io);
+        // The first read waits, so the socket is registered and its event
+        // says what is queued.
+        var buffer: [64]u8 = undefined;
+        var first = try io.concurrent(readOne, .{ io, a.handle, &buffer });
+        try io.sleep(.fromMilliseconds(2), .awake);
+        for ([_][]const u8{ "one", "two", "three" }) |m| try b.send(io, &a.address, m);
+        try testing.expectEqual(@as(usize, 3), try first.await(io));
+        // Each read is short of its buffer, and the next is still there.
+        try testing.expectEqual(@as(usize, 3), try readOne(io, a.handle, &buffer));
+        try testing.expectEqual(@as(usize, 5), try readOne(io, a.handle, &buffer));
+        // Queued before any read: each read is made at once.
+        for ([_][]const u8{ "four", "five", "six" }) |m| try b.send(io, &a.address, m);
+        try io.sleep(.fromMilliseconds(2), .awake);
+        for ([_]usize{ 4, 4, 3 }) |len| try testing.expectEqual(len, try readOne(io, a.handle, &buffer));
+    }
+}
+
 fn writeLater(io: Io, file: Io.File, bytes: []const u8) !void {
     try io.sleep(.fromMilliseconds(3), .awake);
     var w = file.writerStreaming(io, &.{});

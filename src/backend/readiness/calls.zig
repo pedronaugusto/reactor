@@ -116,6 +116,15 @@ fn writeTotal(data: []const []const u8, splat: usize) usize {
     return n + data[data.len - 1].len * splat;
 }
 
+/// Whether `fd` is a byte-stream socket, whose short read means it is
+/// drained.
+pub fn isStream(fd: posix.fd_t) bool {
+    var kind: i32 = 0;
+    var len: posix.socklen_t = @sizeOf(i32);
+    const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, @ptrCast(&kind), &len); // safe: the option is an int, its length given
+    return posix.errno(rc) == .SUCCESS and kind == posix.SOCK.STREAM;
+}
+
 /// Whether `fd` is ready `direction`'s way now (an error or a hang-up
 /// counts: the call then reports it).
 pub fn ready(fd: posix.fd_t, direction: Direction) bool {

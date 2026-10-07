@@ -85,6 +85,8 @@ pub fn Records(comptime Waiter: type) type {
             /// event says), less what reads have taken since; null where
             /// the poller does not say.
             available: ?u64 = null,
+            /// Whether the descriptor is a byte stream, once asked.
+            stream: ?bool = null,
             /// A listening socket the backend switched to non-blocking mode.
             listener: bool = false,
             /// Events in a row that found nobody waiting: at two the record
