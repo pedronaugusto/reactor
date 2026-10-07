@@ -61,9 +61,11 @@ const Packed = if (is_windows) extern union {
     net_send: extern struct { handle: net.Socket.Handle, flags: u32, messages_len: u32, messages_ptr: [*]net.OutgoingMessage },
     net_read: extern struct { handle: net.Socket.Handle, data_len: u32, control_len: u32, data_ptr: [*][]u8, control_ptr: [*]u8 },
     net_write: extern struct { handle: net.Socket.Handle, splat: u32, header_len: u32, header_ptr: [*]const u8, data_ptr: [*]const []const u8, data_len: u32, control_len: u32, control_ptr: [*]const u8 },
+    device_io_control: extern struct { handle: Io.File.Handle, flags: u32, code: u32, in_ptr: [*]const u8, in_len: usize, out_ptr: [*]u8, out_len: usize },
 
     comptime {
-        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata));
+        // The last word is the backend's (`backendWord`).
+        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata) - @sizeOf(usize));
     }
 } else extern union {
     file_read: extern struct { handle: Io.File.Handle, flags: u32, data_ptr: [*]const []u8, data_len: usize },
@@ -99,7 +101,7 @@ pub fn pack(p: *Pending, operation: Io.Operation) void {
         .net_send => |o| d.* = .{ .net_send = .{ .handle = o.socket_handle, .flags = @as(u8, @bitCast(o.flags)), .messages_ptr = o.messages.ptr, .messages_len = o.messages.len } },
         .net_read => |o| d.* = .{ .net_read = .{ .handle = o.socket_handle, .pad = 0, .data_ptr = o.data.ptr, .data_len = o.data.len, .control_ptr = o.control.ptr, .control_len = o.control.len } },
         .net_write => |o| d.* = .{ .net_write = .{ .handle = o.socket_handle, .splat = @intCast(@min(o.splat, std.math.maxInt(u32))), .header_ptr = o.header.ptr, .header_len = o.header.len, .data_ptr = o.data.ptr, .data_len = o.data.len, .control_ptr = o.control.ptr, .control_len = o.control.len } },
-        .device_io_control => unreachable, // unreachable: device control never waits in a batch
+        .device_io_control => unreachable, // unreachable: device control waits in a batch only on Windows
     }
 }
 
@@ -114,7 +116,7 @@ pub fn unpack(p: *const Pending) Io.Operation {
         .net_send => .{ .net_send = .{ .socket_handle = d.net_send.handle, .flags = @bitCast(@as(u8, @intCast(d.net_send.flags))), .messages = d.net_send.messages_ptr[0..d.net_send.messages_len] } },
         .net_read => .{ .net_read = .{ .socket_handle = d.net_read.handle, .data = d.net_read.data_ptr[0..d.net_read.data_len], .control = d.net_read.control_ptr[0..d.net_read.control_len] } },
         .net_write => .{ .net_write = .{ .socket_handle = d.net_write.handle, .splat = d.net_write.splat, .header = d.net_write.header_ptr[0..d.net_write.header_len], .data = d.net_write.data_ptr[0..d.net_write.data_len], .control = d.net_write.control_ptr[0..d.net_write.control_len] } },
-        .device_io_control => unreachable, // unreachable: device control never waits in a batch
+        .device_io_control => unreachable, // unreachable: device control waits in a batch only on Windows
     };
 }
 
@@ -130,7 +132,7 @@ fn packWindows(d: *Packed, operation: Io.Operation) void {
         .net_send => |o| d.* = .{ .net_send = .{ .handle = o.socket_handle, .flags = @as(u8, @bitCast(o.flags)), .messages_len = short(o.messages.len), .messages_ptr = o.messages.ptr } },
         .net_read => |o| d.* = .{ .net_read = .{ .handle = o.socket_handle, .data_len = short(o.data.len), .control_len = short(o.control.len), .data_ptr = o.data.ptr, .control_ptr = o.control.ptr } },
         .net_write => |o| d.* = .{ .net_write = .{ .handle = o.socket_handle, .splat = short(o.splat), .header_len = short(o.header.len), .header_ptr = o.header.ptr, .data_ptr = o.data.ptr, .data_len = short(o.data.len), .control_len = short(o.control.len), .control_ptr = o.control.ptr } },
-        .device_io_control => unreachable, // unreachable: device control never waits in a batch
+        .device_io_control => |o| d.* = .{ .device_io_control = .{ .handle = o.file.handle, .flags = @intFromBool(o.file.flags.nonblocking), .code = @bitCast(o.code), .in_ptr = o.in.ptr, .in_len = o.in.len, .out_ptr = o.out.ptr, .out_len = o.out.len } },
     }
 }
 
@@ -142,6 +144,13 @@ fn unpackWindows(tag: Io.Operation.Tag, d: *const Packed) Io.Operation {
         .net_send => .{ .net_send = .{ .socket_handle = d.net_send.handle, .flags = @bitCast(@as(u8, @intCast(d.net_send.flags))), .messages = d.net_send.messages_ptr[0..d.net_send.messages_len] } },
         .net_read => .{ .net_read = .{ .socket_handle = d.net_read.handle, .data = d.net_read.data_ptr[0..d.net_read.data_len], .control = d.net_read.control_ptr[0..d.net_read.control_len] } },
         .net_write => .{ .net_write = .{ .socket_handle = d.net_write.handle, .splat = d.net_write.splat, .header = d.net_write.header_ptr[0..d.net_write.header_len], .data = d.net_write.data_ptr[0..d.net_write.data_len], .control = d.net_write.control_ptr[0..d.net_write.control_len] } },
-        .device_io_control => unreachable, // unreachable: device control never waits in a batch
+        .device_io_control => .{ .device_io_control = .{ .file = .{ .handle = d.device_io_control.handle, .flags = .{ .nonblocking = d.device_io_control.flags != 0 } }, .code = @bitCast(d.device_io_control.code), .in = d.device_io_control.in_ptr[0..d.device_io_control.in_len], .out = d.device_io_control.out_ptr[0..d.device_io_control.out_len] } },
     };
+}
+
+/// Windows: the word after the packed operation, the backend's own (its
+/// record of the call while the kernel holds it).
+pub fn backendWord(p: *Pending) *usize {
+    comptime assert(is_windows);
+    return &p.userdata[p.userdata.len - 1];
 }

@@ -33,6 +33,11 @@ pub const Options = struct {
     uring_off: UringFeatures = .{},
     /// The thread that will own the loop.
     owner: Owner = .caller,
+    /// Windows: the host's completion port, which the loop shares. The host
+    /// waits on it and hands the entries that carry `completion_key` to
+    /// `complete`; `run` then waits on nothing, so the host calls
+    /// `run(.nowait)` for timers and work queued meanwhile.
+    port: if (builtin.os.tag == .windows) ?std.os.windows.HANDLE else void = if (builtin.os.tag == .windows) null else {},
 };
 
 pub const Owner = enum {
@@ -127,24 +132,13 @@ const List = struct {
 /// Builds the backend `options` names. io_uring: the calling thread is
 /// the ring's only submitter for the loop's life.
 pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
-    _ = gpa;
-    const entries = options.submission_entries orelse ringEntries(options.max_ops);
+    const linux = builtin.os.tag == .linux;
+    const windows = builtin.os.tag == .windows;
     const native: backends.Backend = switch (options.backend) {
-        .auto, .io_uring => if (builtin.os.tag == .linux) .{
-            .io_uring = backends.Uring.init(.{
-                .entries = entries,
-                // The kernel takes at most 65,536; operations beyond the
-                // queue's size wait in the kernel (no completion is dropped).
-                .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
-                .off = @bitCast(options.uring_off),
-                .disabled = options.owner == .adopter,
-            }) catch |err| return switch (err) {
-                error.BackendUnavailable => error.BackendUnavailable,
-                error.SystemResources => error.SystemResources,
-                error.Unexpected => error.Unexpected,
-            },
-        } else return error.BackendUnavailable,
-        .epoll, .kqueue, .iocp => return error.BackendUnavailable,
+        .auto => if (linux) try uringBackend(options) else if (windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
+        .io_uring => if (linux) try uringBackend(options) else return error.BackendUnavailable,
+        .iocp => if (windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
+        .epoll, .kqueue => return error.BackendUnavailable,
     };
     l.* = .{
         .backend = native,
@@ -155,20 +149,39 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
     };
 }
 
+fn uringBackend(options: Options) InitError!backends.Backend {
+    const entries = options.submission_entries orelse ringEntries(options.max_ops);
+    return .{ .io_uring = backends.Uring.init(.{
+        .entries = entries,
+        // The kernel takes at most 65,536; operations beyond the queue's
+        // size wait in the kernel (no completion is dropped).
+        .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
+        .off = @bitCast(options.uring_off),
+        .disabled = options.owner == .adopter,
+    }) catch |err| return switch (err) {
+        error.BackendUnavailable => error.BackendUnavailable,
+        error.SystemResources => error.SystemResources,
+        error.Unexpected => error.Unexpected,
+    } };
+}
+
+fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
+    return .{ .iocp = try backends.Iocp.init(gpa, .{ .port = options.port, .slots = options.max_ops }) };
+}
+
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
         .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
-        .custom => {},
+        .iocp, .custom => {},
     }
 }
 
 pub fn deinit(l: *Loop, gpa: Allocator) void {
-    _ = gpa;
     assert(l.in_flight == 0);
-    l.backend.deinit();
+    l.backend.deinit(gpa);
     l.* = undefined;
 }
 
@@ -218,7 +231,13 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
         else => {},
     }
     o.state.phase = .kernel;
-    try l.backend.submit(o);
+    errdefer o.state.phase = .idle;
+    // Finished at once (IOCP's skip on success): delivered by the next
+    // `run`, as a completion finished at submit always is.
+    if (try l.backend.submit(o)) {
+        o.state.phase = .done;
+        l.ready.push(o);
+    }
 }
 
 /// Asks the kernel to end `o`. Its completion still arrives: `Canceled`,
@@ -236,7 +255,10 @@ pub fn cancel(l: *Loop, o: *Op) void {
         },
         .kernel => if (!o.state.canceled) {
             o.state.canceled = true;
-            l.backend.cancel(o);
+            if (l.backend.cancel(o)) {
+                o.state.phase = .done;
+                l.ready.push(o);
+            }
         },
     }
 }
@@ -282,8 +304,10 @@ pub fn reap(l: *Loop, out: []*Op) []*Op {
     return out[0..n];
 }
 
-/// Readable when `run(.nowait)` has work: io_uring an eventfd the ring
-/// signals. For a host's epoll, GLib or CFRunLoop.
+/// What a host waits on for `run(.nowait)`'s work. io_uring: an eventfd the
+/// ring signals, readable then (for a host's epoll, GLib or CFRunLoop).
+/// IOCP: the completion port (ports cannot be waited on by other means; a
+/// host with a port of its own shares it through `Options.port`).
 pub fn backendHandle(l: *Loop) error{ Unsupported, SystemResources, Unexpected }!Io.File.Handle {
     return try l.backend.handle() orelse error.Unsupported;
 }
@@ -303,6 +327,29 @@ pub fn nextTimeout(l: *const Loop) ?Io.Duration {
 pub fn wake(l: *Loop) void {
     l.woken.store(true, .release);
     l.backend.wake();
+}
+
+/// Windows: one entry a host took from its completion port (laid out as
+/// `OVERLAPPED_ENTRY`).
+pub const PortEntry = if (builtin.os.tag == .windows) backends.Iocp.Entry else void;
+
+/// Windows: the completion key of reactor's entries, on any port.
+pub fn completionKey() usize {
+    if (builtin.os.tag != .windows) @compileError("completion keys are Windows'");
+    return backends.Iocp.key();
+}
+
+/// Windows, with `Options.port`: delivers the completions in `entries`, the
+/// ones the host took from its port that carry `completionKey()`, as
+/// `run` would (callbacks run, or queued for `reap`). Returns how many.
+pub fn complete(l: *Loop, entries: []const PortEntry) u32 {
+    l.assertOwner();
+    var counted: Counted = .{ .loop = l };
+    switch (l.backend) {
+        .iocp => |*b| if (builtin.os.tag == .windows) b.complete(entries, &counted),
+        .io_uring, .custom => {},
+    }
+    return counted.count + l.deliverReady();
 }
 
 // The loop's own.

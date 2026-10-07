@@ -114,8 +114,8 @@ pub const vtable: Io.VTable = .{
     .processSetCurrentPath = route.borrowed("processSetCurrentPath"),
     .processReplace = route.borrowed("processReplace"),
     .processSpawn = route.onLane(general, "processSpawn"),
-    .childWait = route.onLane(.wait, "childWait"),
-    .childKill = route.onLane(.wait, "childKill"),
+    .childWait = io_ops.childWait,
+    .childKill = io_ops.childKill,
 
     .progressParentFile = route.borrowed("progressParentFile"),
     .inheritParentDir = route.borrowed("inheritParentDir"),

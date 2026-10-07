@@ -86,7 +86,12 @@ pub fn control(handle: Handle, code: windows.CTL_CODE, in: []const u8, out: []u8
 /// Sets a socket option, as `setsockopt` would.
 pub fn setOption(handle: Handle, level: i32, name: u32, value: anytype) error{ SystemResources, Unexpected }!void {
     var v = value;
-    const info: AFD.SOCKOPT_INFO = .{ .mode = .set, .level = level, .optname = name, .optval = &v, .optlen = @sizeOf(@TypeOf(v)) };
+    return option(handle, .set, level, name, std.mem.asBytes(&v));
+}
+
+/// A socket option call, its value as bytes.
+pub fn option(handle: Handle, mode: AFD.SOCKOPT_INFO.Mode, level: i32, name: u32, value: []u8) error{ SystemResources, Unexpected }!void {
+    const info: AFD.SOCKOPT_INFO = .{ .mode = mode, .level = level, .optname = name, .optval = value.ptr, .optlen = value.len };
     return switch (control(handle, IOCTL.SOCKOPT, std.mem.asBytes(&info), &.{})) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,
@@ -141,3 +146,35 @@ pub fn deferAccept(listener: Handle, sequence: u32) void {
     const info: AFD.DEFER_ACCEPT_INFO = .{ .Sequence = sequence, .Reject = .FALSE };
     _ = control(listener, IOCTL.DEFER_ACCEPT, std.mem.asBytes(&info), &.{});
 }
+
+/// `AFD_POLL`'s events: what makes a socket ready.
+pub const events = struct {
+    pub const receive: u32 = 0x0001;
+    pub const receive_expedited: u32 = 0x0002;
+    pub const send: u32 = 0x0004;
+    pub const disconnect: u32 = 0x0008;
+    pub const abort: u32 = 0x0010;
+    pub const local_close: u32 = 0x0020;
+    pub const accept: u32 = 0x0080;
+    pub const connect_fail: u32 = 0x0100;
+
+    /// Data, end of stream, a pending connection, or an error.
+    pub const readable = receive | disconnect | abort | local_close | accept | connect_fail;
+    /// Room to send, or an error.
+    pub const writable = send | abort | local_close | connect_fail;
+};
+
+/// `AFD_POLL_INFO` for one socket: in, the events asked for; out, those
+/// that are ready.
+pub const PollInfo = extern struct {
+    timeout: i64,
+    count: u32,
+    exclusive: u32,
+    handles: [1]PollHandle,
+};
+
+pub const PollHandle = extern struct {
+    handle: Handle,
+    events: u32,
+    status: Status,
+};

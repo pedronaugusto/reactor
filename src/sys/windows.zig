@@ -130,8 +130,48 @@ pub fn cancel(handle: Handle, iosb: ?*const IoStatusBlock) void {
     _ = cancelAll(handle, iosb, &result);
 }
 
+/// Closes `handle`, forgetting its binding first: the next handle to get
+/// its number starts unbound.
 pub fn close(handle: Handle) void {
+    forget(handle);
     _ = windows.ntdll.NtClose(handle);
+}
+
+// What reactor knows of the process's bindings.
+
+/// Handles bound to a port, as far as reactor knows: a cache in front of
+/// `bind`, so a handle costs one bind call for its life. A binding is the
+/// process's (the kernel keeps one per handle, whatever thread made it),
+/// so this is too. Direct-mapped: a handle another displaced is bound
+/// again, and finds itself bound already. An entry goes when reactor
+/// closes the handle (`close`, `forget`); a handle reactor bound must be
+/// closed through reactor, or its number, reused, would look bound.
+var bound: [1 << 14]std.atomic.Value(usize) = @splat(.init(0));
+
+fn slotOf(handle: Handle) *std.atomic.Value(usize) {
+    const value = @intFromPtr(handle); // safe: a handle's number, hashed
+    return &bound[(value >> 2) & (bound.len - 1)];
+}
+
+/// `bind` once per handle: whether `handle` is bound to a port (this one,
+/// or one bound before), with the port skipped on success.
+pub fn bindOnce(handle: Handle, port: Handle, key: usize) bool {
+    const slot = slotOf(handle);
+    const value = @intFromPtr(handle); // safe: a handle's number, compared
+    if (slot.load(.acquire) == value) return true;
+    switch (bind(handle, port, key)) {
+        .bound, .already => {
+            slot.store(value, .release);
+            return true;
+        },
+        .refused => return false,
+    }
+}
+
+/// `handle` is going away: drops what reactor knew of its binding.
+pub fn forget(handle: Handle) void {
+    const value = @intFromPtr(handle); // safe: a handle's number, compared
+    _ = slotOf(handle).cmpxchgStrong(value, 0, .acq_rel, .monotonic);
 }
 
 // Wait completion packets.
@@ -162,16 +202,17 @@ pub const Disarmed = enum {
     /// No entry will arrive: the wait was pending, or its entry was taken
     /// back from the port.
     removed,
-    /// The entry arrives (or arrived): the signal came first.
-    signaled,
+    /// The association ended with its entry taken from the port already.
+    delivered,
+    /// The entry is being queued, and arrives.
+    arriving,
 };
 
 pub fn disarmWaitPacket(packet: Handle) Disarmed {
     return switch (NtCancelWaitCompletionPacket(packet, .TRUE)) {
         .SUCCESS => .removed,
-        // PENDING: the entry is being queued; CANCELLED: the association
-        // ended already, its entry delivered.
-        else => .signaled,
+        .PENDING => .arriving,
+        else => .delivered,
     };
 }
 

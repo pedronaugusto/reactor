@@ -111,7 +111,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     };
 
     var made: usize = 0;
-    errdefer for (c.processors[0..made]) |*p| p.loop.backend.deinit();
+    errdefer for (c.processors[0..made]) |*p| p.loop.backend.deinit(c.gpa);
     for (c.processors, 0..) |*p, i| {
         p.* = .{ .scheduler = &c.scheduler, .index = @intCast(i), .loop = undefined };
         try c.buildLoop(p, how);

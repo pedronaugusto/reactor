@@ -265,6 +265,7 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             switch (w) {
                 .readable => |fd| sqe.prep_poll_add(fd, linux.POLL.IN),
                 .writable => |fd| sqe.prep_poll_add(fd, linux.POLL.OUT),
+                .object => unreachable, // unreachable: an object wait exists only on Windows
             }
             sqe.user_data = ud;
         },
