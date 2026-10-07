@@ -33,13 +33,16 @@ pub fn reserveSpace(len: usize) ReserveError![]align(page_size_min) u8 {
 }
 
 fn allocate(len: usize, kind: windows.MEM.ALLOCATE, protection: windows.PAGE) ReserveError![]align(page_size_min) u8 {
-    var base: windows.PVOID = undefined;
+    // A null base lets the system choose where; std types the base as a
+    // non-null pointer, so the null goes in through an optional of the
+    // same layout.
+    var base: ?windows.PVOID = null;
     var size: windows.SIZE_T = len;
-    switch (windows.ntdll.NtAllocateVirtualMemory(windows.current_process, &base, 0, &size, kind, protection)) {
+    switch (windows.ntdll.NtAllocateVirtualMemory(windows.current_process, @ptrCast(&base), 0, &size, kind, protection)) { // safe: an optional pointer has the pointer's layout, null as zero
         .SUCCESS => {},
         else => return error.SystemResources,
     }
-    const start: [*]align(page_size_min) u8 = @ptrCast(@alignCast(base)); // safe: the system hands out whole pages
+    const start: [*]align(page_size_min) u8 = @ptrCast(@alignCast(base.?)); // safe: the system hands out whole pages
     return start[0..len];
 }
 
