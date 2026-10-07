@@ -53,9 +53,12 @@ pub fn backendHandle(r: *Runtime) error{ Unsupported, SystemResources, Unexpecte
     return r.core.processors[0].loop.backendHandle();
 }
 
-/// The longest the host may wait before calling `run(.nowait)`.
+/// The longest the host may wait before calling `run(.nowait)`: zero
+/// while the home processor has a task ready or a message to serve.
 pub fn nextTimeout(r: *const Runtime) ?Io.Duration {
-    return r.core.processors[0].loop.nextTimeout();
+    const home = &r.core.processors[0];
+    if (home.hasWork()) return .zero;
+    return home.loop.nextTimeout();
 }
 
 /// From the home thread, after every task has ended: joins every thread.

@@ -131,6 +131,8 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     home.sched_context = fiber.initial(top, schedulerEntry, home);
     c.root.processor = home;
     home.current = &c.root;
+    // The root runs from here, away from the home scheduler.
+    home.away.store(true, .monotonic);
     Scheduler.enter(home);
 }
 

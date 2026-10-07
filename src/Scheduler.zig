@@ -89,6 +89,10 @@ pub const Processor = struct {
     /// Set while the processor may be waiting in the kernel: a producer that
     /// sees it wakes the loop.
     sleeping: std.atomic.Value(bool) = .init(false),
+    /// Set while the root runs on this (the home) processor: its scheduler
+    /// is not looking, and a host may hold the thread waiting on the
+    /// loop's handle, so a producer wakes the loop as for `sleeping`.
+    away: std.atomic.Value(bool) = .init(false),
     /// The root's `run(mode)` the home processor is serving.
     serving: ?Serving = null,
     thread: ?std.Thread = null,
@@ -194,13 +198,26 @@ pub const Processor = struct {
     /// From any thread: `t` runs on this processor next time it looks.
     pub fn pushRemote(p: *Processor, t: *Task) void {
         _ = p.inbox.push(t);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
     }
 
     /// From any thread: `e` runs on this processor's thread.
     pub fn send(p: *Processor, e: *Errand) void {
         _ = p.errands.push(e);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
+    }
+
+    /// After a push from another thread: a processor waiting in the kernel,
+    /// or whose scheduler the root holds away, is woken through its loop.
+    fn wakeIfIdle(p: *Processor) void {
+        if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) p.loop.wake();
+    }
+
+    /// Whether this processor has a task to run or a message to serve: a
+    /// host driving the home processor calls `run` again at once.
+    pub fn hasWork(p: *const Processor) bool {
+        return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or
+            !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty();
     }
 
     /// The owner's: this processor's kernel queue now holds one more
@@ -221,7 +238,7 @@ pub const Processor = struct {
     /// From any thread: this processor checks `t`'s wait for a cancel.
     pub fn pushCancel(p: *Processor, t: *Task) void {
         _ = p.cancels.push(t);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
     }
 
     /// The scheduler, on this processor's thread, until the runtime stops
@@ -300,8 +317,16 @@ pub const Processor = struct {
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
         t.slice_start = 0;
+        const root = t == p.scheduler.root;
+        if (root) {
+            // A push that came before `away` was set would wait for the
+            // root's next park: make the loop's handle ready for it now.
+            p.away.store(true, .seq_cst);
+            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty()) p.loop.wake();
+        }
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
+        if (root) p.away.store(false, .monotonic);
         p.afterSwitch(t, back);
     }
 

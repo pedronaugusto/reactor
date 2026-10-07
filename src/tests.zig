@@ -8,4 +8,5 @@ test {
     _ = @import("threaded_test.zig");
     _ = @import("ext_test.zig");
     _ = @import("net_test.zig");
+    _ = @import("uring_ext_test.zig");
 }
