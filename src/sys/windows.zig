@@ -1,14 +1,16 @@
-//! The Windows calls reactor makes that std does not declare: completion
-//! ports, wait completion packets that tie a kernel object's signal to a
-//! port, waitable timers (high resolution where the system has them), a
-//! file's port binding, and AFD's readiness poll. The thread information
-//! block's stack fields the fiber switch keeps are here too.
+//! The Windows calls reactor makes that std does not declare, and thin
+//! wrappers over the ones it does: completion ports, a handle's binding to
+//! a port, wait completion packets (a kernel object's signal delivered as
+//! a port entry), waitable timers (high resolution where the system has
+//! them), and cancelling a handle's I/O. The thread information block's
+//! stack fields the fiber switch keeps are here too.
 const builtin = @import("builtin");
 const std = @import("std");
 const windows = std.os.windows;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
 const Boolean = windows.BOOLEAN;
+const IoStatusBlock = windows.IO_STATUS_BLOCK;
 
 /// One completion taken from a port: `FILE_IO_COMPLETION_INFORMATION`,
 /// laid out as Win32's `OVERLAPPED_ENTRY`, so a host's
@@ -18,64 +20,188 @@ pub const Entry = extern struct {
     key: usize,
     /// The call's context: what reactor passes as the APC context.
     context: usize,
-    iosb: windows.IO_STATUS_BLOCK,
+    iosb: IoStatusBlock,
 };
 
-pub const io_completion_all_access: u32 = 0x1f0003;
-pub const timer_all_access: u32 = 0x1f0003;
-pub const generic_all: u32 = 0x10000000;
+const io_completion_all_access: u32 = 0x1f0003;
+const timer_all_access: u32 = 0x1f0003;
+const wait_packet_all_access: u32 = 0x1f0003;
 
-pub const TimerType = enum(c_int) { notification = 0, synchronization = 1 };
+const TimerType = enum(c_int) { notification = 0, synchronization = 1 };
 
-pub extern "ntdll" fn NtCreateIoCompletion(handle: *Handle, access: u32, attributes: ?*anyopaque, threads: u32) callconv(.winapi) Status;
-pub extern "ntdll" fn NtSetIoCompletion(port: Handle, key: usize, context: usize, status: Status, information: usize) callconv(.winapi) Status;
-pub extern "ntdll" fn NtRemoveIoCompletionEx(port: Handle, entries: [*]Entry, count: u32, removed: *u32, timeout: ?*const i64, alertable: Boolean) callconv(.winapi) Status;
-pub extern "ntdll" fn NtCreateWaitCompletionPacket(handle: *Handle, access: u32, attributes: ?*anyopaque) callconv(.winapi) Status;
-pub extern "ntdll" fn NtAssociateWaitCompletionPacket(packet: Handle, port: Handle, target: Handle, key: usize, context: usize, status: Status, information: usize, already_signaled: ?*Boolean) callconv(.winapi) Status;
-pub extern "ntdll" fn NtCancelWaitCompletionPacket(packet: Handle, remove_signaled: Boolean) callconv(.winapi) Status;
-pub extern "ntdll" fn NtCreateTimer(handle: *Handle, access: u32, attributes: ?*anyopaque, kind: TimerType) callconv(.winapi) Status;
-pub extern "ntdll" fn NtSetTimer(timer: Handle, due: *const i64, apc: ?*anyopaque, context: ?*anyopaque, resume_system: Boolean, period: i32, previous: ?*Boolean) callconv(.winapi) Status;
+extern "ntdll" fn NtCreateIoCompletion(handle: *Handle, access: u32, attributes: ?*anyopaque, threads: u32) callconv(.winapi) Status;
+extern "ntdll" fn NtSetIoCompletion(port: Handle, key: usize, context: usize, status: Status, information: usize) callconv(.winapi) Status;
+extern "ntdll" fn NtRemoveIoCompletionEx(port: Handle, entries: [*]Entry, count: u32, removed: *u32, timeout: ?*const i64, alertable: Boolean) callconv(.winapi) Status;
+extern "ntdll" fn NtCreateWaitCompletionPacket(handle: *Handle, access: u32, attributes: ?*anyopaque) callconv(.winapi) Status;
+extern "ntdll" fn NtAssociateWaitCompletionPacket(packet: Handle, port: Handle, target: Handle, key: usize, context: usize, status: Status, information: usize, already_signaled: ?*Boolean) callconv(.winapi) Status;
+extern "ntdll" fn NtCancelWaitCompletionPacket(packet: Handle, remove_signaled: Boolean) callconv(.winapi) Status;
+extern "ntdll" fn NtCreateTimer(handle: *Handle, access: u32, attributes: ?*anyopaque, kind: TimerType) callconv(.winapi) Status;
+extern "ntdll" fn NtSetTimer(timer: Handle, due: *const i64, apc: ?*anyopaque, context: ?*anyopaque, resume_system: Boolean, period: i32, previous: ?*Boolean) callconv(.winapi) Status;
 /// Windows 10 1803 and later: `flags` may ask for a high-resolution timer.
-pub extern "kernel32" fn CreateWaitableTimerExW(attributes: ?*anyopaque, name: ?[*:0]const u16, flags: u32, access: u32) callconv(.winapi) ?Handle;
+extern "kernel32" fn CreateWaitableTimerExW(attributes: ?*anyopaque, name: ?[*:0]const u16, flags: u32, access: u32) callconv(.winapi) ?Handle;
 
-pub const create_waitable_timer_high_resolution: u32 = 0x2;
+const create_waitable_timer_high_resolution: u32 = 0x2;
 
-/// A file's binding to a completion port (`FileCompletionInformation`,
-/// `FileReplaceCompletionInformation`).
-pub const CompletionInformation = extern struct {
+/// `NtCancelIoFileEx` with no request named: every request on the handle,
+/// from any thread of the process. std declares the request non-null.
+const cancelAll = @extern(*const fn (file: Handle, request: ?*const IoStatusBlock, iosb: *IoStatusBlock) callconv(.winapi) Status, .{ .name = "NtCancelIoFileEx", .library_name = "ntdll" });
+
+pub const PortError = error{ SystemResources, Unexpected };
+
+/// A completion port any number of threads may wait on.
+pub fn createPort() PortError!Handle {
+    var port: Handle = undefined;
+    return switch (NtCreateIoCompletion(&port, io_completion_all_access, null, 0)) {
+        .SUCCESS => port,
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+/// Queues an entry on `port`, from any thread.
+pub fn post(port: Handle, key: usize, context: usize, status: Status, information: usize) PortError!void {
+    return switch (NtSetIoCompletion(port, key, context, status, information)) {
+        .SUCCESS => {},
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |s| windows.unexpectedStatus(s),
+    };
+}
+
+/// How long `remove` waits: null for no limit, 0 for not at all, else a
+/// relative time in 100 ns units (the system's timer resolution applies).
+pub fn remove(port: Handle, entries: []Entry, wait_100ns: ?u64) PortError![]Entry {
+    var removed: u32 = 0;
+    const timeout: i64 = if (wait_100ns) |w| -@as(i64, @intCast(@min(w, std.math.maxInt(i63)))) else 0;
+    const status = NtRemoveIoCompletionEx(port, entries.ptr, @intCast(@min(entries.len, std.math.maxInt(u32))), &removed, if (wait_100ns == null) null else &timeout, .FALSE);
+    return switch (status) {
+        .SUCCESS => entries[0..removed],
+        .TIMEOUT, .USER_APC, .ALERTED => entries[0..0],
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => windows.unexpectedStatus(status),
+    };
+}
+
+/// A file's binding to a completion port (`FileCompletionInformation`).
+const CompletionInformation = extern struct {
     port: ?Handle,
     key: usize,
 };
 
-/// `FileIoCompletionNotificationInformation`'s flags.
-pub const skip_completion_port_on_success: u32 = 0x1;
-pub const skip_set_event_on_handle: u32 = 0x2;
-
-/// AFD's readiness events.
-pub const poll = struct {
-    pub const receive: u32 = 0x0001;
-    pub const receive_expedited: u32 = 0x0002;
-    pub const send: u32 = 0x0004;
-    pub const disconnect: u32 = 0x0008;
-    pub const abort: u32 = 0x0010;
-    pub const local_close: u32 = 0x0020;
-    pub const accept: u32 = 0x0080;
-    pub const connect_fail: u32 = 0x0100;
+pub const BindResult = enum {
+    /// Bound now to the port given.
+    bound,
+    /// Bound to a port already: each handle is bound once, for its life.
+    already,
+    /// Not a handle opened for overlapped calls, or one that cannot skip
+    /// the port on success.
+    refused,
 };
 
-pub const PollHandle = extern struct {
-    handle: Handle,
-    events: u32,
-    status: Status,
+/// Binds `handle`'s completions to `port` under `key`, and has the system
+/// queue no entry for a call that completes at once (nor signal the
+/// handle). A handle bound already gets the same modes: a call that
+/// completes at once is then finished by its caller, never by an entry.
+pub fn bind(handle: Handle, port: Handle, key: usize) BindResult {
+    var iosb: IoStatusBlock = undefined;
+    var info: CompletionInformation = .{ .port = port, .key = key };
+    const result: BindResult = switch (windows.ntdll.NtSetInformationFile(handle, &iosb, &info, @sizeOf(CompletionInformation), .Completion)) {
+        .SUCCESS => .bound,
+        .INVALID_PARAMETER => .already,
+        else => return .refused,
+    };
+    var modes: u32 = skip_completion_port_on_success | skip_set_event_on_handle;
+    return switch (windows.ntdll.NtSetInformationFile(handle, &iosb, &modes, @sizeOf(u32), .IoCompletionNotification)) {
+        .SUCCESS => result,
+        else => .refused,
+    };
+}
+
+/// `FILE_IO_COMPLETION_NOTIFICATION_INFORMATION`'s flags (a 32-bit word).
+const skip_completion_port_on_success: u32 = 0x1;
+const skip_set_event_on_handle: u32 = 0x2;
+
+/// Asks the system to end the request whose status block is `iosb`, or
+/// every request on `handle` when null. Requests end with
+/// `STATUS_CANCELLED`, unless they completed first; either way their
+/// entries still arrive.
+pub fn cancel(handle: Handle, iosb: ?*const IoStatusBlock) void {
+    var result: IoStatusBlock = undefined;
+    // NOT_FOUND: nothing left to end, its entry is on the way.
+    _ = cancelAll(handle, iosb, &result);
+}
+
+pub fn close(handle: Handle) void {
+    _ = windows.ntdll.NtClose(handle);
+}
+
+// Wait completion packets.
+
+/// A packet that turns a kernel object's signal into a port entry.
+pub fn createWaitPacket() PortError!Handle {
+    var packet: Handle = undefined;
+    return switch (NtCreateWaitCompletionPacket(&packet, wait_packet_all_access, null)) {
+        .SUCCESS => packet,
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+pub const ArmError = error{ SystemResources, Unexpected };
+
+/// Queues `context` on `port` under `key` once `target` is signaled; at
+/// once when it already is. One entry per association.
+pub fn armWaitPacket(packet: Handle, port: Handle, target: Handle, key: usize, context: usize) ArmError!void {
+    return switch (NtAssociateWaitCompletionPacket(packet, port, target, key, context, .SUCCESS, 0, null)) {
+        .SUCCESS => {},
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+pub const Disarmed = enum {
+    /// No entry will arrive: the wait was pending, or its entry was taken
+    /// back from the port.
+    removed,
+    /// The entry arrives (or arrived): the signal came first.
+    signaled,
 };
 
-/// `AFD_POLL_INFO` for one socket.
-pub const PollInfo = extern struct {
-    timeout: i64,
-    count: u32,
-    exclusive: u32,
-    handles: [1]PollHandle,
-};
+pub fn disarmWaitPacket(packet: Handle) Disarmed {
+    return switch (NtCancelWaitCompletionPacket(packet, .TRUE)) {
+        .SUCCESS => .removed,
+        // PENDING: the entry is being queued; CANCELLED: the association
+        // ended already, its entry delivered.
+        else => .signaled,
+    };
+}
+
+// Waitable timers.
+
+pub const TimerError = error{ SystemResources, Unexpected };
+
+/// A timer that resets as a wait takes its signal. High resolution where
+/// the system has them (Windows 10 1803 and later); else the system tick's.
+pub fn createTimer() TimerError!struct { Handle, bool } {
+    if (CreateWaitableTimerExW(null, null, create_waitable_timer_high_resolution, timer_all_access)) |timer| return .{ timer, true };
+    var timer: Handle = undefined;
+    return switch (NtCreateTimer(&timer, timer_all_access, null, .synchronization)) {
+        .SUCCESS => .{ timer, false },
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+/// Arms `timer` for `due`: a negative count of 100 ns units from now, or a
+/// positive system time (100 ns since 1601), which follows clock changes.
+pub fn setTimer(timer: Handle, due: i64) TimerError!void {
+    return switch (NtSetTimer(timer, &due, null, null, .FALSE, 0, null)) {
+        .SUCCESS, .TIMER_RESUME_IGNORED => {},
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+// The thread information block.
 
 /// The stack fields of the thread information block a fiber switch keeps
 /// right: Windows grows a stack by its guard page only inside these bounds,

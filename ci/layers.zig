@@ -7,6 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys.zig",
         "src/sys/memory.zig",
         "src/sys/socket.zig",
+        "src/sys/afd.zig",
         "src/sys/windows.zig",
     } },
     .{ .name = "fibers, time and lanes", .patterns = &.{
