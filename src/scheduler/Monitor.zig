@@ -7,8 +7,11 @@
 //!
 //! The samples cost the processors two stores per task switch (`passes`,
 //! `site`) and nothing else: the monitor reads its own clock. It samples
-//! every 20 µs while anything runs, backing off to 10 ms while nothing
-//! stays put, and parks when every processor waits in its kernel.
+//! every 20 µs while a worker sits in a blocking call or one task holds a
+//! processor across samples, backing off to 10 ms while tasks come and go
+//! (Go's sysmon backs off the same way), and parks when every processor
+//! waits in its kernel. A blocking call that begins while it sleeps long
+//! wakes it.
 const Monitor = @This();
 
 const builtin = @import("builtin");
@@ -105,13 +108,13 @@ pub fn run(m: *Monitor, s: anytype) void {
     var delay: u64 = shortest_ns;
     while (!s.stopping.load(.acquire)) {
         const t = now();
-        var busy = false;
+        var watching = false;
         for (s.processors, m.samples) |*p, *sample| {
-            if (m.look(s, p, sample, t)) busy = true;
+            if (m.look(s, p, sample, t)) watching = true;
         }
-        delay = if (busy) shortest_ns else @min(delay * 2, longest_ns);
+        delay = if (watching) shortest_ns else @min(delay * 2, longest_ns);
         const seen = m.word.load(.acquire);
-        if (!busy and s.allIdle()) {
+        if (!watching and s.allIdle()) {
             m.parked.store(true, .seq_cst);
             m.slow.store(true, .monotonic);
             // A processor that leaves its kernel wait after this check
@@ -127,12 +130,13 @@ pub fn run(m: *Monitor, s: anytype) void {
     }
 }
 
-/// One processor's sample; true when it is running something.
+/// One processor's sample; true when it needs watching closely: a blocking
+/// call under way, or one task holding it since the last sample.
 fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
-    var running = false;
+    var watching = false;
     const blocking = p.blocking.load(.acquire);
     if (blocking & 3 == 1) {
-        running = true;
+        watching = true;
         if (sample.blocking != blocking) {
             sample.blocking = blocking;
             sample.blocking_since = t;
@@ -143,7 +147,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
     const passes = p.passes.load(.acquire);
     // Odd while a task runs.
     if (passes & 1 == 1) {
-        running = true;
+        if (sample.passes == passes) watching = true;
         if (sample.passes != passes) {
             sample.passes = passes;
             sample.passes_since = t;
@@ -155,7 +159,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
             };
         }
     } else sample.passes = passes;
-    return running;
+    return watching;
 }
 
 fn record(m: *Monitor, stall: Stall) void {
