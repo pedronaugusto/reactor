@@ -131,8 +131,6 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     home.sched_context = fiber.initial(top, schedulerEntry, home);
     c.root.processor = home;
     home.current = &c.root;
-    // The root runs from here, away from the home scheduler.
-    home.away.store(true, .monotonic);
     Scheduler.enter(home);
 }
 
@@ -177,6 +175,13 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     };
     var m = mode;
     Scheduler.park(.{ .func = Serve.after, .context = &m });
+    // Back to the host, which may now wait on the loop's handle: work
+    // handed to the home processor from here on wakes the loop, and work
+    // handed to it before this was set makes the handle ready now.
+    const home = c.root.processor.?;
+    const p: *Processor = @ptrCast(@alignCast(home)); // safe: the root's processor is the home one
+    p.away.store(true, .seq_cst);
+    if (p.hasWork()) p.loop.wake();
 }
 
 pub fn stop(c: *Core) void {

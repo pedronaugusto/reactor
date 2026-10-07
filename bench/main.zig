@@ -9,6 +9,11 @@
 //! - echo: 64-byte messages over loopback TCP, one connection and 32.
 //! - files: cached 4 KiB positional reads.
 //! - loop: `run(.nowait)` with nothing to do.
+//! - waits: two tasks handing a turn back and forth through `reactor.wait`
+//!   on pipes, and through two `Wake`s.
+//! - lanes: `reactor.blocking` of an empty call on the `general` lane.
+//! - deadlines: 64-byte round trips on one connection, each read under
+//!   `net.Deadlines`.
 //!
 //! `--io threaded` runs the `Io` workloads on std's `Io.Threaded` instead,
 //! for the same numbers on the interface's baseline. Timings are wall-clock
@@ -98,6 +103,9 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("timers")) try sleeps(r, io, c);
     if (c.wants("echo")) try echo(r, gpa, io, c);
     if (c.wants("files")) try files(r, io, c);
+    if (c.wants("waits")) try waits(r, io, c);
+    if (c.wants("lanes")) try lanes(r, io, c);
+    if (c.wants("deadlines")) try deadlines(r, io, c);
     _ = runtime;
 }
 
@@ -326,4 +334,133 @@ fn loopIdle(r: Report, gpa: std.mem.Allocator, c: Config) !void {
     for (0..n) |_| _ = try l.run(.nowait);
     const t1 = now(io);
     try r.line("loop", "run(.nowait) with nothing ready", nsBetween(t0, t1) / @as(f64, @floatFromInt(n)), "ns/run");
+}
+
+// waits
+
+const PipeTurns = struct {
+    /// a: to the second player; b: back to the first.
+    a: [2]std.posix.fd_t,
+    b: [2]std.posix.fd_t,
+    rounds: u32,
+
+    fn first(t: *PipeTurns, io: Io) !void {
+        var byte: [1]u8 = .{0};
+        for (0..t.rounds) |_| {
+            _ = std.posix.system.write(t.a[1], &byte, 1);
+            try reactor.wait(io, .{ .readable = t.b[0] }, .none);
+            _ = std.posix.system.read(t.b[0], &byte, 1);
+        }
+    }
+
+    fn second(t: *PipeTurns, io: Io) !void {
+        var byte: [1]u8 = .{0};
+        for (0..t.rounds) |_| {
+            try reactor.wait(io, .{ .readable = t.a[0] }, .none);
+            _ = std.posix.system.read(t.a[0], &byte, 1);
+            _ = std.posix.system.write(t.b[1], &byte, 1);
+        }
+    }
+};
+
+const WakeTurns = struct {
+    a: reactor.Wake,
+    b: reactor.Wake,
+    rounds: u32,
+
+    fn first(t: *WakeTurns, io: Io) !void {
+        for (0..t.rounds) |_| {
+            t.a.signal();
+            try reactor.wait(io, .{ .wake = &t.b }, .none);
+        }
+    }
+
+    fn second(t: *WakeTurns, io: Io) !void {
+        for (0..t.rounds) |_| {
+            try reactor.wait(io, .{ .wake = &t.a }, .none);
+            t.b.signal();
+        }
+    }
+};
+
+fn waits(r: Report, io: Io, c: Config) !void {
+    if (builtin.os.tag == .windows) return;
+    const rounds: u32 = if (c.smoke) 100 else 100_000;
+    var p: PipeTurns = .{ .a = try Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true }), .b = try Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true }), .rounds = rounds };
+    defer for (p.a ++ p.b) |fd| {
+        _ = std.posix.system.close(fd);
+    };
+    const t0 = now(io);
+    var second = try io.concurrent(PipeTurns.second, .{ &p, io });
+    try p.first(io);
+    try second.await(io);
+    const t1 = now(io);
+    try r.line("waits", "wait on pipes, round trip", nsBetween(t0, t1) / @as(f64, @floatFromInt(rounds)), "ns/round");
+
+    var w: WakeTurns = .{ .a = try .init(io), .b = try .init(io), .rounds = rounds };
+    defer w.a.deinit(io);
+    defer w.b.deinit(io);
+    const t2 = now(io);
+    var other = try io.concurrent(WakeTurns.second, .{ &w, io });
+    try w.first(io);
+    try other.await(io);
+    const t3 = now(io);
+    try r.line("waits", "Wake signal and wait, round trip", nsBetween(t2, t3) / @as(f64, @floatFromInt(rounds)), "ns/round");
+}
+
+// lanes
+
+fn emptyCall() u32 {
+    return 1;
+}
+
+fn lanes(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 100 else 20_000;
+    var total: u32 = 0;
+    const t0 = now(io);
+    for (0..n) |_| total += reactor.blocking(io, .general, emptyCall, .{});
+    const t1 = now(io);
+    std.debug.assert(total == n);
+    try r.line("lanes", "blocking, empty call on general", nsBetween(t0, t1) / @as(f64, @floatFromInt(n)), "ns/call");
+}
+
+// deadlines
+
+fn deadlineClient(io: Io, address: Io.net.IpAddress, messages: usize) !void {
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var d: reactor.net.Deadlines = .init(.fromSeconds(10));
+    defer d.deinit(io);
+    var watch: reactor.net.Deadlines.Watch = .init(stream.socket.handle);
+    _ = d.add(io, &watch);
+    defer d.remove(io, &watch);
+    var message: [64]u8 = @splat('x');
+    for (0..messages) |_| {
+        var out: [1][]const u8 = .{&message};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &out } })).net_write;
+        var got: usize = 0;
+        while (got < message.len) {
+            var data: [1][]u8 = .{message[got..]};
+            const at = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromSeconds(10), .clock = .awake });
+            const result = try d.operate(io, &watch, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, at);
+            const n = (try result.net_read).data_len;
+            if (n == 0) return error.EndOfStream;
+            got += n;
+        }
+    }
+}
+
+fn deadlines(r: Report, io: Io, c: Config) !void {
+    const total: usize = if (c.smoke) 100 else 100_000;
+    const listen: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var servers: Io.Group = .init;
+    var acceptor = try io.concurrent(acceptAll, .{ io, &server, 1, &servers });
+    const t0 = now(io);
+    try deadlineClient(io, server.socket.address, total);
+    const t1 = now(io);
+    try acceptor.await(io);
+    try servers.await(io);
+    try r.line("deadlines", "64 B round trips, reads under a deadline", @as(f64, @floatFromInt(total)) / (nsBetween(t0, t1) / std.time.ns_per_s), "msg/s");
 }

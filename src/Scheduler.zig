@@ -89,9 +89,10 @@ pub const Processor = struct {
     /// Set while the processor may be waiting in the kernel: a producer that
     /// sees it wakes the loop.
     sleeping: std.atomic.Value(bool) = .init(false),
-    /// Set while the root runs on this (the home) processor: its scheduler
-    /// is not looking, and a host may hold the thread waiting on the
-    /// loop's handle, so a producer wakes the loop as for `sleeping`.
+    /// Set from the root's return to its host (`Runtime.run`) until the
+    /// root parks again: the scheduler is not looking and the host may be
+    /// waiting on the loop's handle, so a producer wakes the loop as for
+    /// `sleeping`.
     away: std.atomic.Value(bool) = .init(false),
     /// The root's `run(mode)` the home processor is serving.
     serving: ?Serving = null,
@@ -208,7 +209,7 @@ pub const Processor = struct {
     }
 
     /// After a push from another thread: a processor waiting in the kernel,
-    /// or whose scheduler the root holds away, is woken through its loop.
+    /// or whose root is back in its host, is woken through its loop.
     fn wakeIfIdle(p: *Processor) void {
         if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) p.loop.wake();
     }
@@ -317,16 +318,8 @@ pub const Processor = struct {
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
         t.slice_start = 0;
-        const root = t == p.scheduler.root;
-        if (root) {
-            // A push that came before `away` was set would wait for the
-            // root's next park: make the loop's handle ready for it now.
-            p.away.store(true, .seq_cst);
-            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty()) p.loop.wake();
-        }
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
-        if (root) p.away.store(false, .monotonic);
         p.afterSwitch(t, back);
     }
 
@@ -334,6 +327,8 @@ pub const Processor = struct {
     /// is still now, so `t` may be published to whoever will resume it.
     pub fn afterSwitch(p: *Processor, t: *Task, back: *const fiber.Switch) void {
         p.current = null;
+        // The root is back in the scheduler's hands.
+        if (t.kind == .root) p.away.store(false, .monotonic);
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
         switch (action) {
