@@ -49,6 +49,15 @@ test "shakedown's conformance suite passes on IOCP with no thread of reactor's o
     try conformance(r.io());
 }
 
+test "shakedown's conformance suite passes on IOCP with shared-nothing processors and no lanes" {
+    try skipOffWindows();
+    var r: Runtime = undefined;
+    try r.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .offload = .none, .max_tasks = 512, .stack_size = 256 << 10 });
+    defer r.deinit();
+    try r.start();
+    try conformance(r.io());
+}
+
 fn echoOnce(io: Io, server: *net.Server) !void {
     var stream = try server.accept(io);
     defer stream.close(io);
