@@ -491,3 +491,51 @@ test "the loop alone: a socket's readiness through AFD's poll" {
     try l.submit(&close);
     _ = try l.run(.nowait);
 }
+
+fn readOrCancel(io: Io, socket: net.Socket.Handle, buffer: []u8) (Io.Cancelable || Io.Operation.NetRead.Error)!usize {
+    return readOne(io, socket, buffer);
+}
+
+test "a cancel racing a receive's completion loses no byte" {
+    var r: Runtime = undefined;
+    try runtime(&r, 3);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try tcpPair(io);
+    defer for (pair) |s| s.close(io);
+    var received: usize = 0;
+    const rounds = 300;
+    for (0..rounds) |_| {
+        var buffer: [8]u8 = undefined;
+        var reading = try io.concurrent(readOrCancel, .{ io, pair[0].socket.handle, &buffer });
+        try writeAll(io, pair[1].socket.handle, "x");
+        // The byte arrives as the cancel lands: either the read has it, or
+        // it stays in the socket for the next read.
+        if (reading.cancel(io)) |n| received += n else |err| try testing.expectEqual(error.Canceled, err);
+    }
+    // Whatever the cancels left behind is still there.
+    while (received < rounds) {
+        var buffer: [rounds]u8 = undefined;
+        received += try readOne(io, pair[0].socket.handle, &buffer);
+    }
+    try testing.expectEqual(@as(usize, rounds), received);
+}
+
+test "a connect timeout ends the attempt in the kernel" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    // TEST-NET-1: nothing answers, so the attempt waits for the timeout.
+    const address: net.IpAddress = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 9 } };
+    const result = address.connect(io, .{ .mode = .stream, .timeout = .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } } });
+    if (result) |stream| {
+        stream.close(io);
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.Timeout => {},
+        // A network that refuses the route at once leaves nothing to time.
+        error.NetworkUnreachable, error.HostUnreachable => return error.SkipZigTest,
+        else => |e| return e,
+    }
+}
