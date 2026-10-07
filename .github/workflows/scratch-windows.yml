@@ -1,0 +1,25 @@
+# Scratch: reactor's tests on a Windows runner while the IOCP backend is
+# built. This branch is deleted once the backend lands.
+name: scratch windows
+on:
+  push:
+    branches: [scratch-r3-windows]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Tests
+        shell: bash
+        run: zig build test -Dci-lint=false $(cat .github/scratch-args) --summary all
+      - name: Bench
+        if: always()
+        shell: bash
+        run: |
+          if [ -s .github/scratch-bench ]; then zig build bench -Doptimize=ReleaseFast -Dci-lint=false -- $(cat .github/scratch-bench); fi
