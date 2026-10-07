@@ -57,6 +57,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/runtime/route.zig",
         "src/runtime/slots.zig",
         "src/runtime/io_ops.zig",
+        "src/runtime/child.zig",
     } },
     .{ .name = "extensions", .patterns = &.{
         "src/ext.zig",

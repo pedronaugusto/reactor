@@ -18,6 +18,7 @@ const batch = @import("../ops/batch.zig");
 const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const io_ops = @import("io_ops.zig");
+const child = @import("child.zig");
 
 const general = .general;
 
@@ -114,7 +115,7 @@ pub const vtable: Io.VTable = .{
     .processSetCurrentPath = route.borrowed("processSetCurrentPath"),
     .processReplace = route.borrowed("processReplace"),
     .processSpawn = route.onLane(general, "processSpawn"),
-    .childWait = route.onLane(.wait, "childWait"),
+    .childWait = child.childWait,
     .childKill = route.onLane(.wait, "childKill"),
 
     .progressParentFile = route.borrowed("progressParentFile"),
