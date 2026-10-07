@@ -103,16 +103,20 @@ test "a deadline past the wheel's horizon waits on the overflow list and still f
     try testing.expectEqualSlices(u64, &.{ 7, horizon + 7 }, r.fired.items);
 }
 
-test "next reports the earliest deadline exactly at level 0 and a slot start above" {
+test "next reports the earliest deadline exactly, a crowded upper slot by its start" {
     var w: Wheel = .init(0);
     var a: Wheel.Node = .{};
     w.arm(&a, 37);
     try testing.expectEqual(@as(?u64, 37), w.next());
     w.disarm(&a);
     w.arm(&a, 64 * 5 + 3);
-    try testing.expectEqual(@as(?u64, 64 * 5), w.next());
+    try testing.expectEqual(@as(?u64, 64 * 5 + 3), w.next());
     w.advance(64 * 5, &Ignore{});
     try testing.expectEqual(@as(?u64, 64 * 5 + 3), w.next());
+    var crowd: [40]Wheel.Node = @splat(.{});
+    var v: Wheel = .init(0);
+    for (&crowd, 0..) |*n, i| v.arm(n, 64 * 9 + 10 + i);
+    try testing.expectEqual(@as(?u64, 64 * 9), v.next());
 }
 
 test "a million timers armed and nearly all disarmed" {

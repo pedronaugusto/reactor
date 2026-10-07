@@ -127,11 +127,27 @@ pub fn disarm(w: *Wheel, n: *Node) void {
 pub fn next(w: *const Wheel) ?u64 {
     if (!w.due.empty()) return w.elapsed;
     for (0..levels) |level| {
-        if (w.firstSlot(level)) |slot| return w.slotStart(level, slot);
+        const slot = w.firstSlot(level) orelse continue;
+        if (level == 0) return w.slotStart(level, slot);
+        // Above level 0 the earliest deadline in a small slot is found
+        // exactly, so a wait ends once, on time; a crowded slot reports
+        // its start and is moved down there.
+        var earliest: u64 = std.math.maxInt(u64);
+        var seen: usize = 0;
+        var it = w.lists[level][slot].head;
+        while (it) |n| : (it = n.next) {
+            seen += 1;
+            if (seen > exact_scan) return w.slotStart(level, slot);
+            earliest = @min(earliest, n.deadline);
+        }
+        return earliest;
     }
     if (!w.overflow.empty()) return (w.epoch() + 1) << horizon_bits;
     return null;
 }
+
+/// How many timers `next` looks through in a slot above level 0.
+const exact_scan = 32;
 
 /// Moves time to `now` and calls `sink.fire(node)` for every timer whose
 /// deadline is at or before it, earliest first, unlinked before the call;

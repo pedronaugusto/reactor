@@ -3,6 +3,7 @@
 //! resolver's bounded lane path. On a backend without an evented form of
 //! a call, the call goes to a lane (or std's code, borrowed, where it never
 //! blocks).
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
@@ -76,6 +77,7 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
     const buffer = for (data) |d| {
         if (d.len > 0) break d;
     } else return 0;
+    if (cachedRead(file.handle, buffer, offset)) |n| return n;
     var o: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = buffer, .offset = offset } } };
     perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
@@ -83,6 +85,19 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
         error.Timeout => unreachable, // unreachable: no deadline given
     };
     return o.result.read_at;
+}
+
+/// A read the page cache can answer, answered now: one syscall that never
+/// waits on a disk (`RWF_NOWAIT`), instead of a trip through the ring.
+/// Null when the data is not cached or the call fails otherwise, which the
+/// ring then reports as std would.
+fn cachedRead(fd: posix.fd_t, buffer: []u8, offset: u64) ?usize {
+    if (builtin.os.tag != .linux) return null;
+    const linux = std.os.linux;
+    var iov: posix.iovec = .{ .base = buffer.ptr, .len = buffer.len };
+    const rc = linux.preadv2(fd, @ptrCast(&iov), 1, @bitCast(offset), linux.RWF.NOWAIT); // safe: one iovec as an array of one
+    if (linux.errno(rc) != .SUCCESS) return null;
+    return rc;
 }
 
 pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
