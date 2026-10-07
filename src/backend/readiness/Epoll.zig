@@ -1,10 +1,10 @@
 //! epoll as a readiness poller. A descriptor is registered once, for both
 //! directions and edge-triggered (`EPOLLET`), when it is first waited on;
 //! a regular file or directory refuses (`EPERM`), and is then called in
-//! place. Waits with a timeout use `epoll_pwait2`, exact to the
-//! nanosecond, where the kernel has it (5.11), else whole milliseconds,
-//! rounded up. Wakes from other threads write an eventfd; `real` and
-//! `boot` timers are one absolute timerfd each.
+//! place. A wait with a timeout waits on a timerfd armed for it, exact to
+//! the nanosecond and free of the thread's timer slack. Wakes from other
+//! threads write an eventfd; `real` and `boot` timers are one absolute
+//! timerfd each.
 const std = @import("std");
 const assert = std.debug.assert;
 const posix = std.posix;
@@ -21,6 +21,7 @@ pub const max_events = 256;
 /// Events of these keys are reactor's own, never a record's.
 const wake_key: u64 = std.math.maxInt(u64);
 const clock_keys = [2]u64{ std.math.maxInt(u64) - 1, std.math.maxInt(u64) - 2 };
+const wait_key: u64 = std.math.maxInt(u64) - 3;
 const clock_ids = [2]linux.timerfd_clockid_t{ .REALTIME, .BOOTTIME };
 const timer_abstime: u32 = 1;
 /// A realtime timer whose clock is set reports it, so the timers are
@@ -32,8 +33,8 @@ wake_fd: linux.fd_t,
 wake_pending: std.atomic.Value(bool) = .init(false),
 /// One timerfd per clock, made when the clock's first timer is armed.
 clock_fds: [2]?linux.fd_t = .{ null, null },
-/// `epoll_pwait2` works here; cleared the first time it does not.
-precise: bool = true,
+/// A timerfd a wait with a timeout waits on, made at the first.
+wait_fd: ?linux.fd_t = null,
 events: [max_events]linux.epoll_event = undefined,
 
 fn errno(rc: usize) linux.E {
@@ -62,6 +63,7 @@ pub fn deinit(e: *Epoll) void {
     for (e.clock_fds) |fd| if (fd) |f| {
         _ = linux.close(f);
     };
+    if (e.wait_fd) |fd| _ = linux.close(fd);
     _ = linux.close(e.wake_fd);
     _ = linux.close(e.epfd);
     e.* = undefined;
@@ -104,26 +106,19 @@ pub fn deregister(e: *Epoll, fd: linux.fd_t, have: readiness.Directions, leaving
     _ = linux.epoll_ctl(e.epfd, linux.EPOLL.CTL_DEL, fd, null);
 }
 
-/// Takes the kernel's events, waiting as `wait` allows.
+/// Takes the kernel's events, waiting as `wait` allows. A wait with a
+/// timeout waits on a timerfd armed for it: epoll's own timeout, even
+/// `epoll_pwait2`'s, carries the thread's timer slack (50 µs by default),
+/// a timerfd none, so a sleep ends as near its deadline as on io_uring.
 pub fn wait(e: *Epoll, timeout: Wait) readiness.PollError![]const linux.epoll_event {
     const events: []linux.epoll_event = &e.events;
     const max: u32 = @intCast(events.len);
-    const rc = switch (timeout) {
-        .nowait => linux.epoll_wait(e.epfd, events.ptr, max, 0),
-        .forever => linux.epoll_wait(e.epfd, events.ptr, max, -1),
-        .ns => |ns| if (e.precise) blk: {
-            const ts: linux.kernel_timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
-            const r = linux.syscall6(.epoll_pwait2, @as(u32, @bitCast(e.epfd)), @intFromPtr(events.ptr), max, @intFromPtr(&ts), 0, 8); // safe: the kernel reads the timespec during the call
-            switch (errno(r)) {
-                // Older kernels, and filters that do not know the call.
-                .NOSYS, .PERM => {
-                    e.precise = false;
-                    return e.wait(timeout);
-                },
-                else => break :blk r,
-            }
-        } else linux.epoll_wait(e.epfd, events.ptr, max, @intCast(@min(std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable, std.math.maxInt(i32)))), // unreachable: the divisor is a constant
+    const ms: i32 = switch (timeout) {
+        .nowait => 0,
+        .forever => -1,
+        .ns => |ns| if (e.armWait(ns)) -1 else @intCast(@min(std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable, std.math.maxInt(i32))), // unreachable: the divisor is a constant
     };
+    const rc = linux.epoll_wait(e.epfd, events.ptr, max, ms);
     return switch (errno(rc)) {
         .SUCCESS => events[0..rc],
         .INTR => events[0..0],
@@ -132,9 +127,36 @@ pub fn wait(e: *Epoll, timeout: Wait) readiness.PollError![]const linux.epoll_ev
     };
 }
 
+/// The wait timer, armed `ns` from now; false when there is none to arm
+/// (then the wait rounds its timeout up to milliseconds). It may fire
+/// after a later wait has begun, which then wakes once for nothing.
+fn armWait(e: *Epoll, ns: u64) bool {
+    const fd = e.wait_fd orelse blk: {
+        const rc = linux.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
+        if (errno(rc) != .SUCCESS) return false;
+        const fd: linux.fd_t = @intCast(rc);
+        // Edge-triggered: an expiry wakes one wait, with nothing to read.
+        var event: linux.epoll_event = .{ .events = linux.EPOLL.IN | linux.EPOLL.ET, .data = .{ .u64 = wait_key } };
+        if (errno(linux.epoll_ctl(e.epfd, linux.EPOLL.CTL_ADD, fd, &event)) != .SUCCESS) {
+            _ = linux.close(fd);
+            return false;
+        }
+        e.wait_fd = fd;
+        break :blk fd;
+    };
+    // Zero would disarm it: a nanosecond instead.
+    const at = @max(ns, 1);
+    const spec: linux.itimerspec = .{
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+        .it_value = .{ .sec = @intCast(at / std.time.ns_per_s), .nsec = @intCast(at % std.time.ns_per_s) },
+    };
+    return errno(linux.timerfd_settime(fd, @bitCast(@as(u32, 0)), &spec, null)) == .SUCCESS;
+}
+
 pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
     const key = event.data.u64;
     if (key == wake_key) return .wake;
+    if (key == wait_key) return .ignore;
     if (key == clock_keys[0]) return .{ .clock = .real };
     if (key == clock_keys[1]) return .{ .clock = .boot };
     const bits = event.events;
