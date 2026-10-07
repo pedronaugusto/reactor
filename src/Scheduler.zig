@@ -20,6 +20,30 @@ const Inbox = @import("scheduler/inbox.zig").Inbox;
 
 pub const Scheduling = enum { stealing, per_core };
 
+/// Work another thread hands a processor, run on its thread.
+pub const Errand = struct {
+    next: ?*Errand = null,
+    run: *const fn (e: *Errand, p: *Processor) void,
+};
+
+/// Descriptors are tracked hashed into this many slots; two descriptors in
+/// one slot only make a close look at a processor it need not.
+pub const descriptor_slots = 4096;
+
+fn descriptorSlot(fd: i64) usize {
+    return @intCast(@as(u64, @bitCast(fd)) % descriptor_slots);
+}
+
+/// A processor's bit in `holders`; beyond 64 processors bits are shared.
+fn processorBit(index: u16) u64 {
+    return @as(u64, 1) << @intCast(index % 64);
+}
+
+/// Whether processor `index`'s kernel queue may hold an operation on `fd`.
+pub fn holds(s: *const Scheduler, index: u16, fd: i64) bool {
+    return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
+}
+
 /// How long a processor with nothing to do looks for work before it
 /// waits in the kernel.
 const spin_ns = 20 * std.time.ns_per_us;
@@ -52,6 +76,11 @@ pub const Processor = struct {
     pinned: Fifo = .{},
     inbox: Inbox(Task, "next") = .{},
     cancels: Inbox(Task, "cancel_next") = .{},
+    errands: Inbox(Errand, "next") = .{},
+    /// How many operations this processor's kernel queue holds on each
+    /// descriptor (hashed); `Scheduler.holders` says which processors hold
+    /// any.
+    held: [descriptor_slots]u16 = @splat(0),
     tick: u32 = 0,
     /// Set while the processor may be waiting in the kernel: a producer that
     /// sees it wakes the loop.
@@ -164,6 +193,27 @@ pub const Processor = struct {
         if (p.sleeping.load(.seq_cst)) p.loop.wake();
     }
 
+    /// From any thread: `e` runs on this processor's thread.
+    pub fn send(p: *Processor, e: *Errand) void {
+        _ = p.errands.push(e);
+        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+    }
+
+    /// The owner's: this processor's kernel queue now holds one more
+    /// operation on `fd`.
+    pub fn hold(p: *Processor, fd: i64) void {
+        const slot = descriptorSlot(fd);
+        p.held[slot] += 1;
+        if (p.held[slot] == 1) _ = p.scheduler.holders[slot].fetchOr(processorBit(p.index), .release);
+    }
+
+    /// The owner's: one fewer.
+    pub fn release(p: *Processor, fd: i64) void {
+        const slot = descriptorSlot(fd);
+        p.held[slot] -= 1;
+        if (p.held[slot] == 0) _ = p.scheduler.holders[slot].fetchAnd(~processorBit(p.index), .release);
+    }
+
     /// From any thread: this processor checks `t`'s wait for a cancel.
     pub fn pushCancel(p: *Processor, t: *Task) void {
         _ = p.cancels.push(t);
@@ -221,6 +271,12 @@ pub const Processor = struct {
             p.pushLocal(t, .completed);
             any = true;
         }
+        var errands = p.errands.takeAll();
+        while (errands) |e| {
+            errands = e.next;
+            e.run(e, p);
+            any = true;
+        }
         var cancels = p.cancels.takeAll();
         while (cancels) |t| {
             cancels = t.cancel_next;
@@ -269,7 +325,7 @@ pub const Processor = struct {
     fn block(p: *Processor) void {
         p.sleeping.store(true, .seq_cst);
         defer p.sleeping.store(false, .monotonic);
-        if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or p.scheduler.injectedLen() > 0) return;
+        if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
         if (p.index != 0 and p.scheduler.stopping.load(.acquire)) return;
         p.scheduler.idle(p, true);
         defer p.scheduler.idle(p, false);
@@ -337,7 +393,7 @@ pub const Processor = struct {
         const start = p.loop.clock.awake();
         var round: u32 = 0;
         while (true) : (round += 1) {
-            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or s.injectedLen() > 0) return true;
+            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or s.injectedLen() > 0) return true;
             if (round % 16 == 0) {
                 if (p.steal()) return true;
                 if (p.loop.clock.awake() - start > spin_ns) return false;
@@ -374,6 +430,9 @@ inject_head: ?*Task = null,
 inject_tail: ?*Task = null,
 inject_len: std.atomic.Value(u32) = .init(0),
 idle_count: std.atomic.Value(u32) = .init(0),
+/// Per descriptor slot, a bit for each processor whose kernel queue holds
+/// an operation on it.
+holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
 /// Processors spinning for work before they wait.
 searching: std.atomic.Value(u32) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),

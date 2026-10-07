@@ -211,7 +211,10 @@ fn drain(s: *Scheduler, borrowed: Io, batch: *Io.Batch, concurrency: bool) (Io.C
             complete(batch, index, result);
         } else {
             toPending(batch, t, index, operation);
+            const fd = perform.descriptorOf(.{ .io = operation }).?;
+            p.hold(fd);
             loop_internal.submitPending(&p.loop, .of(batch, i), operation) catch {
+                p.release(fd);
                 removePending(batch, index);
                 complete(batch, index, failure(operation));
                 release(batch);
@@ -339,6 +342,7 @@ pub fn completed(context: *anyopaque, token: pending.Token, outcome: pending.Out
     const index: Index = .fromIndex(token.index());
     const owner = Owner.of(batch);
     const entry = batch.storage[index.toIndex()].pending;
+    Scheduler.processor().?.release(perform.descriptorOf(.{ .io = pending.unpack(&entry) }).?);
     removePending(batch, index);
     switch (outcome) {
         .result => |result| complete(batch, index, result),

@@ -12,6 +12,8 @@ const Core = @import("Core.zig");
 const Lanes = @import("../Lanes.zig");
 const Loop = @import("../Loop.zig");
 const Scheduler = @import("../Scheduler.zig");
+const Processor = Scheduler.Processor;
+const Task = @import("../scheduler/Task.zig");
 const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const socket = @import("../sys/socket.zig");
@@ -130,8 +132,54 @@ fn closeOnRing(r: *Core, handle: posix.fd_t) void {
 pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     const r = Core.of(userdata);
     if (!native(r) or Scheduler.processor() == null) return borrowed(r, "netClose", .{sockets});
-    for (sockets) |s| closeOnRing(r, s.handle);
+    for (sockets) |s| {
+        abortElsewhere(r, s.handle);
+        closeOnRing(r, s.handle);
+    }
 }
+
+/// Another processor's kernel queue may hold an operation on `fd`, which
+/// would keep the socket open past its close: each such processor ends
+/// its operations on `fd` first, and the close waits until it has, so the
+/// number cannot be reused under a cancel still on its way.
+fn abortElsewhere(r: *Core, fd: posix.fd_t) void {
+    const me = Scheduler.processor().?;
+    const t = me.current.?;
+    for (r.processors) |*other| {
+        if (other == me or !r.scheduler.holds(other.index, fd)) continue;
+        var a: Abort = .{ .op = .{ .kind = .{ .abort = fd } }, .task = t, .scheduler = &r.scheduler, .target = other };
+        Scheduler.park(.{ .func = Abort.send, .context = &a });
+    }
+}
+
+/// An abort of a descriptor's operations, run on the processor holding them.
+const Abort = struct {
+    errand: Scheduler.Errand = .{ .run = run },
+    op: Loop.Op,
+    task: *Task,
+    scheduler: *Scheduler,
+    target: *Processor = undefined,
+
+    /// Off the closing task's stack: hand the abort to the processor.
+    fn send(context: *anyopaque, t: *Task) void {
+        _ = t;
+        const a: *Abort = @ptrCast(@alignCast(context)); // safe: `abortElsewhere` passed its `Abort`
+        a.target.send(&a.errand);
+    }
+
+    fn run(e: *Scheduler.Errand, p: *Processor) void {
+        const a: *Abort = @alignCast(@fieldParentPtr("errand", e)); // safe: the field belongs to this record
+        a.op.callback = done;
+        a.op.user_data = @intFromPtr(a); // safe: read back by `done` while the closing task waits
+        p.loop.submit(&a.op) catch a.scheduler.ready(a.task, .completed);
+    }
+
+    fn done(l: *Loop, o: *Loop.Op) void {
+        _ = l;
+        const a: *Abort = @ptrFromInt(o.user_data); // safe: `run` stored it
+        a.scheduler.ready(a.task, .completed);
+    }
+};
 
 pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
     const r = Core.of(userdata);

@@ -240,6 +240,11 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
         .close => |fd| u.submitClose(fd, ud),
+        .abort => |fd| {
+            const sqe = u.entry();
+            sqe.prep_cancel_fd(fd, linux.IORING_ASYNC_CANCEL_ALL);
+            sqe.user_data = ud;
+        },
         .timer => |deadline| {
             const ts = &o.state.scratch.io_uring.timespec;
             ts.* = timespecOf(deadline.raw.nanoseconds);

@@ -222,6 +222,7 @@ fn canceledResult(o: *const Loop.Op) Loop.Op.Result {
         .write_at => .{ .write_at = error.Canceled },
         .sync => .{ .sync = error.Canceled },
         .close => .{ .close = {} },
+        .abort => .{ .abort = 0 },
         .timer => .{ .timer = error.Canceled },
         .wait => .{ .wait = error.Canceled },
     };
@@ -250,6 +251,7 @@ pub fn defaultScript(context: ?*anyopaque, o: *Loop.Op, random: std.Random) ?Loo
         .write_at => |w| .{ .write_at = w.bytes.len },
         .sync => .{ .sync = {} },
         .close => .{ .close = {} },
+        .abort => .{ .abort = 0 },
         .timer => .{ .timer = {} },
         .wait => .{ .wait = {} },
     };

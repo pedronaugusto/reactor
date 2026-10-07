@@ -32,6 +32,7 @@ pub fn of(o: anytype, cqe: linux.io_uring_cqe) op.Result {
         .write_at => .{ .write_at = if (ours) error.Canceled else if (e == .SUCCESS) @intCast(cqe.res) else writeAt(e) },
         .sync => .{ .sync = if (ours) error.Canceled else if (e == .SUCCESS) {} else sync(e) },
         .close => .{ .close = {} },
+        .abort => .{ .abort = if (cqe.res > 0) @intCast(cqe.res) else 0 },
         .timer => .{ .timer = switch (e) {
             .TIME, .SUCCESS => {},
             else => error.Canceled,

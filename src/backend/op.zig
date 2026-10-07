@@ -15,6 +15,9 @@ pub const Kind = union(enum) {
     write_at: WriteAt,
     sync: Io.File.Handle,
     close: Io.File.Handle,
+    /// Ends every operation this loop's kernel queue holds on the
+    /// descriptor; each completes as cancelled.
+    abort: Io.File.Handle,
     /// Fires at a deadline on its clock.
     timer: Io.Clock.Timestamp,
     /// Readiness of a descriptor.
@@ -56,6 +59,8 @@ pub const Result = union {
     write_at: (Io.File.WritePositionalError || Io.Cancelable)!usize,
     sync: Io.File.SyncError!void,
     close: void,
+    /// How many operations it ended.
+    abort: usize,
     timer: Io.Cancelable!void,
     wait: (Waitable.Error || Io.Cancelable)!void,
 };

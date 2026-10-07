@@ -166,3 +166,27 @@ test "the loop alone: a timer and a wake, completions reaped" {
     defer thread.join();
     try testing.expectEqual(@as(u32, 0), try l.run(.once));
 }
+
+fn readUntilClosed(io: Io, socket: net.Socket.Handle, out: *(Io.Operation.NetRead.Error!usize)) Io.Cancelable!void {
+    var buffer: [16]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    const result = try io.operate(.{ .net_read = .{ .socket_handle = socket, .data = &data } });
+    out.* = if (result.net_read) |r| r.data_len else |err| err;
+}
+
+test "closing a socket another task is reading ends that read, on whichever processor it waits" {
+    var r: Runtime = undefined;
+    try runtime(&r, 3);
+    defer r.deinit();
+    const io = r.io();
+    for (0..20) |_| {
+        const pair = try tcpPair(io);
+        defer pair[1].close(io);
+        var outcome: Io.Operation.NetRead.Error!usize = 1234;
+        var reader = try io.concurrent(readUntilClosed, .{ io, pair[0].socket.handle, &outcome });
+        try io.sleep(.fromMilliseconds(2), .awake);
+        pair[0].close(io);
+        try reader.await(io);
+        try testing.expectError(error.SocketUnconnected, outcome);
+    }
+}

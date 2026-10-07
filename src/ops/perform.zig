@@ -47,6 +47,7 @@ const Waiter = struct {
     fn done(l: *Loop, o: *Loop.Op) void {
         _ = l;
         const w: *Waiter = @ptrFromInt(o.user_data); // safe: `run` stored the waiter's address
+        if (descriptorOf(o.kind)) |fd| w.processor.release(fd);
         w.scheduler.ready(w.task, .completed);
     }
 
@@ -68,7 +69,10 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     o.callback = Waiter.done;
     o.user_data = @intFromPtr(&w); // safe: read back by the callback while this frame waits
     if (options.cancelable) try t.enterWait(&w.hook);
+    const fd = descriptorOf(o.kind);
+    if (fd) |d| p.hold(d);
     p.loop.submit(o) catch {
+        if (fd) |d| p.release(d);
         t.leaveWait();
         return error.SystemResources;
     };
@@ -92,6 +96,31 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (w.timed_out) return error.Timeout;
 }
 
+/// The descriptor an operation waits on in the kernel, which a close
+/// elsewhere must end it on.
+pub fn descriptorOf(kind: Loop.Op.Kind) ?i64 {
+    return switch (kind) {
+        .io => |operation| switch (operation) {
+            .file_read_streaming => |o| o.file.handle,
+            .file_write_streaming => |o| o.file.handle,
+            .device_io_control => |o| o.file.handle,
+            .net_receive => |o| o.socket_handle,
+            .net_send => |o| o.socket_handle,
+            .net_read => |o| o.socket_handle,
+            .net_write => |o| o.socket_handle,
+        },
+        .accept => |fd| fd,
+        .connect => |c| c.socket,
+        .read_at => |r| r.file,
+        .write_at => |w| w.file,
+        .sync => |fd| fd,
+        .wait => |w| switch (w) {
+            .readable, .writable => |fd| fd,
+        },
+        .close, .abort, .timer => null,
+    };
+}
+
 /// Whether a completed operation's result is the kernel's cancel.
 fn canceledResult(o: *const Loop.Op) bool {
     if (!o.state.canceled) return false;
@@ -102,7 +131,7 @@ fn canceledResult(o: *const Loop.Op) bool {
         .read_at => if (o.result.read_at) |_| false else |err| err == error.Canceled,
         .write_at => if (o.result.write_at) |_| false else |err| err == error.Canceled,
         .sync => if (o.result.sync) |_| false else |err| err == error.Canceled,
-        .close => false,
+        .close, .abort => false,
         .timer => if (o.result.timer) |_| false else |err| err == error.Canceled,
         .wait => if (o.result.wait) |_| false else |err| err == error.Canceled,
     };
