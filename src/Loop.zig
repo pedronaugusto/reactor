@@ -168,7 +168,9 @@ fn uringBackend(options: Options) InitError!backends.Backend {
 }
 
 fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
-    return .{ .iocp = try backends.Iocp.init(gpa, .{ .port = options.port, .slots = options.max_ops }) };
+    // Batch operations in flight, at most 65,536 (as io_uring's completion
+    // queue): beyond, a batch operation fails as out of resources.
+    return .{ .iocp = try backends.Iocp.init(gpa, .{ .port = options.port, .slots = @min(options.max_ops, 1 << 16) }) };
 }
 
 /// The calling thread becomes the loop's owner. For a loop built with

@@ -416,3 +416,78 @@ test "a task's stack on Windows: large frames, deep recursion, a stack walk" {
     // The walk sees the frames above it on the task's stack, and stops.
     try testing.expect(out[2] >= 5);
 }
+
+test "several datagrams in one send, one request each" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    const a = try address.bind(io, .{ .mode = .dgram });
+    defer a.close(io);
+    const b = try address.bind(io, .{ .mode = .dgram });
+    defer b.close(io);
+    const words = [_][]const u8{ "one", "two", "three" };
+    var messages: [3]net.OutgoingMessage = undefined;
+    for (&messages, words) |*m, w| m.* = .{ .address = &a.address, .data_ptr = w.ptr, .data_len = w.len };
+    try b.sendMany(io, &messages, .{});
+    for (words) |w| {
+        var buffer: [16]u8 = undefined;
+        const message = try a.receive(io, &buffer);
+        try testing.expectEqualStrings(w, message.data);
+    }
+}
+
+test "device control through the port: a socket's own address, asked of AFD" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try tcpPair(io);
+    defer for (pair) |s| s.close(io);
+    var storage: Io.Threaded.PosixAddress = undefined;
+    const result = try io.operate(.{ .device_io_control = .{
+        .file = .{ .handle = pair[1].socket.handle, .flags = .{ .nonblocking = true } },
+        .code = std.os.windows.IOCTL.AFD.GET_ADDRESS,
+        .out = std.mem.asBytes(&storage),
+    } });
+    try testing.expectEqual(std.os.windows.NTSTATUS.SUCCESS, result.device_io_control.u.Status);
+    try testing.expectEqual(pair[1].socket.address.getPort(), Io.Threaded.addressFromPosix(&storage).getPort());
+}
+
+test "the loop alone: a socket's readiness through AFD's poll" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var l: Loop = undefined;
+    try l.init(testing.allocator, .{});
+    defer l.deinit(testing.allocator);
+    const system = Io.Threaded.global_single_threaded.io();
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(system, .{ .reuse_address = true });
+    defer server.deinit(system);
+    var client = try server.socket.address.connect(system, .{ .mode = .stream });
+    defer client.close(system);
+    const accepted = try server.accept(system);
+    var writable: Loop.Op = .{ .kind = .{ .wait = .{ .writable = accepted.socket.handle } }, .user_data = 1 };
+    try l.submit(&writable);
+    var readable: Loop.Op = .{ .kind = .{ .wait = .{ .readable = accepted.socket.handle } }, .user_data = 2 };
+    try l.submit(&readable);
+    var out: [2]*Loop.Op = undefined;
+    // Room to send at once; nothing to read yet.
+    _ = try l.run(.once);
+    var done = l.reap(&out);
+    try testing.expectEqual(@as(usize, 1), done.len);
+    try testing.expectEqual(@as(usize, 1), done[0].user_data);
+    try done[0].result.wait;
+    try writeAll(system, client.socket.handle, "r");
+    while (true) {
+        _ = try l.run(.once);
+        done = l.reap(&out);
+        if (done.len > 0) break;
+    }
+    try testing.expectEqual(@as(usize, 2), done[0].user_data);
+    try done[0].result.wait;
+    var close: Loop.Op = .{ .kind = .{ .close = accepted.socket.handle } };
+    try l.submit(&close);
+    _ = try l.run(.nowait);
+}
