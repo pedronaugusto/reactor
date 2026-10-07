@@ -66,8 +66,9 @@ fn failure(operation: Io.Operation) Io.Operation.Result {
     };
 }
 
+/// Whether file calls are ring operations: io_uring's, with `files = .auto`.
 fn fileOnRing(r: *Core) bool {
-    return native(r) and r.options.files == .auto and Scheduler.processor() != null;
+    return r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
 }
 
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
@@ -133,12 +134,16 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return borrowed(r, "fileClose", .{files});
+    if (!native(r) or Scheduler.processor() == null) {
+        for (files) |f| Loop.closing(f.handle);
+        return borrowed(r, "fileClose", .{files});
+    }
     for (files) |f| closeOnRing(r, f.handle);
 }
 
-/// Closes `handle` through the kernel's queue, which first ends every
-/// operation this processor's queue holds on it.
+/// Closes `handle` through the loop, which first ends every operation this
+/// processor's kernel queue holds on it (and on epoll and kqueue lets go of
+/// its registration).
 fn closeOnRing(r: *Core, handle: posix.fd_t) void {
     var o: Loop.Op = .{ .kind = .{ .close = handle } };
     perform.run(&r.scheduler, &o, .{ .cancelable = false }) catch socket.close(handle);
@@ -146,7 +151,10 @@ fn closeOnRing(r: *Core, handle: posix.fd_t) void {
 
 pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     const r = Core.of(userdata);
-    if (!native(r) or Scheduler.processor() == null) return borrowed(r, "netClose", .{sockets});
+    if (!native(r) or Scheduler.processor() == null) {
+        for (sockets) |s| Loop.closing(s.handle);
+        return borrowed(r, "netClose", .{sockets});
+    }
     for (sockets) |s| {
         abortElsewhere(r, s.handle);
         closeOnRing(r, s.handle);

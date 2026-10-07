@@ -24,6 +24,12 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/Uring.zig",
         "src/backend/uring/results.zig",
         "src/backend/wait.zig",
+        "src/backend/readiness.zig",
+        "src/backend/readiness/calls.zig",
+        "src/backend/readiness/closes.zig",
+        "src/backend/readiness/records.zig",
+        "src/backend/readiness/Epoll.zig",
+        "src/backend/readiness/Kqueue.zig",
     } },
     .{ .name = "loop", .patterns = &.{
         "src/Loop.zig",

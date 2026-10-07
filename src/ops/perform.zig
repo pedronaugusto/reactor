@@ -1,5 +1,6 @@
 //! A task waiting on one loop operation: submitted on the processor the
-//! task runs on, completed there, and cancelled there. A cancel from
+//! task runs on, completed there, and cancelled there; or not waiting at
+//! all, when the loop makes the operation at once. A cancel from
 //! another thread becomes a message to that processor, which asks its own
 //! kernel queue; the operation's completion still decides the outcome, so
 //! an operation that finished first keeps its result. A deadline is a
@@ -71,11 +72,19 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (options.cancelable) try t.enterWait(&w.hook);
     const fd = descriptorOf(o.kind);
     if (fd) |d| p.hold(d);
-    p.loop.submit(o) catch {
+    const done = p.loop.start(o) catch {
         if (fd) |d| p.release(d);
         t.leaveWait();
         return error.SystemResources;
     };
+    if (done) {
+        // Made at once (a readiness backend's call the descriptor was
+        // ready for): no park, but the task's budget pays for it.
+        if (fd) |d| p.release(d);
+        t.leaveWait();
+        s.spend();
+        return;
+    }
     var timed = false;
     if (options.deadline) |at| {
         w.timer.kind = .{ .timer = at };
