@@ -7,7 +7,7 @@
 //! - timers: a million loop timers armed, 99% cancelled before they fire;
 //!   the overshoot of 1 ms sleeps.
 //! - echo: 64-byte messages over loopback TCP, one connection and 32.
-//! - accept: connect, accept and close, over and over.
+//! - accept: connect, accept and close (the server first), over and over.
 //! - files: cached 4 KiB positional reads.
 //! - loop: `run(.nowait)` with nothing to do.
 //!
@@ -317,6 +317,11 @@ fn accepts(r: Report, io: Io, c: Config) !void {
     var acceptor = try io.concurrent(acceptLoop, .{ io, &server, n });
     for (0..n) |_| {
         const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+        // The server closes first, so the waiting state stays on its side
+        // and the client's ports are free again at once.
+        var byte: [1]u8 = undefined;
+        var data: [1][]u8 = .{&byte};
+        _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
         stream.close(io);
     }
     try acceptor.await(io);

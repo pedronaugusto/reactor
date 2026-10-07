@@ -18,6 +18,7 @@ const Task = @import("../scheduler/Task.zig");
 const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const socket = @import("../sys/socket.zig");
+const sys_file = @import("../sys/file.zig");
 
 /// Whether `r`'s loops are the kernel's, which run file and socket calls
 /// as operations of their own (else a test's fake, which runs only the
@@ -77,6 +78,12 @@ fn failure(operation: Io.Operation) Io.Operation.Result {
     };
 }
 
+/// Whether `r`'s loops are epoll's or kqueue's.
+fn readiness(r: *Core) bool {
+    const kind = r.backendKind();
+    return kind == .epoll or kind == .kqueue;
+}
+
 /// Whether file calls are ring operations: io_uring's, with `files = .auto`.
 fn fileOnRing(r: *Core) bool {
     return r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
@@ -84,7 +91,21 @@ fn fileOnRing(r: *Core) bool {
 
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return perFiles(r, "fileReadPositional", .{ file, data, offset });
+    if (!fileOnRing(r)) {
+        // The read itself inside the worker's blocking bracket: std's path
+        // around the same call costs ~10% of a cached read.
+        if (r.options.files == .auto and readiness(r)) if (Scheduler.enterBlocking()) |blocking| {
+            var b = blocking;
+            if (b.task.takeCancel()) {
+                Scheduler.leaveBlocking(&b);
+                return error.Canceled;
+            }
+            const result = sys_file.readAt(file.handle, data, offset);
+            Scheduler.leaveBlocking(&b);
+            return result;
+        };
+        return perFiles(r, "fileReadPositional", .{ file, data, offset });
+    }
     // A positional read may be short: the first buffer with room.
     const buffer = for (data) |d| {
         if (d.len > 0) break d;

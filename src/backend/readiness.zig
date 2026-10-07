@@ -54,6 +54,8 @@ pub const Decoded = union(enum) {
         write: bool = false,
         /// The poller refused the registration of this direction.
         refused: ?Direction = null,
+        /// Bytes there to read, where the poller says (kqueue).
+        available: ?u64 = null,
     },
 };
 
@@ -73,6 +75,14 @@ pub const PollError = error{ SystemResources, Unexpected };
 /// Before `fd` is closed other than through a loop: every loop's record of
 /// it becomes stale.
 pub const forget = closes.bump;
+
+/// What a waiting operation's action came to.
+const Outcome = union(enum) {
+    /// It would wait.
+    wait,
+    /// Done; what it says of what is left (`calls.progress`).
+    done: calls.Progress,
+};
 
 /// What a waiting operation is asked to do, by `Waiter.act`.
 const Action = enum {
@@ -94,7 +104,7 @@ pub const Waiter = struct {
     /// The operation's address; 0 for a batch entry.
     op: usize = 0,
     /// Acts on the operation, typed for it (operations only).
-    act: ?*const fn (w: *Waiter, fd: posix.fd_t, action: Action) bool = null,
+    act: ?*const fn (w: *Waiter, fd: posix.fd_t, action: Action) Outcome = null,
     record: u32 = records_.none,
     place: Place = .none,
     direction: Direction = .read,
@@ -111,7 +121,7 @@ pub const Waiter = struct {
 /// The actions on an operation of type `OpPtr`'s pointee.
 fn Acts(comptime OpPtr: type) type {
     return struct {
-        fn act(w: *Waiter, fd: posix.fd_t, action: Action) bool {
+        fn act(w: *Waiter, fd: posix.fd_t, action: Action) Outcome {
             const o: OpPtr = @ptrFromInt(w.op); // safe: `submit` stored this operation's address
             switch (action) {
                 .closed => o.result = closedUnder(o),
@@ -119,8 +129,12 @@ fn Acts(comptime OpPtr: type) type {
                 .attempt, .attempt_unwaitable => {
                     const may_wait = action == .attempt;
                     switch (o.kind) {
-                        .io => |operation| o.result = .{ .io = calls.make(operation) orelse if (may_wait) return false else failure(operation) },
-                        .accept => o.result = .{ .accept = calls.accept(fd) orelse if (may_wait) return false else error.SystemResources },
+                        .io => |operation| {
+                            const result = calls.make(operation) orelse if (may_wait) return .wait else failure(operation);
+                            o.result = .{ .io = result };
+                            return .{ .done = calls.progress(operation, result) };
+                        },
+                        .accept => o.result = .{ .accept = calls.accept(fd) orelse if (may_wait) return .wait else error.SystemResources },
                         .connect => {
                             o.result = .{ .connect = if (may_wait) calls.connected(fd) else error.Unexpected };
                             if (w.restore) calls.makeBlocking(fd);
@@ -130,7 +144,7 @@ fn Acts(comptime OpPtr: type) type {
                     }
                 },
             }
-            return true;
+            return .{ .done = .other };
         }
     };
 }
@@ -225,8 +239,16 @@ pub fn Readiness(comptime Poller: type) type {
                 .io => |operation| {
                     const fd, const direction = calls.subject(operation);
                     const how = calls.howOf(operation);
+                    // Known not ready: wait for the event without a call.
+                    if (how == .call and self.notReady(fd, direction)) return self.park(w, fd, direction, how);
                     if (now(operation, fd, direction, how)) |result| {
                         o.result = .{ .io = result };
+                        switch (calls.progress(operation, result)) {
+                            .other => {},
+                            else => |p| if (self.records.find(fd)) |index| {
+                                _ = self.advance(self.records.at(index), direction, p);
+                            },
+                        }
                         return true;
                     }
                     return self.park(w, fd, direction, how);
@@ -310,6 +332,36 @@ pub fn Readiness(comptime Poller: type) type {
                     return self.park(w, fd, direction, .readiness);
                 },
             }
+        }
+
+        /// Whether `fd` is known not to be ready `direction`'s way: a call
+        /// found it so, and no event has said otherwise since.
+        fn notReady(self: *Self, fd: posix.fd_t, direction: Direction) bool {
+            const index = self.records.find(fd) orelse return false;
+            const r = self.records.at(index);
+            return r.epoch == closes.epoch(fd) and r.registered.has(directions(direction)) and !r.ready.has(directions(direction));
+        }
+
+        /// What a completed call on `r`'s descriptor says of what is left;
+        /// true when it drained it.
+        fn advance(self: *Self, r: *Records.Record, direction: Direction, p: calls.Progress) bool {
+            _ = self;
+            const drained = switch (p) {
+                .other => false,
+                .short_write => true,
+                .read => |read| drained: {
+                    if (read.got < read.asked) break :drained true;
+                    const available = r.available orelse break :drained false;
+                    if (read.got >= available) break :drained true;
+                    r.available = available - read.got;
+                    break :drained false;
+                },
+            };
+            if (drained) {
+                r.ready = r.ready.without(directions(direction));
+                if (direction == .read) r.available = 0;
+            }
+            return drained;
         }
 
         /// `operation` made now if it can be without waiting.
@@ -435,11 +487,14 @@ pub fn Readiness(comptime Poller: type) type {
             w.record = index;
             w.place = .record;
             r.idle_events = 0;
+            // It waits because the descriptor is not ready this way.
+            r.ready = r.ready.without(directions(direction));
+            if (direction == .read) r.available = 0;
             r.waiters[@backingInt(direction)].append(w);
             return false;
         }
 
-        fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action) bool {
+        fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action) Outcome {
             _ = self;
             if (w.act) |f| return f(w, fd, action);
             const e = Entry.of(w);
@@ -448,11 +503,12 @@ pub fn Readiness(comptime Poller: type) type {
                 .fired => unreachable, // unreachable: a batch has no timers here
                 .attempt, .attempt_unwaitable => {
                     const operation = pending.unpack(e.token.pending());
-                    const result = calls.make(operation) orelse if (action == .attempt) return false else failure(operation);
+                    const result = calls.make(operation) orelse if (action == .attempt) return .wait else failure(operation);
                     e.outcome = .{ .result = result };
+                    return .{ .done = calls.progress(operation, result) };
                 },
             }
-            return true;
+            return .{ .done = .other };
         }
 
         /// The record of `fd`, made if there is none, and checked against
@@ -561,6 +617,12 @@ pub fn Readiness(comptime Poller: type) type {
                         r.registered = r.registered.without(directions(direction));
                         return self.serve(index, direction, .attempt_unwaitable);
                     }
+                    // Ready again, waited on or not: the next call tries.
+                    if (e.read) {
+                        r.ready = r.ready.with(.{ .read = true });
+                        r.available = e.available;
+                    }
+                    if (e.write) r.ready = r.ready.with(.{ .write = true });
                     if (r.idle()) {
                         r.idle_events += 1;
                         // No room to deregister now: the next event tries again.
@@ -589,10 +651,19 @@ pub fn Readiness(comptime Poller: type) type {
                 // A descriptor in blocking mode is called again only while
                 // it is still ready.
                 if (w.how == .ready_then_call and !first and action == .attempt and !calls.ready(r.fd, direction)) return;
-                if (self.act(w, r.fd, action)) {
-                    list.remove(w);
-                    self.finish(w);
-                } else if (w.how == .call) return;
+                switch (self.act(w, r.fd, action)) {
+                    .done => |p| {
+                        list.remove(w);
+                        self.finish(w);
+                        // Nothing left for the next: it waits for an event.
+                        if (self.advance(r, direction, p)) return;
+                    },
+                    .wait => if (w.how == .call) {
+                        r.ready = r.ready.without(directions(direction));
+                        if (direction == .read) r.available = 0;
+                        return;
+                    },
+                }
                 first = false;
                 it = next;
             }

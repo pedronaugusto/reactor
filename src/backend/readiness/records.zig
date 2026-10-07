@@ -76,6 +76,15 @@ pub fn Records(comptime Waiter: type) type {
             /// The descriptor's close epoch when it was registered.
             epoch: u32 = 0,
             registered: Directions = .{},
+            /// The ways the descriptor may be ready: cleared when a call
+            /// finds it is not (`EAGAIN`, or a short stream read or write,
+            /// which drains it), set by the next readiness event. A call
+            /// the way it is not ready waits for the event without trying.
+            ready: Directions = .both,
+            /// Bytes the poller last said were there to read (kqueue's
+            /// event says), less what reads have taken since; null where
+            /// the poller does not say.
+            available: ?u64 = null,
             /// A listening socket the backend switched to non-blocking mode.
             listener: bool = false,
             /// Events in a row that found nobody waiting: at two the record

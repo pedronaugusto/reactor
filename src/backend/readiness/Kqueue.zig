@@ -6,6 +6,13 @@
 //! run out of room for. Wakes from other threads trigger an `EVFILT_USER`
 //! event (a pipe where the system has none); `real` and `boot` timers are
 //! one `EVFILT_TIMER` each, absolute where the system has absolute timers.
+//!
+//! Darwin gets `kevent64`: asked not to wait, `kevent` there still goes
+//! through a timer and costs ~12 µs, where `KEVENT_FLAG_IMMEDIATE` costs
+//! ~0.2 µs; and its timeouts are coalesced (~130 µs late for 1 ms), where
+//! an `EVFILT_TIMER` marked `NOTE_CRITICAL` fires ~35 µs late. So a wait
+//! with a timeout arms that timer and waits without one.
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const posix = std.posix;
@@ -18,37 +25,53 @@ const Kqueue = @This();
 
 pub const name = "kqueue";
 pub const max_events = 256;
-/// Changes queued for the next call, never more than the event list holds,
-/// so a refused one always has room to come back in.
-const max_changes = max_events;
+/// Changes queued for the next call, never more than the event list holds
+/// (one is kept for the wait's own timer), so a refused one always has room
+/// to come back in.
+const max_changes = max_events - 1;
 
+const darwin = builtin.os.tag.isDarwin();
+const Event = if (darwin) c.kevent64_s else c.Kevent;
 const has_user = @hasDecl(c.EVFILT, "USER");
-/// c.Kevents of these keys are reactor's own, never a record's.
-const ignore_key: usize = std.math.maxInt(usize);
-const wake_key: usize = std.math.maxInt(usize) - 1;
-/// `EVFILT_TIMER` identifiers of the two clocks.
+/// Events of these keys are reactor's own, never a record's.
+const ignore_key: u64 = std.math.maxInt(u64);
+const wake_key: u64 = std.math.maxInt(u64) - 1;
+/// `EVFILT_TIMER` identifiers of the two clocks, and of a wait's timeout.
 const clock_ident = [2]usize{ 1, 2 };
+const wait_ident: usize = 3;
 const absolute: ?u32 = if (@hasDecl(c.NOTE, "ABSOLUTE")) c.NOTE.ABSOLUTE else if (@hasDecl(c.NOTE, "ABSTIME")) c.NOTE.ABSTIME else null;
 const continuous: u32 = if (@hasDecl(c.NOTE, "MACH_CONTINUOUS_TIME")) c.NOTE.MACH_CONTINUOUS_TIME else 0;
+/// Darwin: a timer the system fires on time rather than coalesced.
+const critical: u32 = if (@hasDecl(c.NOTE, "CRITICAL")) c.NOTE.CRITICAL else 0;
 
 kq: posix.fd_t,
-changes: [max_changes]c.Kevent = undefined,
+changes: [max_events]Event = undefined,
 change_count: usize = 0,
 wake_pending: std.atomic.Value(bool) = .init(false),
 /// Where the system has no `EVFILT_USER`: a pipe the waker writes.
 wake_pipe: if (has_user) void else [2]posix.fd_t,
 clock_armed: [2]bool = .{ false, false },
-events: [max_events]c.Kevent = undefined,
+/// Darwin: the wait timer is armed (it may fire after the wait it was for).
+wait_armed: bool = false,
+events: [max_events]Event = undefined,
 
-fn change(ident: usize, filter: anytype, flags: anytype, fflags: u32, data: i64, udata: usize) c.Kevent {
-    var e = std.mem.zeroes(c.Kevent);
+fn change(ident: usize, filter: anytype, flags: anytype, fflags: u32, data: i64, udata: u64) Event {
+    var e = std.mem.zeroes(Event);
     e.ident = ident;
     e.filter = @intCast(filter);
     e.flags = @intCast(flags);
     e.fflags = fflags;
     e.data = @intCast(data);
-    e.udata = udata;
+    e.udata = @intCast(udata);
     return e;
+}
+
+/// One call: `list` applied, events into `out`, waiting until `timeout`
+/// (null: until an event); `immediate`: not at all.
+fn call(kq: posix.fd_t, list: []const Event, out: []Event, immediate: bool, timeout: ?*const posix.timespec) isize {
+    if (darwin) return c.kevent64(kq, list.ptr, @intCast(list.len), out.ptr, @intCast(out.len), .{ .IMMEDIATE = immediate }, timeout);
+    const zero: posix.timespec = .{ .sec = 0, .nsec = 0 };
+    return c.kevent(kq, list.ptr, @intCast(list.len), out.ptr, @intCast(out.len), if (immediate) &zero else timeout);
 }
 
 pub fn init() readiness.InitError!Kqueue {
@@ -63,7 +86,7 @@ pub fn init() readiness.InitError!Kqueue {
     if (posix.errno(c.fcntl(kq, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC))) != .SUCCESS) return error.Unexpected;
     var k: Kqueue = .{ .kq = kq, .wake_pipe = undefined };
     if (has_user) {
-        const add = [1]c.Kevent{change(0, c.EVFILT.USER, c.EV.ADD | c.EV.CLEAR, 0, 0, wake_key)};
+        const add = [1]Event{change(0, c.EVFILT.USER, c.EV.ADD | c.EV.CLEAR, 0, 0, wake_key)};
         try k.apply(&add);
     } else {
         var fds: [2]posix.fd_t = undefined;
@@ -74,18 +97,17 @@ pub fn init() readiness.InitError!Kqueue {
             _ = c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
         }
         k.wake_pipe = fds;
-        const add = [1]c.Kevent{change(@intCast(fds[0]), c.EVFILT.READ, c.EV.ADD | c.EV.CLEAR, 0, 0, wake_key)};
+        const add = [1]Event{change(@intCast(fds[0]), c.EVFILT.READ, c.EV.ADD | c.EV.CLEAR, 0, 0, wake_key)};
         try k.apply(&add);
     }
     return k;
 }
 
 /// Makes `list` take effect now.
-fn apply(k: *Kqueue, list: []const c.Kevent) readiness.InitError!void {
-    const zero: posix.timespec = .{ .sec = 0, .nsec = 0 };
-    var none: [0]c.Kevent = undefined;
+fn apply(k: *Kqueue, list: []const Event) readiness.InitError!void {
+    var none: [0]Event = undefined;
     while (true) {
-        const rc = c.kevent(k.kq, list.ptr, @intCast(list.len), &none, 0, &zero);
+        const rc = call(k.kq, list, &none, true, null);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
@@ -103,7 +125,7 @@ pub fn deinit(k: *Kqueue) void {
     k.* = undefined;
 }
 
-fn queue(k: *Kqueue, e: c.Kevent) void {
+fn queue(k: *Kqueue, e: Event) void {
     assert(k.change_count < max_changes);
     k.changes[k.change_count] = e;
     k.change_count += 1;
@@ -123,7 +145,7 @@ fn filterOf(direction: readiness.Direction) i32 {
 
 /// `fd` reports readiness `direction`'s way under `key`, from the next call.
 pub fn register(k: *Kqueue, fd: posix.fd_t, key: u64, have: readiness.Directions, direction: readiness.Direction) readiness.RegisterError!readiness.Directions {
-    k.queue(change(@intCast(fd), filterOf(direction), c.EV.ADD | c.EV.CLEAR, 0, 0, @intCast(key)));
+    k.queue(change(@intCast(fd), filterOf(direction), c.EV.ADD | c.EV.CLEAR, 0, 0, key));
     return have.with(switch (direction) {
         .read => .{ .read = true },
         .write => .{ .write = true },
@@ -149,32 +171,42 @@ pub fn deregister(k: *Kqueue, fd: posix.fd_t, have: readiness.Directions, leavin
 
 /// Hands the kernel the queued changes and takes its events, waiting as
 /// `wait` allows.
-pub fn wait(k: *Kqueue, timeout: Wait) readiness.PollError![]const c.Kevent {
-    const events: []c.Kevent = &k.events;
-    assert(events.len >= k.change_count);
+pub fn wait(k: *Kqueue, timeout: Wait) readiness.PollError![]const Event {
     var ts: posix.timespec = .{ .sec = 0, .nsec = 0 };
-    const ptr: ?*const posix.timespec = switch (timeout) {
-        .nowait => &ts,
-        .forever => null,
-        .ns => |ns| blk: {
+    var immediate = false;
+    var limit: ?*const posix.timespec = null;
+    switch (timeout) {
+        .nowait => immediate = true,
+        .forever => {},
+        .ns => |ns| if (darwin) {
+            // A timer that fires on time, instead of a coalesced timeout.
+            k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, c.NOTE.NSECONDS | critical, @intCast(@min(ns, std.math.maxInt(i64))), ignore_key);
+            k.change_count += 1;
+            k.wait_armed = true;
+        } else {
             ts = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
-            break :blk &ts;
+            limit = &ts;
         },
-    };
-    const count = k.change_count;
-    const rc = c.kevent(k.kq, &k.changes, @intCast(count), events.ptr, @intCast(events.len), ptr);
+    }
+    if (darwin and k.wait_armed and timeout != .ns) {
+        // An earlier wait's timer would wake a later wait for nothing.
+        k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.DELETE, 0, 0, ignore_key);
+        k.change_count += 1;
+        k.wait_armed = false;
+    }
+    const rc = call(k.kq, k.changes[0..k.change_count], &k.events, immediate, limit);
     // The changes are applied before any wait, so even an interrupted call
     // has taken them.
     k.change_count = 0;
     return switch (posix.errno(rc)) {
-        .SUCCESS => events[0..@intCast(rc)],
-        .INTR => events[0..0],
+        .SUCCESS => k.events[0..@intCast(rc)],
+        .INTR => k.events[0..0],
         .NOMEM => error.SystemResources,
         else => |e| posix.unexpectedErrno(e),
     };
 }
 
-pub fn decode(e: *const c.Kevent) readiness.Decoded {
+pub fn decode(e: *const Event) readiness.Decoded {
     if (e.udata == ignore_key) return .ignore;
     if (e.udata == wake_key) return .wake;
     if (e.filter == c.EVFILT.TIMER) return .{ .clock = if (e.ident == clock_ident[0]) .real else .boot };
@@ -183,14 +215,23 @@ pub fn decode(e: *const c.Kevent) readiness.Decoded {
         if (e.data == 0) return .ignore;
         return .{ .record = .{ .key = e.udata, .refused = direction } };
     }
-    return .{ .record = .{ .key = e.udata, .read = direction == .read, .write = direction == .write } };
+    return .{
+        .record = .{
+            .key = e.udata,
+            .read = direction == .read,
+            .write = direction == .write,
+            // A socket's or a pipe's read filter counts the bytes there; at
+            // its end the count says nothing of what a read returns.
+            .available = if (direction == .read and e.flags & c.EV.EOF == 0 and e.data > 0) @intCast(e.data) else null,
+        },
+    };
 }
 
 /// From any thread: the next (or a waiting) call returns a wake event.
 pub fn wake(k: *Kqueue) void {
     if (k.wake_pending.swap(true, .acq_rel)) return;
     if (has_user) {
-        const trigger = [1]c.Kevent{change(0, c.EVFILT.USER, 0, c.NOTE.TRIGGER, 0, wake_key)};
+        const trigger = [1]Event{change(0, c.EVFILT.USER, 0, c.NOTE.TRIGGER, 0, wake_key)};
         // A kqueue that cannot take the trigger has no room left: the
         // waiter wakes at its next event or deadline instead.
         k.apply(&trigger) catch |err| switch (err) {
@@ -226,10 +267,10 @@ pub fn armClock(k: *Kqueue, clock: readiness.Clock, deadline: ?i96) readiness.Su
         return;
     };
     const fflags: u32, const data: i96 = switch (clock) {
-        .real => if (absolute) |flag| .{ c.NOTE.NSECONDS | flag, at } else .{ c.NOTE.NSECONDS, at - now(.real) },
+        .real => if (absolute) |flag| .{ c.NOTE.NSECONDS | flag | critical, at } else .{ c.NOTE.NSECONDS | critical, at - now(.real) },
         // Relative, on a clock that counts across sleep where the system
         // has one: the boot clock's meaning.
-        .boot => .{ c.NOTE.NSECONDS | continuous, at - now(.boot) },
+        .boot => .{ c.NOTE.NSECONDS | continuous | critical, at - now(.boot) },
     };
     const clamped: i64 = @intCast(std.math.clamp(data, 0, std.math.maxInt(i64)));
     k.queue(change(ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, fflags, clamped, 0));

@@ -16,6 +16,7 @@ const Threaded = Io.Threaded;
 const E = posix.E;
 
 const op = @import("../op.zig");
+const file = @import("../../sys/file.zig");
 
 pub const Direction = enum(u1) { read, write };
 
@@ -80,6 +81,39 @@ pub fn make(operation: Io.Operation) ?Io.Operation.Result {
         .file_write_streaming => |w| .{ .file_write_streaming = fileWrite(w) },
         .device_io_control => unreachable, // unreachable: device control runs borrowed, never on a loop
     };
+}
+
+/// What a completed call says of what is left: a stream read reports how
+/// much it took of what it asked for (less means it took all there was), a
+/// stream write that sent less than it was given filled the socket. The
+/// readiness core keeps a descriptor it knows to be drained from being
+/// called again before its next event (tokio clears its readiness the same
+/// way). Datagram receives say nothing of what remains.
+pub const Progress = union(enum) {
+    other,
+    read: struct { got: usize, asked: usize },
+    short_write,
+};
+
+pub fn progress(operation: Io.Operation, result: Io.Operation.Result) Progress {
+    return switch (operation) {
+        .net_read => |r| if (result.net_read) |got| .{ .read = .{ .got = got.data_len, .asked = total(r.data) } } else |_| .other,
+        .net_write => |w| if (result.net_write) |n| (if (n < w.header.len + writeTotal(w.data, w.splat)) .short_write else .other) else |_| .other,
+        else => .other,
+    };
+}
+
+fn total(data: []const []u8) usize {
+    var n: usize = 0;
+    for (data) |d| n += d.len;
+    return n;
+}
+
+fn writeTotal(data: []const []const u8, splat: usize) usize {
+    if (data.len == 0) return 0;
+    var n: usize = 0;
+    for (data[0 .. data.len - 1]) |d| n += d.len;
+    return n + data[data.len - 1].len * splat;
 }
 
 /// Whether `fd` is ready `direction`'s way now (an error or a hang-up
@@ -154,10 +188,16 @@ fn netRead(r: Io.Operation.NetRead) ?Io.Operation.NetRead.Error!net.Stream.ReadR
     const count = gather(&iovecs, r.data);
     var msg: posix.msghdr = .{ .name = null, .namelen = 0, .iov = &iovecs, .iovlen = @intCast(count), .control = if (r.control.len == 0) null else r.control.ptr, .controllen = @intCast(r.control.len), .flags = 0 };
     const flags: u32 = posix.MSG.DONTWAIT | @as(u32, if (@hasDecl(posix.MSG, "CMSG_CLOEXEC")) posix.MSG.CMSG_CLOEXEC else 0);
+    // One buffer and no control messages: `recv`, which costs less than
+    // `recvmsg` (~7% on Darwin for a 64-byte message).
+    const simple = count == 1 and r.control.len == 0;
     while (true) {
-        const rc = posix.system.recvmsg(r.socket_handle, &msg, flags);
+        const rc = if (simple)
+            posix.system.recvfrom(r.socket_handle, iovecs[0].base, iovecs[0].len, posix.MSG.DONTWAIT, null, null)
+        else
+            posix.system.recvmsg(r.socket_handle, &msg, flags);
         return switch (posix.errno(rc)) {
-            .SUCCESS => .{ .data_len = @intCast(rc), .control_len = @intCast(msg.controllen), .control_truncated = msg.flags & posix.MSG.CTRUNC != 0 },
+            .SUCCESS => if (simple) .{ .data_len = @intCast(rc) } else .{ .data_len = @intCast(rc), .control_len = @intCast(msg.controllen), .control_truncated = msg.flags & posix.MSG.CTRUNC != 0 },
             .INTR => continue,
             .AGAIN => null,
             .NOBUFS, .NOMEM => error.SystemResources,
@@ -177,8 +217,13 @@ fn netWrite(w: Io.Operation.NetWrite) ?Io.Operation.NetWrite.Error!usize {
     const count = scatter(&iovecs, &splat, w.header, w.data, w.splat, std.math.maxInt(usize));
     if (count == 0 and w.control.len == 0) return 0;
     const msg: posix.msghdr_const = .{ .name = null, .namelen = 0, .iov = &iovecs, .iovlen = @intCast(count), .control = if (w.control.len == 0) null else w.control.ptr, .controllen = @intCast(w.control.len), .flags = 0 };
+    // One piece and no control messages: `send`, cheaper than `sendmsg`.
+    const simple = count == 1 and w.control.len == 0;
     while (true) {
-        const rc = posix.system.sendmsg(w.socket_handle, &msg, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
+        const rc = if (simple)
+            posix.system.sendto(w.socket_handle, iovecs[0].base, iovecs[0].len, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL, null, 0)
+        else
+            posix.system.sendmsg(w.socket_handle, &msg, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
         return switch (posix.errno(rc)) {
             .SUCCESS => @as(usize, @intCast(rc)),
             .INTR => continue,
@@ -533,41 +578,10 @@ fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.soc
 // Positional file calls, made in place: a regular file has no readiness.
 
 pub fn readAt(fd: posix.fd_t, buffer: []u8, offset: u64) (Io.File.ReadPositionalError || Io.Cancelable)!usize {
-    while (true) {
-        const rc = posix.system.pread(fd, buffer.ptr, @min(buffer.len, max_rw), @bitCast(offset));
-        return switch (posix.errno(rc)) {
-            .SUCCESS => @as(usize, @intCast(rc)),
-            .INTR => continue,
-            .NXIO, .SPIPE, .OVERFLOW => error.Unseekable,
-            .NOBUFS, .NOMEM => error.SystemResources,
-            .AGAIN => error.WouldBlock,
-            .IO => error.InputOutput,
-            .ISDIR, .BADF => error.IsDir,
-            .NOTCONN, .CONNRESET, .INVAL, .FAULT => |e| bug(e),
-            else => |e| unexpected(e),
-        };
-    }
+    return file.readAt(fd, &.{buffer}, offset);
 }
 
-pub fn writeAt(fd: posix.fd_t, bytes: []const u8, offset: u64) (Io.File.WritePositionalError || Io.Cancelable)!usize {
-    while (true) {
-        const rc = posix.system.pwrite(fd, bytes.ptr, @min(bytes.len, max_rw), @bitCast(offset));
-        return switch (posix.errno(rc)) {
-            .SUCCESS => @as(usize, @intCast(rc)),
-            .INTR => continue,
-            .BADF => error.NotOpenForWriting,
-            .DQUOT => error.DiskQuota,
-            .FBIG => error.FileTooBig,
-            .IO => error.InputOutput,
-            .NOSPC => error.NoSpaceLeft,
-            .PERM => error.PermissionDenied,
-            .PIPE => error.BrokenPipe,
-            .NXIO, .SPIPE, .OVERFLOW => error.Unseekable,
-            .INVAL, .FAULT, .AGAIN, .DESTADDRREQ => |e| bug(e),
-            else => |e| unexpected(e),
-        };
-    }
-}
+pub const writeAt = file.writeAt;
 
 pub fn sync(fd: posix.fd_t) Io.File.SyncError!void {
     while (true) {
@@ -587,6 +601,3 @@ pub fn sync(fd: posix.fd_t) Io.File.SyncError!void {
 pub fn close(fd: posix.fd_t) void {
     _ = posix.system.close(fd);
 }
-
-/// The most one read or write moves: Linux's own cap.
-const max_rw = 0x7ffff000;
