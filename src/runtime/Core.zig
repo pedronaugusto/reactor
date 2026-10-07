@@ -50,10 +50,11 @@ pub const Stderr = struct {
     mutex: Io.Mutex = .init,
     holder: usize = 0,
     depth: u32 = 0,
+    /// Filled when first locked: `File.stderr` is a call on some systems.
     writer: Io.File.Writer = .{
         .io = undefined,
         .interface = Io.File.Writer.initInterface(&.{}),
-        .file = .stderr(),
+        .file = undefined,
         .mode = .streaming,
     },
     ready: bool = false,

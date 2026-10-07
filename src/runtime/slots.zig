@@ -336,6 +336,7 @@ fn lockedStderr(r: *Core, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr
     const s = &r.stderr;
     if (!s.ready) {
         s.writer.io = r.io();
+        s.writer.file = .stderr();
         s.ready = true;
         const environ = r.options.environ;
         s.mode = mode orelse try .detect(r.io(), s.writer.file, environ.containsConstant("NO_COLOR"), environ.containsConstant("CLICOLOR_FORCE"));

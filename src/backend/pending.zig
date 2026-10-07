@@ -47,7 +47,10 @@ pub const Outcome = union(enum) {
     canceled,
 };
 
-const Packed = extern union {
+/// Where batches run on a ring (and the test fake): POSIX descriptors are
+/// small enough for an operation to fit the storage's words. Windows has no
+/// runtime yet; its batches will keep their own form.
+const Packed = if (@import("builtin").os.tag == .windows) extern union { unused: usize } else extern union {
     file_read: extern struct { handle: Io.File.Handle, flags: u32, data_ptr: [*]const []u8, data_len: usize },
     file_write: extern struct { handle: Io.File.Handle, flags: u32, header_ptr: [*]const u8, header_len: usize, data_ptr: [*]const []const u8, data_len: usize, splat: usize },
     net_receive: extern struct { handle: net.Socket.Handle, flags: u32, messages_ptr: [*]net.IncomingMessage, messages_len: usize, data_ptr: [*]u8, data_len: usize },
@@ -72,6 +75,7 @@ fn packedOfConst(p: *const Pending) *const Packed {
 /// Keeps `operation` in `p`. A splat beyond 2^32 - 1 is clamped: the
 /// write is then a short one, which a write may always be.
 pub fn pack(p: *Pending, operation: Io.Operation) void {
+    if (comptime @import("builtin").os.tag == .windows) unreachable; // unreachable: no runtime on Windows yet
     p.tag = operation;
     const d = packedOf(p);
     switch (operation) {
@@ -87,6 +91,7 @@ pub fn pack(p: *Pending, operation: Io.Operation) void {
 
 /// The operation `pack` kept.
 pub fn unpack(p: *const Pending) Io.Operation {
+    if (comptime @import("builtin").os.tag == .windows) unreachable; // unreachable: no runtime on Windows yet
     const d = packedOfConst(p);
     return switch (p.tag) {
         .file_read_streaming => .{ .file_read_streaming = .{ .file = .{ .handle = d.file_read.handle, .flags = .{ .nonblocking = d.file_read.flags != 0 } }, .data = d.file_read.data_ptr[0..d.file_read.data_len] } },

@@ -98,7 +98,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
 
 /// The descriptor an operation waits on in the kernel, which a close
 /// elsewhere must end it on.
-pub fn descriptorOf(kind: Loop.Op.Kind) ?i64 {
+pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {
     return switch (kind) {
         .io => |operation| switch (operation) {
             .file_read_streaming => |o| o.file.handle,

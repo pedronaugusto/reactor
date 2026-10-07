@@ -30,8 +30,12 @@ pub const Errand = struct {
 /// one slot only make a close look at a processor it need not.
 pub const descriptor_slots = 4096;
 
-fn descriptorSlot(fd: i64) usize {
-    return @intCast(@as(u64, @bitCast(fd)) % descriptor_slots);
+fn descriptorSlot(fd: Io.File.Handle) usize {
+    const key: u64 = switch (@typeInfo(Io.File.Handle)) {
+        .pointer => @intFromPtr(fd) >> 2, // safe: a handle's value, hashed
+        else => @as(u32, @bitCast(fd)),
+    };
+    return @intCast(key % descriptor_slots);
 }
 
 /// A processor's bit in `holders`; beyond 64 processors bits are shared.
@@ -40,7 +44,7 @@ fn processorBit(index: u16) u64 {
 }
 
 /// Whether processor `index`'s kernel queue may hold an operation on `fd`.
-pub fn holds(s: *const Scheduler, index: u16, fd: i64) bool {
+pub fn holds(s: *const Scheduler, index: u16, fd: Io.File.Handle) bool {
     return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
 }
 
@@ -201,14 +205,14 @@ pub const Processor = struct {
 
     /// The owner's: this processor's kernel queue now holds one more
     /// operation on `fd`.
-    pub fn hold(p: *Processor, fd: i64) void {
+    pub fn hold(p: *Processor, fd: Io.File.Handle) void {
         const slot = descriptorSlot(fd);
         p.held[slot] += 1;
         if (p.held[slot] == 1) _ = p.scheduler.holders[slot].fetchOr(processorBit(p.index), .release);
     }
 
     /// The owner's: one fewer.
-    pub fn release(p: *Processor, fd: i64) void {
+    pub fn release(p: *Processor, fd: Io.File.Handle) void {
         const slot = descriptorSlot(fd);
         p.held[slot] -= 1;
         if (p.held[slot] == 0) _ = p.scheduler.holders[slot].fetchAnd(~processorBit(p.index), .release);

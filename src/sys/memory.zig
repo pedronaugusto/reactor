@@ -6,6 +6,10 @@ const posix = std.posix;
 
 pub const page_size_min = std.heap.page_size_min;
 
+/// Windows has no runtime until reactor has a switch that keeps its thread
+/// information block right: nothing here runs there yet.
+const no_runtime = builtin.os.tag == .windows;
+
 pub fn pageSize() usize {
     return std.heap.pageSize();
 }
@@ -15,18 +19,21 @@ pub const ReserveError = error{SystemResources};
 /// `len` bytes of zeroed, readable and writable address space, committed
 /// as it is touched (no swap reserved on Linux).
 pub fn reserve(len: usize) ReserveError![]align(page_size_min) u8 {
+    if (comptime no_runtime) unreachable; // unreachable: no runtime is built where tasks cannot run
     var flags: posix.MAP = .{ .TYPE = .PRIVATE, .ANONYMOUS = true };
-    if (builtin.os.tag == .linux) flags.NORESERVE = true;
+    if (builtin.os.tag == .linux and @hasField(posix.MAP, "NORESERVE")) flags.NORESERVE = true;
     return posix.mmap(null, len, .{ .READ = true, .WRITE = true }, flags, -1, 0) catch error.SystemResources;
 }
 
 pub fn release(memory: []align(page_size_min) u8) void {
+    if (comptime no_runtime) unreachable; // unreachable: no runtime is built where tasks cannot run
     posix.munmap(memory);
 }
 
 /// Makes `memory` fault on any access: a guard page. On Linux this splits
 /// the mapping, costing one more entry against `vm.max_map_count`.
 pub fn protect(memory: []align(page_size_min) u8) error{SystemResources}!void {
+    if (comptime no_runtime) unreachable; // unreachable: no runtime is built where tasks cannot run
     switch (posix.errno(posix.system.mprotect(memory.ptr, memory.len, .{}))) {
         .SUCCESS => {},
         else => return error.SystemResources,
@@ -44,6 +51,7 @@ pub fn installGuard(memory: []align(page_size_min) u8) bool {
 /// Gives `memory`'s pages back to the system; they read as zero (Linux)
 /// or as whatever was there (elsewhere, until reused) afterwards.
 pub fn discard(memory: []align(page_size_min) u8) void {
+    if (comptime no_runtime) unreachable; // unreachable: no runtime is built where tasks cannot run
     const advice: u32 = if (builtin.os.tag == .linux) std.os.linux.MADV.DONTNEED else posix.MADV.FREE;
     // Pages not given back stay usable: nothing to report.
     posix.madvise(memory.ptr, memory.len, advice) catch return;
