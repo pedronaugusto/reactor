@@ -166,7 +166,7 @@ fn wake(r: Report, io: Io, c: Config) !void {
     try a.await(io);
     try b.await(io);
     const t1 = now(io);
-    try r.line("wake", "futex ping-pong between two tasks", nsBetween(t0, t1) / @as(f64, @floatFromInt(rounds * 2)), "ns/wake");
+    try r.line("wake", "ping-pong between two tasks", nsBetween(t0, t1) / @as(f64, @floatFromInt(rounds * 2)), "ns/wake");
 }
 
 // timers
@@ -205,8 +205,8 @@ fn loopTimers(r: Report, gpa: std.mem.Allocator, c: Config) !void {
         }
     }
     const count: f64 = @floatFromInt(n);
-    try r.line("timers", "loop timer, arm", nsBetween(t0, t1) / count, "ns/timer");
-    try r.line("timers", "loop timer, cancel", nsBetween(t1, t2) / (count * 0.99), "ns/timer");
+    try r.line("timers", "timer, arm", nsBetween(t0, t1) / count, "ns/timer");
+    try r.line("timers", "timer, cancel", nsBetween(t1, t2) / (count * 0.99), "ns/timer");
 }
 
 fn sleeps(r: Report, io: Io, c: Config) !void {

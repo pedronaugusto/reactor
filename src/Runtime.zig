@@ -22,7 +22,6 @@ pub const Scheduling = options.Scheduling;
 pub const Lane = options.Lane;
 pub const Files = options.Files;
 pub const Offload = options.Offload;
-pub const StackGuard = options.StackGuard;
 pub const Options = options.Options;
 pub const InitError = Core.InitError;
 pub const StartError = Core.StartError;

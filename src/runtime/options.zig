@@ -20,15 +20,6 @@ pub const Files = enum {
 
 pub const Offload = Lanes.Config;
 
-pub const StackGuard = enum {
-    /// A guard below each stack where it costs no mapping (Linux 6.13+
-    /// guard regions, macOS), else one per 64-stack slab.
-    auto,
-    per_stack,
-    /// One guard per 64-stack slab and a canary checked at every switch.
-    per_slab,
-};
-
 pub const Options = struct {
     backend: Backend = .auto,
     /// Worker threads `start` spawns beside the home thread. null: logical
@@ -42,7 +33,6 @@ pub const Options = struct {
     /// Each task's stack reservation; what a task costs is the pages it
     /// touches.
     stack_size: usize = 1 << 20,
-    stack_guard: StackGuard = .auto,
     /// Past this, `concurrent` fails with `ConcurrencyUnavailable` and
     /// `async` runs the function inline (both legal for `std.Io`).
     max_tasks: u32 = 16 << 10,

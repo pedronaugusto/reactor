@@ -77,6 +77,17 @@ test "a loopback echo: listen, accept, connect, read and write" {
     try echo.await(io);
 }
 
+/// A connected loopback TCP pair (Linux has no `AF_INET` socketpair).
+fn tcpPair(io: Io) ![2]net.Stream {
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var connecting = try io.concurrent(net.IpAddress.connect, .{ &server.socket.address, io, .{ .mode = .stream } });
+    const accepted = try server.accept(io);
+    const connected = try connecting.await(io);
+    return .{ accepted, connected };
+}
+
 fn readOne(io: Io, socket: net.Socket.Handle, buffer: []u8) (Io.Cancelable || Io.Operation.NetRead.Error)!usize {
     var data: [1][]u8 = .{buffer};
     const result = try io.operate(.{ .net_read = .{ .socket_handle = socket, .data = &data } });
@@ -89,10 +100,10 @@ test "a cancel ends a read the kernel holds" {
     try runtime(&r, 1);
     defer r.deinit();
     const io = r.io();
-    const pair = try net.Socket.createPair(io, .{});
+    const pair = try tcpPair(io);
     defer for (pair) |s| s.close(io);
     var buffer: [16]u8 = undefined;
-    var reading = try io.concurrent(readOne, .{ io, pair[0].handle, &buffer });
+    var reading = try io.concurrent(readOne, .{ io, pair[0].socket.handle, &buffer });
     try io.sleep(.fromMilliseconds(5), .awake);
     try testing.expectError(error.Canceled, reading.cancel(io));
 }
@@ -102,16 +113,16 @@ test "after operateTimeout returns Timeout, the kernel writes nothing into the b
     try runtime(&r, 0);
     defer r.deinit();
     const io = r.io();
-    const pair = try net.Socket.createPair(io, .{});
+    const pair = try tcpPair(io);
     defer for (pair) |s| s.close(io);
     var buffer: [16]u8 = @splat(0xaa);
     var data: [1][]u8 = .{&buffer};
-    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = pair[0].handle, .data = &data } }, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } });
+    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } }, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } });
     try testing.expectError(error.Timeout, result);
     // The buffer is "freed": poisoned, then data arrives on the socket.
     @memset(&buffer, 0xdd);
     var send: [1][]const u8 = .{"late"};
-    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].handle, .data = &send } })).net_write;
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &send } })).net_write;
     try io.sleep(.fromMilliseconds(5), .awake);
     for (buffer) |b| try testing.expectEqual(@as(u8, 0xdd), b);
 }

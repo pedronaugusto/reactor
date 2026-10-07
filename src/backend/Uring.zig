@@ -417,7 +417,9 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
     if (to_submit == 0 and min == 0 and !u.pendingInKernel()) return;
     const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG;
     while (true) {
-        const rc = linux.io_uring_enter(u.ring.fd, to_submit, min, flags, @ptrCast(&arg)); // safe: the kernel reads the wait argument during the call
+        // The extended argument's size goes where a signal mask's would:
+        // std's wrapper passes the mask's.
+        const rc = linux.syscall6(.io_uring_enter, @as(u32, @bitCast(u.ring.fd)), to_submit, min, flags, @intFromPtr(&arg), @sizeOf(linux.io_uring_getevents_arg)); // safe: the kernel reads the wait argument during the call
         switch (linux.errno(rc)) {
             .SUCCESS, .TIME, .INTR => return,
             // The completion queue is full: take completions, then submit.

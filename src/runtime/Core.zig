@@ -94,11 +94,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     @memset(c.csprngs, .uninitialized);
 
     var stacks: Stacks = undefined;
-    stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size, .guard = switch (options.stack_guard) {
-        .auto => null,
-        .per_stack => .per_stack,
-        .per_slab => .per_slab,
-    } }) catch |err| return switch (err) {
+    stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooManyTasks => error.TooManyTasks,
         error.SystemResources => error.SystemResources,

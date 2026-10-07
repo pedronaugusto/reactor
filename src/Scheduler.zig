@@ -246,7 +246,6 @@ pub const Processor = struct {
         p.current = null;
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
-        if (t.stack) |stack| if (!p.scheduler.stacks.intact(stack)) @panic("reactor: a task overflowed its stack");
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
             .park => |after| if (after) |a| a.func(a.context, t),
