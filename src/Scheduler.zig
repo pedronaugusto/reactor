@@ -20,6 +20,10 @@ const Inbox = @import("scheduler/inbox.zig").Inbox;
 
 pub const Scheduling = enum { stealing, per_core };
 
+/// How long a processor with nothing to do looks for work before it
+/// waits in the kernel.
+const spin_ns = 20 * std.time.ns_per_us;
+
 /// A processor: a loop, the tasks ready to run on it, and the context its
 /// scheduler runs in. Exactly one thread holds a processor at a time.
 ///
@@ -178,7 +182,7 @@ pub const Processor = struct {
             if (p.index != 0 and p.scheduler.stopping.load(.acquire)) return;
             if (p.serving != null and p.serve()) continue;
             if (p.pollKernel(.nowait)) continue;
-            if (p.scheduler.scheduling == .stealing and p.steal()) continue;
+            if (p.scheduler.scheduling == .stealing and (p.steal() or p.spin())) continue;
             p.block();
         }
     }
@@ -235,6 +239,7 @@ pub const Processor = struct {
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
+        t.slice_start = 0;
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
         p.afterSwitch(t, back);
@@ -320,6 +325,27 @@ pub const Processor = struct {
         return false;
     }
 
+    /// Looks for work a while before waiting in the kernel, as Go's
+    /// spinning Ms do: a burst of wakes then finds a processor awake. At
+    /// most half the processors spin at once.
+    fn spin(p: *Processor) bool {
+        const s = p.scheduler;
+        if (s.processors.len < 2) return false;
+        if (s.searching.load(.monotonic) * 2 >= s.processors.len) return false;
+        _ = s.searching.fetchAdd(1, .acq_rel);
+        defer _ = s.searching.fetchSub(1, .acq_rel);
+        const start = p.loop.clock.awake();
+        var round: u32 = 0;
+        while (true) : (round += 1) {
+            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or s.injectedLen() > 0) return true;
+            if (round % 16 == 0) {
+                if (p.steal()) return true;
+                if (p.loop.clock.awake() - start > spin_ns) return false;
+            }
+            std.atomic.spinLoopHint();
+        }
+    }
+
     /// A stolen task runs next.
     fn pushQueueFront(p: *Processor, t: *Task) void {
         if (p.lifo) |previous| p.pushQueue(previous);
@@ -341,11 +367,15 @@ root: *Task,
 stacks: Stacks,
 scheduling: Scheduling,
 budget_ops: u16,
+/// The longest a task runs through cancelation points without waiting.
+budget_ns: u64,
 inject_lock: Io.Mutex = .init,
 inject_head: ?*Task = null,
 inject_tail: ?*Task = null,
 inject_len: std.atomic.Value(u32) = .init(0),
 idle_count: std.atomic.Value(u32) = .init(0),
+/// Processors spinning for work before they wait.
+searching: std.atomic.Value(u32) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),
 /// Tasks alive, the root excluded.
 live: std.atomic.Value(u32) = .init(0),
@@ -423,13 +453,21 @@ pub fn exit(after: Processor.After) noreturn {
 }
 
 /// Spends one unit of the running task's budget at a cancelation point
-/// that did not wait; a spent budget yields.
+/// that did not wait; a spent budget, in operations or in time, yields.
+/// The clock is read at the first such point of a run and every eighth
+/// after, so a task that waits soon never reads it.
 pub fn spend(s: *Scheduler) void {
     const p = held orelse return;
     const t = p.current orelse return;
     if (t.budget > 0) {
         t.budget -= 1;
-        return;
+        if (t.budget % 8 != 0) return;
+        const now = p.loop.clock.awake();
+        if (t.slice_start == 0) {
+            t.slice_start = now;
+            return;
+        }
+        if (now - t.slice_start < s.budget_ns) return;
     }
     _ = s.forced_yields.fetchAdd(1, .monotonic);
     yield();
@@ -511,6 +549,8 @@ pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
 pub fn notify(s: *Scheduler, p: *Processor) void {
     if (s.scheduling != .stealing) return;
     if (s.idle_count.load(.seq_cst) == 0) return;
+    // A spinning processor will find it.
+    if (s.searching.load(.seq_cst) > 0) return;
     if (p.local.isEmpty() and p.lifo == null) return;
     s.wakeIdle();
 }

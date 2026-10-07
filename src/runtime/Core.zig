@@ -106,6 +106,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .stacks = stacks,
         .scheduling = if (workers == 0) .per_core else options.scheduling,
         .budget_ops = options.budget_ops,
+        .budget_ns = @intCast(@max(options.budget_time.nanoseconds, 0)),
     };
 
     var made: usize = 0;

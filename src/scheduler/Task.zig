@@ -37,6 +37,9 @@ pins: u16 = 0,
 /// Operations left before an exhausted budget turns a cancelation point
 /// into a yield.
 budget: u16 = 0,
+/// When the running task's budget started being spent (awake clock, ns);
+/// 0 until its first cancelation point that did not wait.
+slice_start: u64 = 0,
 cancel: std.atomic.Value(u32) = .init(0),
 protection: Protection = .{},
 /// The hook of the cancelable wait it is parked in; guarded by `locked`.

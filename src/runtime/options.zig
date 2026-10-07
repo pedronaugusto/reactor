@@ -30,6 +30,8 @@ pub const Options = struct {
     /// A task that has not parked for this many cancelation points yields
     /// at the next one.
     budget_ops: u16 = 64,
+    /// The same budget in time.
+    budget_time: std.Io.Duration = .fromMilliseconds(1),
     /// Each task's stack reservation; what a task costs is the pages it
     /// touches.
     stack_size: usize = 1 << 20,
