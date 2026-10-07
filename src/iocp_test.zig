@@ -12,6 +12,7 @@ const shakedown = @import("shakedown");
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
 const fiber = @import("fiber.zig");
+const backend = @import("backend.zig");
 
 fn skipOffWindows() !void {
     if (builtin.os.tag != .windows or !fiber.supported) return error.SkipZigTest;
@@ -19,9 +20,10 @@ fn skipOffWindows() !void {
 
 fn runtime(r: *Runtime, workers: u16) !void {
     try skipOffWindows();
-    try r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10 });
+    // std's spawn finds programs on the PATH of the environment it is given.
+    try r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10, .environ = testing.environ });
     errdefer r.deinit();
-    try testing.expectEqual(@as(?@import("backend.zig").Kind, .iocp), r.backendKind());
+    try testing.expectEqual(@as(?backend.Kind, .iocp), r.backendKind());
     try r.start();
 }
 
@@ -223,7 +225,16 @@ test "datagrams: a send and a receive with the sender's address" {
 
 fn fromOutside(io: Io, socket: net.Socket.Handle, out: *[16]u8, n: *usize) void {
     writeAll(io, socket, "outside") catch return;
-    n.* = readOne(io, socket, out) catch 0;
+    // A read in a batch: std's batch code cannot run on the bound
+    // socket here, the runtime runs it.
+    var data: [1][]u8 = .{out};
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    batch.addAt(0, .{ .net_read = .{ .socket_handle = socket, .data = &data } });
+    batch.awaitAsync(io) catch return;
+    const completion = batch.next() orelse return;
+    const result = completion.result.net_read catch return;
+    n.* = result.data_len;
 }
 
 test "a thread outside the runtime reads and writes a socket the runtime's tasks bound" {

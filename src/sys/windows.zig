@@ -10,7 +10,6 @@ const windows = std.os.windows;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
 const Boolean = windows.BOOLEAN;
-const IoStatusBlock = windows.IO_STATUS_BLOCK;
 
 /// One completion taken from a port: `FILE_IO_COMPLETION_INFORMATION`,
 /// laid out as Win32's `OVERLAPPED_ENTRY`, so a host's
@@ -20,7 +19,7 @@ pub const Entry = extern struct {
     key: usize,
     /// The call's context: what reactor passes as the APC context.
     context: usize,
-    iosb: IoStatusBlock,
+    iosb: windows.IO_STATUS_BLOCK,
 };
 
 const io_completion_all_access: u32 = 0x1f0003;
@@ -44,7 +43,7 @@ const create_waitable_timer_high_resolution: u32 = 0x2;
 
 /// `NtCancelIoFileEx` with no request named: every request on the handle,
 /// from any thread of the process. std declares the request non-null.
-const cancelAll = @extern(*const fn (file: Handle, request: ?*const IoStatusBlock, iosb: *IoStatusBlock) callconv(.winapi) Status, .{ .name = "NtCancelIoFileEx", .library_name = "ntdll" });
+const cancel_all = @extern(*const fn (file: Handle, request: ?*const windows.IO_STATUS_BLOCK, iosb: *windows.IO_STATUS_BLOCK) callconv(.winapi) Status, .{ .name = "NtCancelIoFileEx", .library_name = "ntdll" });
 
 pub const PortError = error{ SystemResources, Unexpected };
 
@@ -102,7 +101,7 @@ pub const BindResult = enum {
 /// handle). A handle bound already gets the same modes: a call that
 /// completes at once is then finished by its caller, never by an entry.
 pub fn bind(handle: Handle, port: Handle, key: usize) BindResult {
-    var iosb: IoStatusBlock = undefined;
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
     var info: CompletionInformation = .{ .port = port, .key = key };
     const result: BindResult = switch (windows.ntdll.NtSetInformationFile(handle, &iosb, &info, @sizeOf(CompletionInformation), .Completion)) {
         .SUCCESS => .bound,
@@ -124,10 +123,10 @@ const skip_set_event_on_handle: u32 = 0x2;
 /// every request on `handle` when null. Requests end with
 /// `STATUS_CANCELLED`, unless they completed first; either way their
 /// entries still arrive.
-pub fn cancel(handle: Handle, iosb: ?*const IoStatusBlock) void {
-    var result: IoStatusBlock = undefined;
+pub fn cancel(handle: Handle, iosb: ?*const windows.IO_STATUS_BLOCK) void {
+    var result: windows.IO_STATUS_BLOCK = undefined;
     // NOT_FOUND: nothing left to end, its entry is on the way.
-    _ = cancelAll(handle, iosb, &result);
+    _ = cancel_all(handle, iosb, &result);
 }
 
 /// Closes `handle`, forgetting its binding first: the next handle to get

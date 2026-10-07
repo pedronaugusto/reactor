@@ -151,18 +151,20 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
 
 fn uringBackend(options: Options) InitError!backends.Backend {
     const entries = options.submission_entries orelse ringEntries(options.max_ops);
-    return .{ .io_uring = backends.Uring.init(.{
-        .entries = entries,
-        // The kernel takes at most 65,536; operations beyond the queue's
-        // size wait in the kernel (no completion is dropped).
-        .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
-        .off = @bitCast(options.uring_off),
-        .disabled = options.owner == .adopter,
-    }) catch |err| return switch (err) {
-        error.BackendUnavailable => error.BackendUnavailable,
-        error.SystemResources => error.SystemResources,
-        error.Unexpected => error.Unexpected,
-    } };
+    return .{
+        .io_uring = backends.Uring.init(.{
+            .entries = entries,
+            // The kernel takes at most 65,536; operations beyond the queue's
+            // size wait in the kernel (no completion is dropped).
+            .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
+            .off = @bitCast(options.uring_off),
+            .disabled = options.owner == .adopter,
+        }) catch |err| return switch (err) {
+            error.BackendUnavailable => error.BackendUnavailable,
+            error.SystemResources => error.SystemResources,
+            error.Unexpected => error.Unexpected,
+        },
+    };
 }
 
 fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {

@@ -233,13 +233,26 @@ fn futexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
 
 // Batches.
 
+/// On IOCP a thread outside the runtime cannot run std's batch code on the
+/// runtime's sockets: std's calls complete by APC, refused on a handle
+/// bound to a port. Its operations run through the runtime, one by one.
+fn outsideOnPorts(r: *Core) bool {
+    return Scheduler.current() == null and r.backendKind() == .iocp;
+}
+
 fn batchAwaitAsync(userdata: ?*anyopaque, b: *Io.Batch) Io.Cancelable!void {
     const r = Core.of(userdata);
+    if (outsideOnPorts(r)) return batch.awaitEach(r.io(), b);
     return batch.awaitAsync(&r.scheduler, r.lanes.borrowedIo(), b);
 }
 
 fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     const r = Core.of(userdata);
+    if (outsideOnPorts(r)) {
+        // Each operation runs to its end: no deadline can be kept.
+        if (timeout != .none) return error.ConcurrencyUnavailable;
+        return batch.awaitEach(r.io(), b);
+    }
     return batch.awaitConcurrent(&r.scheduler, r.lanes.borrowedIo(), b, timeout);
 }
 

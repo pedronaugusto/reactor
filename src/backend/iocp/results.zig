@@ -50,13 +50,15 @@ pub fn of(o: anytype, status: Status, information: usize) op.Result {
         .close => .{ .close = {} },
         .abort => .{ .abort = 0 },
         .timer => .{ .timer = if (status == .SUCCESS) {} else error.Canceled },
-        .wait => .{ .wait = if (ours) error.Canceled else switch (status) {
-            // Ready, or its handle closed: a wait ends either way.
-            .SUCCESS, .CANCELLED, .CONNECTION_ABORTED, .LOCAL_DISCONNECT, .HANDLES_CLOSED => {},
-            // Not a socket: readiness has no meaning there.
-            .INVALID_DEVICE_REQUEST, .INVALID_HANDLE, .NOT_SUPPORTED, .INVALID_PARAMETER => error.Unsupported,
-            else => unexpected(status),
-        } },
+        .wait => .{
+            .wait = if (ours) error.Canceled else switch (status) {
+                // Ready, or its handle closed: a wait ends either way.
+                .SUCCESS, .CANCELLED, .CONNECTION_ABORTED, .LOCAL_DISCONNECT, .HANDLES_CLOSED => {},
+                // Not a socket: readiness has no meaning there.
+                .INVALID_DEVICE_REQUEST, .INVALID_HANDLE, .NOT_SUPPORTED, .INVALID_PARAMETER => error.Unsupported,
+                else => unexpected(status),
+            },
+        },
     };
 }
 

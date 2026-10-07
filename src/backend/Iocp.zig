@@ -32,7 +32,6 @@ const windows = std.os.windows;
 const ws2_32 = windows.ws2_32;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
-const IoStatusBlock = windows.IO_STATUS_BLOCK;
 const Threaded = Io.Threaded;
 
 const pending = @import("pending.zig");
@@ -40,8 +39,6 @@ const Wait = @import("wait.zig").Wait;
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
 const afd = @import("../sys/afd.zig");
-
-const AFD = afd.AFD;
 
 pub const Options = struct {
     /// The host's port: entries reach the loop through `complete`, and the
@@ -83,7 +80,7 @@ fn contextOf(address: usize, tag: Tag) usize {
 /// What an operation keeps while the kernel holds it.
 pub const Scratch = struct {
     /// Where the kernel writes the outcome.
-    iosb: IoStatusBlock = undefined,
+    iosb: windows.IO_STATUS_BLOCK = undefined,
     /// The loop that submitted it, which finishes it.
     owner: *Iocp,
     /// The handle the kernel holds the call on.
@@ -112,35 +109,35 @@ const Stage = enum(u8) {
 /// The memory a request is read from or written to after the call.
 const Request = union {
     none: void,
-    receive: struct { info: AFD.RECV_INFO, buffers: [Threaded.max_iovecs_len]AFD.WSABUF(.@"var") },
-    send: struct { info: AFD.SEND_INFO, buffers: [Threaded.max_iovecs_len]AFD.WSABUF(.@"const"), splat: [Threaded.splat_buffer_size]u8 },
+    receive: struct { info: windows.AFD.RECV_INFO, buffers: [Threaded.max_iovecs_len]windows.AFD.WSABUF(.@"var") },
+    send: struct { info: windows.AFD.SEND_INFO, buffers: [Threaded.max_iovecs_len]windows.AFD.WSABUF(.@"const"), splat: [Threaded.splat_buffer_size]u8 },
     datagram_in: DatagramIn,
     datagram_out: DatagramOut,
     connect_ip: afd.ConnectInfo(Threaded.PosixAddress),
     connect_unix: afd.ConnectInfo(ws2_32.sockaddr.un),
-    accept: struct { response: afd.ListenResponse, info: AFD.ACCEPT_INFO, socket: Handle },
+    accept: struct { response: afd.ListenResponse, info: windows.AFD.ACCEPT_INFO, socket: Handle },
     poll: afd.PollInfo,
     offset: i64,
     packet: struct { packet: Handle, timer: ?Handle },
 };
 
 const DatagramIn = struct {
-    info: AFD.RECV_DATAGRAM_INFO,
-    buffer: [1]AFD.WSABUF(.@"var"),
+    info: windows.AFD.RECV_DATAGRAM_INFO,
+    buffer: [1]windows.AFD.WSABUF(.@"var"),
     address: Threaded.PosixAddress,
     address_len: windows.ULONG,
 };
 
 const DatagramOut = struct {
-    info: AFD.SEND_DATAGRAM_INFO,
-    buffer: [1]AFD.WSABUF(.@"const"),
+    info: windows.AFD.SEND_DATAGRAM_INFO,
+    buffer: [1]windows.AFD.WSABUF(.@"const"),
     address: Threaded.PosixAddress,
 };
 
 /// A batch operation while the kernel holds it: the batch's storage has
 /// no room for a status block beside the operation it keeps.
 const Slot = struct {
-    iosb: IoStatusBlock = undefined,
+    iosb: windows.IO_STATUS_BLOCK = undefined,
     owner: *Iocp,
     token: pending.Token = undefined,
     target: Handle = undefined,
@@ -150,8 +147,8 @@ const Slot = struct {
 
 const SlotRequest = union {
     none: void,
-    receive: struct { info: AFD.RECV_INFO, buffer: [1]AFD.WSABUF(.@"var") },
-    send: struct { info: AFD.SEND_INFO, buffer: [1]AFD.WSABUF(.@"const") },
+    receive: struct { info: windows.AFD.RECV_INFO, buffer: [1]windows.AFD.WSABUF(.@"var") },
+    send: struct { info: windows.AFD.SEND_INFO, buffer: [1]windows.AFD.WSABUF(.@"const") },
     datagram_in: DatagramIn,
     datagram_out: DatagramOut,
 };
@@ -233,7 +230,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
             s.stage = .listen;
             s.request = .{ .accept = .{ .response = undefined, .info = undefined, .socket = undefined } };
             const a = &s.request.accept;
-            const status = windows.ntdll.NtDeviceIoControlFile(listener, null, null, context, &s.iosb, afd.IOCTL.WAIT_FOR_LISTEN, null, 0, &a.response, @sizeOf(afd.ListenResponse));
+            const status = windows.ntdll.NtDeviceIoControlFile(listener, null, null, context, &s.iosb, windows.IOCTL.AFD.WAIT_FOR_LISTEN, null, 0, &a.response, @sizeOf(afd.ListenResponse));
             return b.settle(o, status);
         },
         .connect => |c| {
@@ -244,7 +241,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
                     s.request = .{ .connect_ip = .{ .address = undefined } };
                     const info = &s.request.connect_ip;
                     const len = Threaded.addressToPosix(ip, &info.address);
-                    break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.iosb, afd.IOCTL.CONNECT, info, @intCast(@offsetOf(@TypeOf(info.*), "address") + len), null, 0);
+                    break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.iosb, windows.IOCTL.AFD.CONNECT, info, @intCast(@offsetOf(@TypeOf(info.*), "address") + len), null, 0);
                 },
                 .unix => |unix| status: {
                     s.request = .{ .connect_unix = .{ .address = .{ .path = @splat(0) } } };
@@ -253,7 +250,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
                     // named the target already. As std, a suffix.
                     const n = @min(unix.path.len, info.address.path.len - 1);
                     @memcpy(info.address.path[0..n], unix.path[unix.path.len - n ..]);
-                    break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.iosb, afd.IOCTL.CONNECT, info, @sizeOf(@TypeOf(info.*)), null, 0);
+                    break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.iosb, windows.IOCTL.AFD.CONNECT, info, @sizeOf(@TypeOf(info.*)), null, 0);
                 },
             };
             return b.settle(o, status);
@@ -308,7 +305,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
                 const wanted = if (w == .readable) afd.events.readable else afd.events.writable;
                 s.request = .{ .poll = .{ .timeout = std.math.maxInt(i64), .count = 1, .exclusive = 0, .handles = .{.{ .handle = socket, .events = wanted, .status = .SUCCESS }} } };
                 const info = &s.request.poll;
-                const status = windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, &s.iosb, afd.IOCTL.POLL, info, @sizeOf(afd.PollInfo), info, @sizeOf(afd.PollInfo));
+                const status = windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, &s.iosb, windows.IOCTL.AFD.POLL, info, @sizeOf(afd.PollInfo), info, @sizeOf(afd.PollInfo));
                 return b.settle(o, status);
             },
             .object => |object| {
@@ -336,7 +333,7 @@ fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*any
             var n: u32 = 0;
             for (r.data) |d| addBuffer(.@"var", &q.buffers, &n, d);
             q.info = .{ .BufferArray = &q.buffers, .BufferCount = n, .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true }, .TdiFlags = .{ .NORMAL = true } };
-            return b.settle(o, windows.ntdll.NtDeviceIoControlFile(r.socket_handle, null, null, context, &s.iosb, afd.IOCTL.RECEIVE, &q.info, @sizeOf(AFD.RECV_INFO), null, 0));
+            return b.settle(o, windows.ntdll.NtDeviceIoControlFile(r.socket_handle, null, null, context, &s.iosb, windows.IOCTL.AFD.RECEIVE, &q.info, @sizeOf(windows.AFD.RECV_INFO), null, 0));
         },
         .net_write => |w| {
             if (!b.bindHandle(w.socket_handle)) return b.refuse(o);
@@ -345,7 +342,7 @@ fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*any
             const q = &s.request.send;
             const n = gatherWrite(&q.buffers, &q.splat, w.header, w.data, w.splat);
             q.info = .{ .BufferArray = &q.buffers, .BufferCount = n, .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true }, .TdiFlags = .{} };
-            return b.settle(o, windows.ntdll.NtDeviceIoControlFile(w.socket_handle, null, null, context, &s.iosb, afd.IOCTL.SEND, &q.info, @sizeOf(AFD.SEND_INFO), null, 0));
+            return b.settle(o, windows.ntdll.NtDeviceIoControlFile(w.socket_handle, null, null, context, &s.iosb, windows.IOCTL.AFD.SEND, &q.info, @sizeOf(windows.AFD.SEND_INFO), null, 0));
         },
         .net_receive => |r| {
             if (!b.bindHandle(r.socket_handle)) return b.refuse(o);
@@ -485,7 +482,7 @@ fn advance(b: *Iocp, o: anytype, first_status: Status, first_information: usize)
             };
             a.info = .{ .UseSAN = .FALSE, .Sequence = a.response.info.Sequence, .AcceptHandle = a.socket };
             s.stage = .accept;
-            status = windows.ntdll.NtDeviceIoControlFile(s.target, null, null, context, &s.iosb, afd.IOCTL.ACCEPT, &a.info, @sizeOf(AFD.ACCEPT_INFO), null, 0);
+            status = windows.ntdll.NtDeviceIoControlFile(s.target, null, null, context, &s.iosb, windows.IOCTL.AFD.ACCEPT, &a.info, @sizeOf(windows.AFD.ACCEPT_INFO), null, 0);
             if (results.entryFollows(status)) return false;
             information = 0;
         },
@@ -588,13 +585,13 @@ pub fn submitPending(b: *Iocp, token: pending.Token, operation: Io.Operation) er
             slot.request = .{ .receive = .{ .info = undefined, .buffer = .{toBuffer(.@"var", firstBuffer(r.data))} } };
             const q = &slot.request.receive;
             q.info = .{ .BufferArray = &q.buffer, .BufferCount = 1, .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true }, .TdiFlags = .{ .NORMAL = true } };
-            break :status windows.ntdll.NtDeviceIoControlFile(handle, null, null, context, &slot.iosb, afd.IOCTL.RECEIVE, &q.info, @sizeOf(AFD.RECV_INFO), null, 0);
+            break :status windows.ntdll.NtDeviceIoControlFile(handle, null, null, context, &slot.iosb, windows.IOCTL.AFD.RECEIVE, &q.info, @sizeOf(windows.AFD.RECV_INFO), null, 0);
         },
         .net_write => |w| status: {
             slot.request = .{ .send = .{ .info = undefined, .buffer = .{toBuffer(.@"const", firstChunk(w.header, w.data, w.splat))} } };
             const q = &slot.request.send;
             q.info = .{ .BufferArray = &q.buffer, .BufferCount = 1, .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true }, .TdiFlags = .{} };
-            break :status windows.ntdll.NtDeviceIoControlFile(handle, null, null, context, &slot.iosb, afd.IOCTL.SEND, &q.info, @sizeOf(AFD.SEND_INFO), null, 0);
+            break :status windows.ntdll.NtDeviceIoControlFile(handle, null, null, context, &slot.iosb, windows.IOCTL.AFD.SEND, &q.info, @sizeOf(windows.AFD.SEND_INFO), null, 0);
         },
         .net_receive => |r| status: {
             slot.request = .{ .datagram_in = undefined };
@@ -756,7 +753,7 @@ pub fn waitHandle(b: *Iocp) Handle {
 
 // Requests.
 
-fn receiveDatagram(socket: Handle, q: *DatagramIn, buffer: []u8, flags: net.ReceiveFlags, iosb: *IoStatusBlock, context: ?*anyopaque) Status {
+fn receiveDatagram(socket: Handle, q: *DatagramIn, buffer: []u8, flags: net.ReceiveFlags, iosb: *windows.IO_STATUS_BLOCK, context: ?*anyopaque) Status {
     q.* = .{ .info = undefined, .buffer = .{toBuffer(.@"var", buffer)}, .address = undefined, .address_len = @sizeOf(Threaded.PosixAddress) };
     q.info = .{
         .BufferArray = &q.buffer,
@@ -766,10 +763,10 @@ fn receiveDatagram(socket: Handle, q: *DatagramIn, buffer: []u8, flags: net.Rece
         .Address = &q.address,
         .AddressLength = &q.address_len,
     };
-    return windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, iosb, afd.IOCTL.RECEIVE_DATAGRAM, &q.info, @sizeOf(AFD.RECV_DATAGRAM_INFO), null, 0);
+    return windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, iosb, windows.IOCTL.AFD.RECEIVE_DATAGRAM, &q.info, @sizeOf(windows.AFD.RECV_DATAGRAM_INFO), null, 0);
 }
 
-fn sendDatagram(socket: Handle, q: *DatagramOut, message: *const net.OutgoingMessage, iosb: *IoStatusBlock, context: ?*anyopaque) Status {
+fn sendDatagram(socket: Handle, q: *DatagramOut, message: *const net.OutgoingMessage, iosb: *windows.IO_STATUS_BLOCK, context: ?*anyopaque) Status {
     q.* = .{ .info = undefined, .buffer = .{.{ .buf = message.data_ptr, .len = @intCast(@min(message.data_len, std.math.maxInt(u32))) }}, .address = undefined };
     const len = Threaded.addressToPosix(message.address, &q.address);
     q.info = .{
@@ -786,17 +783,17 @@ fn sendDatagram(socket: Handle, q: *DatagramOut, message: *const net.OutgoingMes
             .RemoteAddress = &q.address,
         },
     };
-    return windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, iosb, afd.IOCTL.SEND_DATAGRAM, &q.info, @sizeOf(AFD.SEND_DATAGRAM_INFO), null, 0);
+    return windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, iosb, windows.IOCTL.AFD.SEND_DATAGRAM, &q.info, @sizeOf(windows.AFD.SEND_DATAGRAM_INFO), null, 0);
 }
 
-fn toBuffer(comptime mutability: AFD.Mutability, bytes: switch (mutability) {
+fn toBuffer(comptime mutability: windows.AFD.Mutability, bytes: switch (mutability) {
     .@"const" => []const u8,
     .@"var" => []u8,
-}) AFD.WSABUF(mutability) {
+}) windows.AFD.WSABUF(mutability) {
     return .{ .buf = bytes.ptr, .len = @intCast(@min(bytes.len, std.math.maxInt(u32))) };
 }
 
-fn addBuffer(comptime mutability: AFD.Mutability, buffers: []AFD.WSABUF(mutability), n: *u32, bytes: switch (mutability) {
+fn addBuffer(comptime mutability: windows.AFD.Mutability, buffers: []windows.AFD.WSABUF(mutability), n: *u32, bytes: switch (mutability) {
     .@"const" => []const u8,
     .@"var" => []u8,
 }) void {
@@ -807,7 +804,7 @@ fn addBuffer(comptime mutability: AFD.Mutability, buffers: []AFD.WSABUF(mutabili
 
 /// A write's buffers as `Threaded` lays them out: the header, the data,
 /// and the splat (a one-byte pattern expanded through `splat_buffer`).
-fn gatherWrite(buffers: []AFD.WSABUF(.@"const"), splat_buffer: *[Threaded.splat_buffer_size]u8, header: []const u8, data: []const []const u8, splat: usize) u32 {
+fn gatherWrite(buffers: []windows.AFD.WSABUF(.@"const"), splat_buffer: *[Threaded.splat_buffer_size]u8, header: []const u8, data: []const []const u8, splat: usize) u32 {
     var n: u32 = 0;
     addBuffer(.@"const", buffers, &n, header);
     for (data[0 .. data.len - 1]) |d| addBuffer(.@"const", buffers, &n, d);

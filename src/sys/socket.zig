@@ -90,8 +90,8 @@ pub fn openUnix(address: *const net.UnixAddress) OpenUnixError!Handle {
     };
     errdefer close(handle);
     if (!address.isAbstract()) {
-        var target: afd.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
-        const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(afd.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
+        var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
+        const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
         afd.option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes) catch |err| return switch (err) {
             error.SystemResources => error.SystemResources,
             error.Unexpected => error.Unexpected,
@@ -107,7 +107,7 @@ pub fn openUnix(address: *const net.UnixAddress) OpenUnixError!Handle {
 /// The address the socket's own end is bound to.
 pub fn localAddress(fd: Handle) error{ SystemResources, Unexpected }!net.IpAddress {
     var storage: Threaded.PosixAddress = undefined;
-    if (is_windows) return switch (afd.control(fd, afd.IOCTL.GET_ADDRESS, &.{}, std.mem.asBytes(&storage))) {
+    if (is_windows) return switch (afd.control(fd, windows.IOCTL.AFD.GET_ADDRESS, &.{}, std.mem.asBytes(&storage))) {
         .SUCCESS => Threaded.addressFromPosix(&storage),
         .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),

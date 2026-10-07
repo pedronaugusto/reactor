@@ -126,6 +126,23 @@ pub fn awaitConcurrent(s: *Scheduler, borrowed: Io, batch: *Io.Batch, timeout: I
     return error.Timeout;
 }
 
+/// A thread outside the runtime whose calls cannot run as std's code
+/// (IOCP, where std's APC calls are refused on a bound socket): each
+/// submitted operation through `io`'s own `operate`, in order, each to its
+/// end. Nothing is left pending.
+pub fn awaitEach(io: Io, batch: *Io.Batch) Io.Cancelable!void {
+    var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const next = storage.submission.node.next;
+        const result = try io.vtable.operate(io.userdata, storage.submission.operation);
+        complete(batch, index, result);
+        index = next;
+    }
+    batch.submitted = .{ .head = .none, .tail = .none };
+}
+
 pub fn cancel(s: *Scheduler, borrowed: Io, batch: *Io.Batch) void {
     _ = Scheduler.current() orelse return borrowed.vtable.batchCancel(borrowed.userdata, batch);
     if (batch.pending.head != .none) drainAll(s, batch, .to_unused);

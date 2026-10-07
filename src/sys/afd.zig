@@ -13,9 +13,6 @@ const Threaded = Io.Threaded;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
 
-pub const AFD = windows.AFD;
-pub const IOCTL = windows.IOCTL.AFD;
-
 pub const OpenError = error{
     AddressFamilyUnsupported,
     ProtocolUnsupportedByAddressFamily,
@@ -36,14 +33,14 @@ pub fn open(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.Pro
             .STANDARD = .{ .RIGHTS = .{ .WRITE_DAC = true }, .SYNCHRONIZE = true },
             .GENERIC = .{ .WRITE = true, .READ = true },
         },
-        &.{ .ObjectName = @constCast(&windows.UNICODE_STRING.init(AFD.DEVICE_NAME ++ .{ '\\', 'E', 'n', 'd', 'p', 'o', 'i', 'n', 't' })) },
+        &.{ .ObjectName = @constCast(&windows.UNICODE_STRING.init(windows.AFD.DEVICE_NAME ++ .{ '\\', 'E', 'n', 'd', 'p', 'o', 'i', 'n', 't' })) }, // safe: the system only reads the name
         &iosb,
         null,
         .{},
         .{ .READ = true, .WRITE = true },
         .OPEN_IF,
         .{ .IO = .ASYNCHRONOUS },
-        &AFD.OPEN_PACKET.FULL_EA_INFORMATION{ .Value = .{
+        &windows.AFD.OPEN_PACKET.FULL_EA_INFORMATION{ .Value = .{
             .EndpointType = .{
                 .CONNECTIONLESS = switch (mode) {
                     .stream, .seqpacket, .rdm => false,
@@ -59,7 +56,7 @@ pub fn open(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.Pro
             .TransportDeviceNameLength = 0,
             .TransportDeviceName = undefined,
         } },
-        @sizeOf(AFD.OPEN_PACKET.FULL_EA_INFORMATION),
+        @sizeOf(windows.AFD.OPEN_PACKET.FULL_EA_INFORMATION),
     )) {
         .SUCCESS => return handle,
         .CANCELLED => continue,
@@ -90,9 +87,9 @@ pub fn setOption(handle: Handle, level: i32, name: u32, value: anytype) error{ S
 }
 
 /// A socket option call, its value as bytes.
-pub fn option(handle: Handle, mode: AFD.SOCKOPT_INFO.Mode, level: i32, name: u32, value: []u8) error{ SystemResources, Unexpected }!void {
-    const info: AFD.SOCKOPT_INFO = .{ .mode = mode, .level = level, .optname = name, .optval = value.ptr, .optlen = value.len };
-    return switch (control(handle, IOCTL.SOCKOPT, std.mem.asBytes(&info), &.{})) {
+pub fn option(handle: Handle, mode: windows.AFD.SOCKOPT_INFO.Mode, level: i32, name: u32, value: []u8) error{ SystemResources, Unexpected }!void {
+    const info: windows.AFD.SOCKOPT_INFO = .{ .mode = mode, .level = level, .optname = name, .optval = value.ptr, .optlen = value.len };
+    return switch (control(handle, windows.IOCTL.AFD.SOCKOPT, std.mem.asBytes(&info), &.{})) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),
@@ -101,12 +98,12 @@ pub fn option(handle: Handle, mode: AFD.SOCKOPT_INFO.Mode, level: i32, name: u32
 
 /// Binds the socket's own end to `address` (an unspecified one picks a
 /// free port); returns the address bound.
-pub fn bind(handle: Handle, address: *const net.IpAddress, mode: AFD.BIND_INFO.MODE) error{ AddressInUse, SystemResources, Unexpected }!net.IpAddress {
-    const Storage = extern struct { info: AFD.BIND_INFO, address: Threaded.PosixAddress };
+pub fn bind(handle: Handle, address: *const net.IpAddress, mode: windows.AFD.BIND_INFO.MODE) error{ AddressInUse, SystemResources, Unexpected }!net.IpAddress {
+    const Storage = extern struct { info: windows.AFD.BIND_INFO, address: Threaded.PosixAddress };
     var storage: Storage = .{ .info = .{ .Mode = mode }, .address = undefined };
     const len = Threaded.addressToPosix(address, &storage.address);
     const in = std.mem.asBytes(&storage)[0 .. @offsetOf(Storage, "address") + len];
-    return switch (control(handle, IOCTL.BIND, in, std.mem.asBytes(&storage.address)[0..len])) {
+    return switch (control(handle, windows.IOCTL.AFD.BIND, in, std.mem.asBytes(&storage.address)[0..len])) {
         .SUCCESS => Threaded.addressFromPosix(&storage.address),
         .SHARING_VIOLATION, .ADDRESS_ALREADY_EXISTS => error.AddressInUse,
         .INSUFFICIENT_RESOURCES => error.SystemResources,
@@ -116,9 +113,9 @@ pub fn bind(handle: Handle, address: *const net.IpAddress, mode: AFD.BIND_INFO.M
 
 /// The Unix socket bound to no path, as std binds one before connecting.
 pub fn bindUnixUnnamed(handle: Handle) error{ SystemResources, Unexpected }!void {
-    const Storage = extern struct { info: AFD.BIND_INFO, address: ws2_32.sockaddr.un };
+    const Storage = extern struct { info: windows.AFD.BIND_INFO, address: ws2_32.sockaddr.un };
     var storage: Storage = .{ .info = .{ .Mode = .Unix }, .address = .{ .path = @splat(0) } };
-    return switch (control(handle, IOCTL.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address))) {
+    return switch (control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address))) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),
@@ -136,15 +133,15 @@ pub fn ConnectInfo(comptime Address: type) type {
 /// What `WAIT_FOR_LISTEN` fills: the pending connection's sequence and
 /// its peer's address.
 pub const ListenResponse = extern struct {
-    info: AFD.LISTEN_RESPONSE_INFO,
+    info: windows.AFD.LISTEN_RESPONSE_INFO,
     address: extern union { ip: Threaded.PosixAddress, unix: ws2_32.sockaddr.un },
 };
 
 /// Puts a connection `WAIT_FOR_LISTEN` reported back in the listener's
 /// queue, for the next accept.
 pub fn deferAccept(listener: Handle, sequence: u32) void {
-    const info: AFD.DEFER_ACCEPT_INFO = .{ .Sequence = sequence, .Reject = .FALSE };
-    _ = control(listener, IOCTL.DEFER_ACCEPT, std.mem.asBytes(&info), &.{});
+    const info: windows.AFD.DEFER_ACCEPT_INFO = .{ .Sequence = sequence, .Reject = .FALSE };
+    _ = control(listener, windows.IOCTL.AFD.DEFER_ACCEPT, std.mem.asBytes(&info), &.{});
 }
 
 /// `AFD_POLL`'s events: what makes a socket ready.
