@@ -127,8 +127,9 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     memory.protect(c.home_stack[0..memory.pageSize()]) catch return error.SystemResources;
 
     const home = &c.processors[0];
-    const top = @intFromPtr(c.home_stack.ptr) + c.home_stack.len; // safe: the end of the mapping, for the first frame
-    home.sched_context = fiber.initial(top, schedulerEntry, home);
+    const bottom = @intFromPtr(c.home_stack.ptr); // safe: the start of the mapping, for the stack's bounds
+    const top = bottom + c.home_stack.len;
+    home.sched_context = fiber.initial(.{ .top = top, .limit = bottom + memory.pageSize(), .bottom = bottom }, top, schedulerEntry, home);
     c.root.processor = home;
     home.current = &c.root;
     Scheduler.enter(home);
