@@ -42,7 +42,7 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 ## What it does
 
 - **Every `std.Io` slot.** Sockets, files, timers, futexes, batches and
-  cancellation run on io_uring; calls that can block for milliseconds (directory
+  cancellation run on io_uring (Linux) or IOCP over AFD (Windows); calls that can block for milliseconds (directory
   walks, `flock`, process waits) run off the workers on owned `Io.Threaded`
   lanes, so std's own code and std's own cancellation serve them; calls that
   never block run std's code on the worker.
@@ -55,8 +55,10 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
   closures come from a pool reserved there.
 - **`Loop`**: one thread's completion engine with no threads of its own, driven
   by `run(.nowait)`, `run(.once)` or `run(.until)`, completions by callback or
-  `reap`.
+  `reap`; on Windows it can share the host's completion port.
 
 ## Scope
 
-Linux (io_uring 5.19+). On other systems `init` returns `BackendUnavailable`.
+Linux (io_uring 5.19+) and Windows 8+ (IOCP; sleeps precise to about half a
+millisecond from Windows 10 1803, the system tick before). On other systems
+`init` returns `BackendUnavailable`.
