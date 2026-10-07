@@ -4,4 +4,5 @@ test {
     _ = @import("wheel_test.zig");
     _ = @import("scheduler/run_queue_test.zig");
     _ = @import("runtime_test.zig");
+    _ = @import("uring_test.zig");
 }

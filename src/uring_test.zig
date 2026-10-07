@@ -1,0 +1,157 @@
+//! The runtime and the loop on io_uring itself: shakedown's conformance
+//! suite, sockets, files, cancels and timeouts against the real kernel.
+//! Linux only; skipped where io_uring is missing or refused.
+const builtin = @import("builtin");
+const std = @import("std");
+const testing = std.testing;
+const Io = std.Io;
+const net = Io.net;
+const shakedown = @import("shakedown");
+
+const Runtime = @import("Runtime.zig");
+const Loop = @import("Loop.zig");
+const fiber = @import("fiber.zig");
+
+fn runtime(r: *Runtime, workers: u16) !void {
+    if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
+    r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    errdefer r.deinit();
+    try r.start();
+}
+
+test "shakedown's conformance suite passes on io_uring with workers" {
+    var r: Runtime = undefined;
+    try runtime(&r, 3);
+    defer r.deinit();
+    var failure: shakedown.conformance.Failure = undefined;
+    shakedown.conformance.run(testing.allocator, r.io(), .{ .failure = &failure }) catch {
+        std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });
+        return error.Nonconforming;
+    };
+}
+
+test "shakedown's conformance suite passes on io_uring with no thread of reactor's own" {
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    var failure: shakedown.conformance.Failure = undefined;
+    shakedown.conformance.run(testing.allocator, r.io(), .{ .failure = &failure }) catch {
+        std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });
+        return error.Nonconforming;
+    };
+}
+
+fn echoOnce(io: Io, server: *net.Server) !void {
+    var stream = try server.accept(io);
+    defer stream.close(io);
+    var buffer: [64]u8 = undefined;
+    var reader = stream.reader(io, &buffer);
+    var out: [64]u8 = undefined;
+    var writer = stream.writer(io, &out);
+    const line = try reader.interface.takeDelimiterInclusive('\n');
+    try writer.interface.writeAll(line);
+    try writer.interface.flush();
+}
+
+test "a loopback echo: listen, accept, connect, read and write" {
+    var r: Runtime = undefined;
+    try runtime(&r, 2);
+    defer r.deinit();
+    const io = r.io();
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var echo = try io.concurrent(echoOnce, .{ io, &server });
+    var stream = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out: [64]u8 = undefined;
+    var writer = stream.writer(io, &out);
+    try writer.interface.writeAll("hello, ring\n");
+    try writer.interface.flush();
+    var buffer: [64]u8 = undefined;
+    var reader = stream.reader(io, &buffer);
+    try testing.expectEqualStrings("hello, ring\n", try reader.interface.takeDelimiterInclusive('\n'));
+    try echo.await(io);
+}
+
+fn readOne(io: Io, socket: net.Socket.Handle, buffer: []u8) (Io.Cancelable || Io.Operation.NetRead.Error)!usize {
+    var data: [1][]u8 = .{buffer};
+    const result = try io.operate(.{ .net_read = .{ .socket_handle = socket, .data = &data } });
+    const r = try result.net_read;
+    return r.data_len;
+}
+
+test "a cancel ends a read the kernel holds" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try net.Socket.createPair(io, .{});
+    defer for (pair) |s| s.close(io);
+    var buffer: [16]u8 = undefined;
+    var reading = try io.concurrent(readOne, .{ io, pair[0].handle, &buffer });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectError(error.Canceled, reading.cancel(io));
+}
+
+test "after operateTimeout returns Timeout, the kernel writes nothing into the buffer" {
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try net.Socket.createPair(io, .{});
+    defer for (pair) |s| s.close(io);
+    var buffer: [16]u8 = @splat(0xaa);
+    var data: [1][]u8 = .{&buffer};
+    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = pair[0].handle, .data = &data } }, .{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } });
+    try testing.expectError(error.Timeout, result);
+    // The buffer is "freed": poisoned, then data arrives on the socket.
+    @memset(&buffer, 0xdd);
+    var send: [1][]const u8 = .{"late"};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].handle, .data = &send } })).net_write;
+    try io.sleep(.fromMilliseconds(5), .awake);
+    for (buffer) |b| try testing.expectEqual(@as(u8, 0xdd), b);
+}
+
+test "a positional write, a sync and a positional read of a file" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "ring.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "evented bytes", 3);
+    try file.sync(io);
+    var buffer: [13]u8 = undefined;
+    try testing.expectEqual(@as(usize, 13), try file.readPositionalAll(io, &buffer, 3));
+    try testing.expectEqualStrings("evented bytes", &buffer);
+}
+
+test "the loop alone: a timer and a wake, completions reaped" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var l: Loop = undefined;
+    l.init(testing.allocator, .{}) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer l.deinit(testing.allocator);
+    const now = Io.Clock.Timestamp.now(Io.Threaded.global_single_threaded.io(), .awake);
+    var timer: Loop.Op = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) }, .user_data = 7 };
+    try l.submit(&timer);
+    try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
+    try testing.expect(l.nextTimeout() != null);
+    try testing.expectEqual(@as(u32, 1), try l.run(.once));
+    var out: [4]*Loop.Op = undefined;
+    const done = l.reap(&out);
+    try testing.expectEqual(@as(usize, 1), done.len);
+    try testing.expectEqual(@as(usize, 7), done[0].user_data);
+    // A wake from another thread ends a wait with nothing to deliver.
+    const thread = try std.Thread.spawn(.{}, Loop.wake, .{&l});
+    defer thread.join();
+    try testing.expectEqual(@as(u32, 0), try l.run(.once));
+}
