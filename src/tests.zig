@@ -5,4 +5,5 @@ test {
     _ = @import("scheduler/run_queue_test.zig");
     _ = @import("runtime_test.zig");
     _ = @import("uring_test.zig");
+    _ = @import("threaded_test.zig");
 }

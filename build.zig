@@ -16,6 +16,10 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    // std's own Threaded.zig, read by the test that checks which slots may
+    // run std's code on a worker.
+    const threaded_source = b.addWriteFiles().addCopyFile(std.Build.LazyPath.zig_lib.path(b, "std/Io/Threaded.zig"), "Threaded.zig.txt");
+    test_module.addAnonymousImport("threaded.source", .{ .root_source_file = threaded_source });
     const tests = b.addTest(.{ .name = "reactor-tests", .filters = filters, .root_module = test_module });
     const test_step = b.step("test", "Run the tests and example");
     test_step.dependOn(&b.addRunArtifact(tests).step);

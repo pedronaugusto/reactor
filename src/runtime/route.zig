@@ -48,9 +48,9 @@ pub fn borrowed(comptime name: []const u8) *const SlotFn(name) {
 /// A function with the slot's signature that passes its arguments, after
 /// `userdata`, to `Impl.go` as a tuple.
 fn generate(comptime Impl: type, comptime name: []const u8) *const SlotFn(name) {
-    const params = paramsOf(name);
+    const params = comptime paramsOf(name);
     const R = Return(name);
-    return switch (params.len) {
+    return switch (comptime params.len) {
         1 => &struct {
             fn f(u: ?*anyopaque) R {
                 return Impl.go(u, .{});
