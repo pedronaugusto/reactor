@@ -478,9 +478,20 @@ pub fn system() Io {
 
 threadlocal var held: ?*Processor = null;
 
+/// The processor the calling thread holds, read afresh at every call.
+///
+/// A task moves between threads at a switch, which the compiler cannot
+/// see: within one function it computes a thread-local's address once and
+/// reuses it, so after a park inlined into the same function a task would
+/// read the thread it left. Never inlined, so each call computes the
+/// address on the thread that makes it.
+noinline fn heldNow() ?*Processor {
+    return held;
+}
+
 /// The calling thread now holds `p`.
 pub fn enter(p: *Processor) void {
-    assert(held == null);
+    assert(heldNow() == null);
     held = p;
 }
 
@@ -490,13 +501,13 @@ pub fn leave() void {
 
 /// The processor the calling thread holds, if any.
 pub fn processor() ?*Processor {
-    return held;
+    return heldNow();
 }
 
 /// The task running on the calling thread, if it is one of this
 /// scheduler's.
 pub fn current() ?*Task {
-    const p = held orelse return null;
+    const p = heldNow() orelse return null;
     return p.current;
 }
 
@@ -506,7 +517,7 @@ pub fn current() ?*Task {
 /// task's stack is still: there it publishes the task to whoever will
 /// wake it (a futex bucket, a lane, an awaited future).
 pub fn park(after: ?Processor.After) void {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
@@ -517,7 +528,7 @@ pub fn park(after: ?Processor.After) void {
 
 /// To the back of the queue.
 pub fn yield() void {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
@@ -528,7 +539,7 @@ pub fn yield() void {
 
 /// Ends the running task: `after` runs once it is off its stack.
 pub fn exit(after: Processor.After) noreturn {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
@@ -543,7 +554,7 @@ pub fn exit(after: Processor.After) noreturn {
 /// The clock is read at the first such point of a run and every eighth
 /// after, so a task that waits soon never reads it.
 pub fn spend(s: *Scheduler) void {
-    const p = held orelse return;
+    const p = heldNow() orelse return;
     const t = p.current orelse return;
     if (t.budget > 0) {
         t.budget -= 1;
@@ -565,7 +576,7 @@ pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
         @ptrCast(@alignCast(t.processor)) // safe: only processors are stored there
     else
         null;
-    if (held) |p| {
+    if (heldNow()) |p| {
         if (target == null or target == p) return p.pushLocal(t, how);
         return target.?.pushRemote(t);
     }
@@ -689,7 +700,7 @@ pub fn release(s: *Scheduler, t: *Task) void {
 /// Where a newly made task runs first: the creator's processor, or,
 /// outside any, the next by round robin under `per_core`.
 pub fn place(s: *Scheduler, t: *Task) void {
-    if (held) |p| {
+    if (heldNow()) |p| {
         t.processor = p;
         return p.pushLocal(t, .spawned);
     }
