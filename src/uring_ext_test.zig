@@ -13,6 +13,7 @@ const IpAddress = Io.net.IpAddress;
 const reactor = @import("reactor.zig");
 const Runtime = reactor.Runtime;
 const fiber = @import("fiber.zig");
+const shakedown = @import("shakedown");
 
 fn runtime(r: *Runtime, workers: u16) !void {
     if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
@@ -230,4 +231,49 @@ test "a host waiting on the runtime's handle is woken when a lane call ends" {
     task.await(io);
     // Woken by the lane's completion, not by the host's own timeout.
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 2 * std.time.ns_per_s);
+}
+
+/// The process's threads, as Linux counts them.
+fn threadCount() !usize {
+    var buffer: [4096]u8 = undefined;
+    const io = Io.Threaded.global_single_threaded.io();
+    const text = try Io.Dir.cwd().readFile(io, "/proc/self/status", &buffer);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "Threads:")) {
+        return std.fmt.parseInt(usize, std.mem.trim(u8, line["Threads:".len..], " \t"), 10);
+    };
+    return error.NoThreadCount;
+}
+
+fn conformance(io: Io, failure: *shakedown.conformance.Failure, done: *std.atomic.Value(bool)) anyerror!void {
+    defer done.store(true, .release);
+    return shakedown.conformance.run(testing.allocator, io, .{ .failure = failure });
+}
+
+test "a runtime with no thread of its own runs the conformance suite in 1 ms frames, and starts no thread" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (!fiber.supported) return error.SkipZigTest;
+    const before = try threadCount();
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 0, .offload = .none, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer r.deinit();
+    try r.start();
+    const io = r.io();
+    var failure: shakedown.conformance.Failure = undefined;
+    var done: std.atomic.Value(bool) = .init(false);
+    var suite = try io.concurrent(conformance, .{ io, &failure, &done });
+    // The host's frames: a millisecond of the runtime's time each.
+    var frames: usize = 0;
+    while (!done.load(.acquire)) : (frames += 1) {
+        r.run(.{ .until = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake }) });
+        try testing.expectEqual(before, try threadCount());
+    }
+    suite.await(io) catch |err| {
+        std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });
+        return err;
+    };
+    try testing.expect(frames > 0);
 }

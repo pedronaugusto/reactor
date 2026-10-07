@@ -290,3 +290,43 @@ test "calls beyond a lane's cap wait their turn, never inline on a worker" {
     try group.await(io);
     try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(Runtime.Lane.general)].@"inline");
 }
+
+/// An executor that counts the calls handed to it.
+const Counting = shakedown.Layer(std.atomic.Value(u32), .{ .groupConcurrent = struct {
+    fn groupConcurrent(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+        const layer = Counting.of(userdata);
+        _ = layer.state.fetchAdd(1, .monotonic);
+        return layer.base.vtable.groupConcurrent(layer.base.userdata, group, context, alignment, start);
+    }
+}.groupConcurrent });
+
+test "an injected executor carries every lane call" {
+    try skipWithoutFibers();
+    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var counting: Counting = .init(threaded.io(), .init(0));
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = counting.io() } });
+    defer t.deinit();
+    const io = t.io();
+    for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));
+    try testing.expectEqual(@as(u32, 5), counting.state.load(.monotonic));
+}
+
+fn manyCalls(io: Io, rounds: usize) !void {
+    for (0..rounds) |_| if (blocking(io, .general, addOne, .{0}) != 1) return error.WrongResult;
+}
+
+test "lane calls one after another from a task and from the root keep their frames" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    // A value the caller keeps in a register across every switch.
+    const me = std.Thread.getCurrentId();
+    var task = try io.concurrent(manyCalls, .{ io, 5000 });
+    try task.await(io);
+    try manyCalls(io, 5000);
+    try testing.expectEqual(me, std.Thread.getCurrentId());
+}
