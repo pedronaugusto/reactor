@@ -257,16 +257,22 @@ test "a thread outside the runtime reads and writes a socket the runtime's tasks
     try testing.expectEqualStrings("reply", buffer[0..5]);
 }
 
-test "a child's output through its pipes, and its exit through a wait packet" {
+test "a child's output through its pipe, and its exit through a wait packet" {
     var r: Runtime = undefined;
     try runtime(&r, 2);
     defer r.deinit();
     const io = r.io();
-    const result = try std.process.run(testing.allocator, io, .{ .argv = &.{ "cmd.exe", "/c", "echo hello& exit 3" } });
-    defer testing.allocator.free(result.stdout);
-    defer testing.allocator.free(result.stderr);
-    try testing.expectEqualStrings("hello", std.mem.trimEnd(u8, result.stdout, "\r\n"));
-    try testing.expectEqual(std.process.Child.Term{ .exited = 3 }, result.term);
+    // Spawned by std's own Io: the pipe and the process are read and
+    // waited on through the runtime's.
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ "cmd.exe", "/c", "echo hello& exit 3" }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    defer child.kill(io);
+    var buffer: [64]u8 = undefined;
+    var reader = child.stdout.?.readerStreaming(io, &buffer);
+    var out: [64]u8 = undefined;
+    var writer: Io.Writer = .fixed(&out);
+    _ = try reader.interface.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", std.mem.trimEnd(u8, writer.buffered(), "\r\n"));
+    try testing.expectEqual(std.process.Child.Term{ .exited = 3 }, try child.wait(io));
 }
 
 fn waitChild(io: Io, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
@@ -278,7 +284,7 @@ test "a cancel ends a wait on a child that runs on" {
     try runtime(&r, 1);
     defer r.deinit();
     const io = r.io();
-    var child = try std.process.spawn(io, .{ .argv = &.{ "cmd.exe", "/c", "ping -n 30 127.0.0.1 > nul" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ "cmd.exe", "/c", "ping -n 30 127.0.0.1 > nul" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
     defer child.kill(io);
     var waiting = try io.concurrent(waitChild, .{ io, &child });
     try io.sleep(.fromMilliseconds(20), .awake);
