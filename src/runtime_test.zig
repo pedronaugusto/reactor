@@ -1,6 +1,7 @@
 //! The runtime's tasks, timers, futexes, groups and cancellation, on the
 //! seeded fake (`Driver`, virtual time) and on real worker threads over the
 //! idle fake (`Threads`, real time); shakedown's conformance suite on both.
+const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
@@ -230,4 +231,34 @@ test "a futex wake from a thread outside the runtime reaches a waiting task" {
     const thread = try std.Thread.spawn(.{}, wakeFromThread, .{ io, &word });
     defer thread.join();
     while (word.load(.acquire) == 0) try io.futexWait(u32, &word.raw, 0);
+}
+
+fn connectBriefly(io: Io, rounds: usize, failures: *std.atomic.Value(u32)) Io.Cancelable!void {
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(9) };
+    for (0..rounds) |_| {
+        if (address.connect(io, .{ .mode = .stream, .timeout = .{ .duration = .{ .raw = .fromMicroseconds(200), .clock = .awake } } })) |stream| {
+            stream.close(io);
+        } else |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.Timeout => {},
+            else => _ = failures.fetchAdd(1, .monotonic),
+        }
+    }
+}
+
+test "a deadline's timer is disarmed on the processor that armed it, wherever its task was woken" {
+    try skipWithoutFibers();
+    // The runtime makes its own sockets only where it has a backend.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 128, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var failures: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    // The idle fake never completes a connect: every one ends at its
+    // deadline, and other processors are free to steal the woken task.
+    for (0..32) |_| try group.concurrent(io, connectBriefly, .{ io, 20, &failures });
+    try group.await(io);
+    try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
 }

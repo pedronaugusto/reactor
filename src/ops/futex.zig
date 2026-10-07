@@ -11,7 +11,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 
-const Loop = @import("../Loop.zig");
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("perform.zig");
@@ -75,8 +74,7 @@ const Waiter = struct {
     bucket: *Bucket,
     scheduler: *Scheduler,
     hook: Task.Hook = .{ .cancel = cancelHook },
-    timer: Loop.Op = .{ .kind = .{ .timer = undefined } },
-    timed: bool = false,
+    deadline: perform.Deadline = .{ .fire = timedOut },
 
     /// A cancel of the waiting task: out of the bucket, and runnable.
     fn cancelHook(hook: *Task.Hook, t: *Task) void {
@@ -91,10 +89,8 @@ const Waiter = struct {
         if (was) w.scheduler.ready(t, .woken);
     }
 
-    fn timedOut(l: *Loop, o: *Loop.Op) void {
-        _ = l;
-        const w: *Waiter = @alignCast(@fieldParentPtr("timer", o)); // safe: the field belongs to this record
-        if (o.result.timer) |_| {} else |_| return; // disarmed by the waiter itself
+    fn timedOut(d: *perform.Deadline) void {
+        const w: *Waiter = @alignCast(@fieldParentPtr("deadline", d)); // safe: the field belongs to this record
         w.bucket.lock();
         const was = w.linked;
         if (was) {
@@ -129,25 +125,17 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
     }
     b.append(&w);
     if (perform.deadline(p, timeout)) |deadline| {
-        w.timer.kind = .{ .timer = deadline };
-        w.timer.callback = Waiter.timedOut;
-        t.pins += 1;
-        p.loop.submit(&w.timer) catch {
+        if (!w.deadline.arm(s, deadline)) {
             // No room for a timer: return at once, a spurious wake.
-            t.pins -= 1;
             b.remove(&w);
             b.unlock();
             t.leaveWait();
             return;
-        };
-        w.timed = true;
+        }
     }
     Scheduler.park(.{ .func = unlockAfterPark, .context = b });
-    if (w.timed) {
-        // Back on the processor that armed the timer: disarm it there.
-        p.loop.cancel(&w.timer);
-        t.pins -= 1;
-    }
+    // Back on the processor that armed the timer: disarm it there.
+    w.deadline.disarm();
     t.leaveWait();
     if (w.outcome == .canceled) return t.acknowledge();
 }

@@ -6,6 +6,7 @@
 //! timer on the same processor that asks the kernel to end the operation
 //! the same way.
 const std = @import("std");
+const assert = std.debug.assert;
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
@@ -32,7 +33,7 @@ const Waiter = struct {
     /// Set on the processor when this task's cancel ended the operation.
     requested: bool = false,
     timed_out: bool = false,
-    timer: Loop.Op = .{ .kind = .{ .timer = undefined } },
+    deadline: Deadline = .{ .fire = expired },
 
     fn cancelHook(hook: *Task.Hook, t: *Task) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("hook", hook)); // safe: the field belongs to this record
@@ -51,11 +52,72 @@ const Waiter = struct {
         w.scheduler.ready(w.task, .completed);
     }
 
-    fn expired(l: *Loop, o: *Loop.Op) void {
-        const w: *Waiter = @alignCast(@fieldParentPtr("timer", o)); // safe: the field belongs to this record
-        if (o.result.timer) |_| {} else |_| return; // disarmed: the operation completed
+    fn expired(d: *Deadline) void {
+        const w: *Waiter = @alignCast(@fieldParentPtr("deadline", d)); // safe: the field belongs to this record
         w.timed_out = true;
-        l.cancel(w.o);
+        w.processor.loop.cancel(w.o);
+    }
+};
+
+/// A deadline on the running task's processor: a timer whose `fire` runs
+/// there when it passes. The task is held on that processor from `arm` to
+/// `disarm`, so the timer is only ever touched by the thread that owns its
+/// loop; and `disarm` returns only once the loop has let go of the timer,
+/// waiting for the cancel of one the kernel holds (the `real` and `boot`
+/// clocks' timers are the kernel's), since the timer lives in the task's
+/// frame.
+pub const Deadline = struct {
+    op: Loop.Op = .{ .kind = .{ .timer = undefined } },
+    /// On the processor, when the deadline passes before `disarm`.
+    fire: *const fn (d: *Deadline) void,
+    scheduler: *Scheduler = undefined,
+    processor: *Processor = undefined,
+    task: *Task = undefined,
+    armed: bool = false,
+    /// The owner waits for the cancel of a timer the kernel holds.
+    waiting: bool = false,
+
+    /// Arms it for the running task; false when its loop has no room.
+    pub fn arm(d: *Deadline, s: *Scheduler, at: Io.Clock.Timestamp) bool {
+        const p = Scheduler.processor().?;
+        d.scheduler = s;
+        d.processor = p;
+        d.task = p.current.?;
+        d.op.kind = .{ .timer = at };
+        d.op.callback = callback;
+        p.loop.submit(&d.op) catch return false;
+        d.task.pins += 1;
+        d.armed = true;
+        return true;
+    }
+
+    fn callback(l: *Loop, o: *Loop.Op) void {
+        _ = l;
+        const d: *Deadline = @alignCast(@fieldParentPtr("op", o)); // safe: the field belongs to this record
+        if (d.waiting) {
+            d.waiting = false;
+            return d.scheduler.ready(d.task, .completed);
+        }
+        if (o.result.timer) |_| d.fire(d) else |_| {}
+    }
+
+    /// From the task that armed it: no `fire` after this, and the loop
+    /// holds the timer no longer.
+    pub fn disarm(d: *Deadline) void {
+        if (!d.armed) return;
+        d.armed = false;
+        const p = d.processor;
+        assert(Scheduler.processor() == p);
+        if (d.op.state.phase != .idle) {
+            p.loop.cancel(&d.op);
+            // A wheel timer is delivered inside the cancel; the kernel's
+            // comes back later.
+            if (d.op.state.phase != .idle) {
+                d.waiting = true;
+                Scheduler.park(null);
+            }
+        }
+        d.task.pins -= 1;
     }
 };
 
@@ -76,20 +138,15 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
         t.leaveWait();
         return error.SystemResources;
     };
-    var timed = false;
     if (options.deadline) |at| {
-        w.timer.kind = .{ .timer = at };
-        w.timer.callback = Waiter.expired;
-        if (p.loop.submit(&w.timer)) |_| {
-            timed = true;
-        } else |_| {
-            // No room for the timer: end the operation now.
+        // No room for the timer: end the operation now.
+        if (!w.deadline.arm(s, at)) {
             w.timed_out = true;
             p.loop.cancel(o);
         }
     }
     Scheduler.park(null);
-    if (timed) p.loop.cancel(&w.timer);
+    w.deadline.disarm();
     t.leaveWait();
     if (!canceledResult(o)) return;
     if (w.requested) return t.acknowledge();
