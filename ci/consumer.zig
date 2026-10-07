@@ -9,5 +9,8 @@ pub fn main() void {
     _ = &reactor.Runtime.io;
     _ = &reactor.Loop.init;
     _ = &reactor.Loop.run;
+    _ = &reactor.wait;
+    _ = &reactor.Wake.init;
+    _ = &reactor.net.connect;
     _ = std;
 }

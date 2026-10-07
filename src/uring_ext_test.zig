@@ -42,6 +42,7 @@ fn writeSoon(io: Io, fd: posix.fd_t) Io.Cancelable!void {
 }
 
 test "a native wait on io_uring reports the member another task made ready" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 2);
     defer r.deinit();
@@ -71,6 +72,7 @@ fn waitWake(io: Io, w: *reactor.Wake) reactor.WaitError!void {
 }
 
 test "a Wake from a thread outside the runtime ends a task's native wait; a cancel ends another" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 1);
     defer r.deinit();
@@ -86,6 +88,7 @@ test "a Wake from a thread outside the runtime ends a task's native wait; a canc
 }
 
 test "a process is waited for on its pidfd in the loop, and a child's own wait reaps it there" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 1);
     defer r.deinit();
@@ -101,6 +104,7 @@ test "a process is waited for on its pidfd in the loop, and a child's own wait r
 }
 
 test "a signal is delivered to a runtime task waiting for it" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 1);
     defer r.deinit();
@@ -124,6 +128,7 @@ fn tcpPair(io: Io) ![2]Io.net.Stream {
 }
 
 test "a receiver on io_uring reads into the pool once the socket is readable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 1);
     defer r.deinit();
@@ -143,6 +148,7 @@ test "a receiver on io_uring reads into the pool once the socket is readable" {
 }
 
 test "a native deadline ends a read in the kernel, poisons the socket, and nothing writes the buffer after" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 0);
     defer r.deinit();
@@ -171,6 +177,7 @@ test "a native deadline ends a read in the kernel, poisons the socket, and nothi
 }
 
 test "resolve on a runtime is bounded inline; blocking runs on a lane" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 1);
     defer r.deinit();
@@ -201,6 +208,7 @@ fn laneTask(io: Io, done: *std.atomic.Value(bool)) void {
 }
 
 test "a host waiting on the runtime's handle is woken when a lane call ends" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try runtime(&r, 0);
     defer r.deinit();

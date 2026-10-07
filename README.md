@@ -56,7 +56,34 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 - **`Loop`**: one thread's completion engine with no threads of its own, driven
   by `run(.nowait)`, `run(.once)` or `run(.until)`, completions by callback or
   `reap`.
+- **Embedding.** A host that owns its loop waits on `Runtime.backendHandle`
+  for at most `nextTimeout` and calls `run(.nowait)`; work handed to the home
+  thread from elsewhere (a lane call ending, a wake from a worker) makes the
+  handle readable.
+
+## Beyond `std.Io`
+
+These take any `Io`. On a runtime's task they are native; on any other `Io`
+(`Io.Threaded`, a wrapping layer) they take the best path its slots allow,
+counted by `reactor.fallbacks()`.
+
+- **`wait`, `waitAny`**: readiness of descriptors, a `Process` ending, a
+  `Wake`, a Windows object. On a runtime each member is an operation of the
+  task's own loop, so the wait is a cancelation point and holds no thread;
+  elsewhere the calling thread waits in 5 ms slices between cancel checks.
+- **`Wake`**: a wake-up any thread (or a signal handler) can send.
+- **`Process`**: a child that a wait reports once it has ended, without
+  reaping it. On Linux a runtime's `childWait` waits on the pidfd the same way.
+- **`Job`** (Windows): a job object's messages.
+- **`blocking(io, lane, f, args)`**: a raw call that can take milliseconds,
+  run on one of the runtime's lanes (`sync`, `lookup`, `wait`, `general`).
+- **`Signals`**: signals and console control events, to several listeners.
+- **`net`**: `connect` with a timeout, a bounded `resolve`, `abort`,
+  per-operation `Deadlines`, and a `Receiver` whose idle connections hold no
+  buffer.
 
 ## Scope
 
-Linux (io_uring 5.19+). On other systems `init` returns `BackendUnavailable`.
+The runtime: Linux (io_uring 5.19+). On other systems `init` returns
+`BackendUnavailable`. The extensions run on Linux, macOS, the BSDs and
+Windows over any `Io`; on Windows a wait on a socket polls it between slices.
