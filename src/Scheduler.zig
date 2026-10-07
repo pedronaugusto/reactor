@@ -395,6 +395,9 @@ pub const Processor = struct {
         while (true) : (round += 1) {
             if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or s.injectedLen() > 0) return true;
             if (round % 16 == 0) {
+                // Its own completions first: free to ask for when the
+                // kernel flags them.
+                if (p.pollKernel(.nowait)) return true;
                 if (p.steal()) return true;
                 if (p.loop.clock.awake() - start > spin_ns) return false;
             }

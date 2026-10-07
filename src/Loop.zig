@@ -347,13 +347,15 @@ fn deadlineTicks(l: *const Loop, t: Io.Clock.Timestamp) u64 {
 
 fn waitFor(l: *const Loop, deadline: ?u64) backends.Wait {
     if (l.ready.head != null) return .nowait;
-    const timer: ?u64 = if (l.wheel.next()) |ticks| ticks * std.time.ns_per_us else null;
+    const timer: ?u64 = if (l.wheel.count == 0) null else if (l.wheel.next()) |ticks| ticks * std.time.ns_per_us else null;
     const until = if (timer) |t| (if (deadline) |d| @min(t, d) else t) else deadline orelse return .forever;
     const now = l.clock.awake();
     return if (until <= now) .nowait else .{ .ns = until - now };
 }
 
 fn expire(l: *Loop) u32 {
+    // No timer armed: no clock to read.
+    if (l.wheel.count == 0) return 0;
     var fired: Fired = .{ .loop = l };
     l.wheel.advance(l.clock.ticks(), &fired);
     return fired.count;
