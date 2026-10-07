@@ -20,8 +20,13 @@ virtual: clock.Virtual,
 
 /// `d` must not move after this.
 pub fn init(d: *Driver, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
+    return d.initWith(gpa, gpa, seed, options);
+}
+
+/// `init` with the runtime's allocator apart from the fake's.
+pub fn initWith(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
     d.virtual = .{};
-    d.fake = .init(gpa, .{ .seeded = .{ .seed = seed, .virtual = &d.virtual } });
+    d.fake = .init(fake_gpa, .{ .seeded = .{ .seed = seed, .virtual = &d.virtual } });
     errdefer d.fake.deinit();
     var o = options;
     o.workers = 0;

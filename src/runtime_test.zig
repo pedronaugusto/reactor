@@ -104,3 +104,130 @@ test "shakedown's conformance suite passes on real worker threads" {
         return error.Nonconforming;
     };
 }
+
+fn parkMany(io: Io, n: usize, home: std.Thread.Id) !void {
+    var word: u32 = 0;
+    for (0..n) |_| {
+        // A wait that returns at once is still a trip through the scheduler.
+        try io.futexWaitTimeout(u32, &word, 0, .{ .duration = .{ .raw = .fromNanoseconds(1), .clock = .awake } });
+        if (std.Thread.getCurrentId() != home) return error.RootMigrated;
+    }
+}
+
+fn busy(io: Io, stop: *std.atomic.Value(bool)) Io.Cancelable!void {
+    while (!stop.load(.acquire)) try io.sleep(.fromMicroseconds(50), .awake);
+}
+
+test "the root never leaves the home thread, however often it waits" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 4, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var stop: std.atomic.Value(bool) = .init(false);
+    var group: Io.Group = .init;
+    for (0..8) |_| try group.concurrent(io, busy, .{ io, &stop });
+    try parkMany(io, 2000, std.Thread.getCurrentId());
+    stop.store(true, .release);
+    try group.await(io);
+}
+
+test "shakedown's conformance suite passes with shared-nothing processors" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .max_tasks = 256, .stack_size = 256 << 10 });
+    defer t.deinit();
+    var failure: shakedown.conformance.Failure = undefined;
+    shakedown.conformance.run(testing.allocator, t.io(), .{ .failure = &failure }) catch {
+        std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });
+        return error.Nonconforming;
+    };
+}
+
+/// An allocator that refuses everything once sealed: the runtime must not
+/// allocate after `init`.
+const Sealed = struct {
+    backing: std.mem.Allocator,
+    sealed: bool = false,
+
+    fn allocator(s: *Sealed) std.mem.Allocator {
+        return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn of(context: *anyopaque) *Sealed {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const s = of(context);
+        if (s.sealed) @panic("the runtime allocated after init");
+        return s.backing.rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const s = of(context);
+        if (s.sealed) @panic("the runtime allocated after init");
+        return s.backing.rawResize(memory, alignment, new_len, ret);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const s = of(context);
+        if (s.sealed) @panic("the runtime allocated after init");
+        return s.backing.rawRemap(memory, alignment, new_len, ret);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        of(context).backing.rawFree(memory, alignment, ret);
+    }
+};
+
+test "after init the runtime allocates nothing: the conformance suite with the allocator sealed" {
+    try skipWithoutFibers();
+    var sealed: Sealed = .{ .backing = testing.allocator };
+    var d: Driver = undefined;
+    try d.initWith(testing.allocator, sealed.allocator(), 11, small);
+    defer d.deinit();
+    sealed.sealed = true;
+    defer sealed.sealed = false;
+    var failure: shakedown.conformance.Failure = undefined;
+    shakedown.conformance.run(testing.allocator, d.io(), .{ .failure = &failure }) catch {
+        std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });
+        return error.Nonconforming;
+    };
+}
+
+fn fromAnotherThread(io: Io, out: *u32) void {
+    var f = io.concurrent(addOne, .{41}) catch return;
+    out.* = f.await(io);
+    // Nothing cancels a thread outside the runtime.
+    io.sleep(.fromMilliseconds(1), .awake) catch unreachable; // unreachable: no cancel reaches this thread
+}
+
+test "a thread outside the runtime uses its Io: a task started, awaited, and a sleep" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer t.deinit();
+    var out: u32 = 0;
+    const thread = try std.Thread.spawn(.{}, fromAnotherThread, .{ t.io(), &out });
+    thread.join();
+    try testing.expectEqual(@as(u32, 42), out);
+}
+
+fn wakeFromThread(io: Io, word: *std.atomic.Value(u32)) void {
+    io.sleep(.fromMilliseconds(2), .awake) catch unreachable; // unreachable: no cancel reaches this thread
+    word.store(1, .release);
+    io.futexWake(u32, &word.raw, 1);
+}
+
+test "a futex wake from a thread outside the runtime reaches a waiting task" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var word: std.atomic.Value(u32) = .init(0);
+    const thread = try std.Thread.spawn(.{}, wakeFromThread, .{ io, &word });
+    defer thread.join();
+    while (word.load(.acquire) == 0) try io.futexWait(u32, &word.raw, 0);
+}
