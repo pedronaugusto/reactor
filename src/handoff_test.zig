@@ -19,15 +19,18 @@ const readiness: ?Loop.Backend = switch (builtin.os.tag) {
     else => null,
 };
 
-extern "c" fn mkfifo(path: [*:0]const u8, mode: posix.mode_t) c_int;
+const libc = struct {
+    extern "c" fn mkfifo(path: [*:0]const u8, mode: posix.mode_t) c_int;
+};
 
 /// A named pipe at `path`: opening it for reading waits, in the kernel,
 /// until someone opens it for writing.
 fn makeFifo(path: [:0]const u8) !void {
-    const rc = if (builtin.os.tag == .linux)
-        std.os.linux.mknodat(std.os.linux.AT.FDCWD, path, std.os.linux.S.IFIFO | 0o600, 0)
-    else
-        mkfifo(path, 0o600);
+    const rc = switch (builtin.os.tag) {
+        .linux => std.os.linux.mknodat(std.os.linux.AT.FDCWD, path, std.os.linux.S.IFIFO | 0o600, 0),
+        .windows => return error.SkipZigTest,
+        else => libc.mkfifo(path, 0o600),
+    };
     if (posix.errno(rc) != .SUCCESS) return error.NoFifo;
 }
 
@@ -92,6 +95,46 @@ test "a worker stuck in a blocking file call hands its processor to a spare, and
         try testing.expect(rendezvous.blocked_on != 0);
     }
     try testing.expect(r.stats().handoffs >= 3);
+}
+
+fn fifoRuntime(r: *Runtime, workers: u16) !void {
+    const backend = readiness orelse return error.SkipZigTest;
+    if (!fiber.supported) return error.SkipZigTest;
+    r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 64, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    errdefer r.deinit();
+    try r.start();
+}
+
+test "the root stuck in a blocking file call lends the home processor to a spare, and has it back" {
+    var r: Runtime = undefined;
+    try fifoRuntime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buffer);
+    var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.mem.printSentinel(&path_buffer, "{s}/pipe", .{dir_buffer[0..dir_len]}, 0);
+    try makeFifo(path);
+    const home = std.Thread.getCurrentId();
+    for (0..3) |_| {
+        // The root's own reader: the writer waits in the home processor's
+        // LIFO slot, which only a handoff lets run.
+        var rendezvous: Rendezvous = .{ .path = path };
+        try readSide(io, &rendezvous);
+        try testing.expectEqual(@as(u16, 0), rendezvous.blocked_on);
+        try testing.expectEqual(home, std.Thread.getCurrentId());
+        // A task on the home processor: it leaves the home thread, which
+        // gets the processor back for the root.
+        var task = try io.concurrent(readSide, .{ io, &rendezvous });
+        try task.await(io);
+        try testing.expectEqual(home, std.Thread.getCurrentId());
+    }
+    try testing.expect(r.stats().handoffs >= 6);
 }
 
 fn spin(clock_io: Io, ms: u64) void {

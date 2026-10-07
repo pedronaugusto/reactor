@@ -108,6 +108,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .scheduling = if (workers == 0) .per_core else options.scheduling,
         .budget_ops = options.budget_ops,
         .budget_ns = @intCast(@max(options.budget_time.nanoseconds, 0)),
+        .home_thread = std.Thread.getCurrentId(),
     };
 
     var made: usize = 0;
@@ -178,8 +179,12 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
 fn schedulerEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) noreturn {
     const home: *Processor = @ptrCast(@alignCast(arg)); // safe: `init` passed the home processor
     home.afterSwitch(home.scheduler.root, message);
-    home.schedule();
-    unreachable; // unreachable: the home scheduler never returns
+    while (true) {
+        home.schedule();
+        // The home processor went to another thread while a task here sat
+        // in a blocking call: it comes back when the root runs again.
+        Scheduler.reclaim(home);
+    }
 }
 
 pub fn start(c: *Core) StartError!void {

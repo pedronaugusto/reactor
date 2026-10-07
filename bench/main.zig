@@ -7,12 +7,14 @@
 //! - timers: a million loop timers armed, 99% cancelled before they fire;
 //!   the overshoot of 1 ms sleeps.
 //! - echo: 64-byte messages over loopback TCP, one connection and 32.
+//! - accept: connect, accept and close, over and over.
 //! - files: cached 4 KiB positional reads.
 //! - loop: `run(.nowait)` with nothing to do.
 //!
 //! `--io threaded` runs the `Io` workloads on std's `Io.Threaded` instead,
-//! for the same numbers on the interface's baseline. Timings are wall-clock
-//! on this machine; CI only compiles this file.
+//! for the same numbers on the interface's baseline; `--backend epoll`
+//! (or `kqueue`, `io_uring`) picks reactor's backend. Timings are
+//! wall-clock on this machine; CI only compiles this file.
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -39,6 +41,7 @@ const Config = struct {
     threaded: bool = false,
     only: ?[]const u8 = null,
     workers: ?u16 = null,
+    backend: reactor.Loop.Backend = .auto,
 
     fn wants(c: Config, workload: []const u8) bool {
         const o = c.only orelse return true;
@@ -64,11 +67,17 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--workers")) {
             i += 1;
             c.workers = try std.fmt.parseInt(u16, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--backend")) {
+            i += 1;
+            c.backend = std.meta.stringToEnum(reactor.Loop.Backend, args[i]) orelse return error.UnknownBackend;
         } else return error.UnknownArgument;
     }
     var buffer: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(init.io, &buffer);
-    const r: Report = .{ .w = &stdout.interface, .json = c.json, .io_name = if (c.threaded) "threaded" else "reactor" };
+    const r: Report = .{ .w = &stdout.interface, .json = c.json, .io_name = if (c.threaded) "threaded" else switch (c.backend) {
+        .auto => "reactor",
+        inline else => |b| "reactor-" ++ @tagName(b),
+    } };
 
     if (c.wants("timers") and !c.threaded) try loopTimers(r, gpa, c);
     if (c.wants("loop") and !c.threaded) try loopIdle(r, gpa, c);
@@ -80,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     var runtime: reactor.Runtime = undefined;
-    runtime.init(gpa, .{ .workers = c.workers }) catch |err| switch (err) {
+    runtime.init(gpa, .{ .workers = c.workers, .backend = c.backend }) catch |err| switch (err) {
         error.BackendUnavailable => {
             try r.line("runtime", "no evented backend on this system", 0, "-");
             return;
@@ -97,6 +106,7 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("wake")) try wake(r, io, c);
     if (c.wants("timers")) try sleeps(r, io, c);
     if (c.wants("echo")) try echo(r, gpa, io, c);
+    if (c.wants("accept")) try accepts(r, io, c);
     if (c.wants("files")) try files(r, io, c);
     _ = runtime;
 }
@@ -174,7 +184,7 @@ fn wake(r: Report, io: Io, c: Config) !void {
 fn loopTimers(r: Report, gpa: std.mem.Allocator, c: Config) !void {
     var l: reactor.Loop = undefined;
     const n: usize = if (c.smoke) 1000 else 1_000_000;
-    l.init(gpa, .{ .max_ops = @intCast(n) }) catch |err| switch (err) {
+    l.init(gpa, .{ .max_ops = @intCast(n), .backend = c.backend }) catch |err| switch (err) {
         error.BackendUnavailable => return,
         else => |e| return e,
     };
@@ -289,6 +299,31 @@ fn echo(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     }
 }
 
+// accept
+
+fn acceptLoop(io: Io, server: *Io.net.Server, count: usize) Io.Cancelable!void {
+    for (0..count) |_| {
+        const stream = server.accept(io) catch return;
+        stream.close(io);
+    }
+}
+
+fn accepts(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 100 else 50_000;
+    const listen: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try listen.listen(io, .{ .reuse_address = true, .kernel_backlog = 1024 });
+    defer server.deinit(io);
+    const t0 = now(io);
+    var acceptor = try io.concurrent(acceptLoop, .{ io, &server, n });
+    for (0..n) |_| {
+        const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+        stream.close(io);
+    }
+    try acceptor.await(io);
+    const t1 = now(io);
+    try r.line("accept", "connect, accept and close", @as(f64, @floatFromInt(n)) / (nsBetween(t0, t1) / std.time.ns_per_s), "conn/s");
+}
+
 // files
 
 fn files(r: Report, io: Io, c: Config) !void {
@@ -315,7 +350,7 @@ fn files(r: Report, io: Io, c: Config) !void {
 /// What a host pays to ask a loop for work when there is none.
 fn loopIdle(r: Report, gpa: std.mem.Allocator, c: Config) !void {
     var l: reactor.Loop = undefined;
-    l.init(gpa, .{}) catch |err| switch (err) {
+    l.init(gpa, .{ .backend = c.backend }) catch |err| switch (err) {
         error.BackendUnavailable => return,
         else => |e| return e,
     };

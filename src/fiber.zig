@@ -24,7 +24,111 @@ pub const Entry = *const fn (arg: *anyopaque, message: *const Switch) callconv(.
 /// Saves the running context into `s.old`, runs `s.new`, and returns the
 /// switch that resumed this context later.
 pub inline fn switchTo(s: *const Switch) *const Switch {
+    if (builtin.cpu.arch == .aarch64) return switchAarch64(s);
     return std.Io.fiber.contextSwitch(s);
+}
+
+/// std's aarch64 switch, with the link register named as LLVM knows it:
+/// std's `.x30` clobber is dropped, so an optimized build keeps a value in
+/// the link register across the switch and finds the other stack's there
+/// (Zig 0.17.0; a Debug build happens not to).
+inline fn switchAarch64(s: *const Switch) *const Switch {
+    return asm volatile (
+        \\ ldp x0, x2, [x1]
+        \\ ldr x3, [x2, #16]
+        \\ mov x4, sp
+        \\ stp x4, fp, [x0]
+        \\ adr x5, 0f
+        \\ ldp x4, fp, [x2]
+        \\ str x5, [x0, #16]
+        \\ mov sp, x4
+        \\ br x3
+        \\0:
+        : [received_message] "={x1}" (-> *const Switch),
+        : [message_to_send] "{x1}" (s),
+        : .{
+          .x0 = true,
+          .x1 = true,
+          .x2 = true,
+          .x3 = true,
+          .x4 = true,
+          .x5 = true,
+          .x6 = true,
+          .x7 = true,
+          .x8 = true,
+          .x9 = true,
+          .x10 = true,
+          .x11 = true,
+          .x12 = true,
+          .x13 = true,
+          .x14 = true,
+          .x15 = true,
+          .x16 = true,
+          .x17 = true,
+          .x19 = true,
+          .x20 = true,
+          .x21 = true,
+          .x22 = true,
+          .x23 = true,
+          .x24 = true,
+          .x25 = true,
+          .x26 = true,
+          .x27 = true,
+          .x28 = true,
+          .lr = true,
+          .z0 = true,
+          .z1 = true,
+          .z2 = true,
+          .z3 = true,
+          .z4 = true,
+          .z5 = true,
+          .z6 = true,
+          .z7 = true,
+          .z8 = true,
+          .z9 = true,
+          .z10 = true,
+          .z11 = true,
+          .z12 = true,
+          .z13 = true,
+          .z14 = true,
+          .z15 = true,
+          .z16 = true,
+          .z17 = true,
+          .z18 = true,
+          .z19 = true,
+          .z20 = true,
+          .z21 = true,
+          .z22 = true,
+          .z23 = true,
+          .z24 = true,
+          .z25 = true,
+          .z26 = true,
+          .z27 = true,
+          .z28 = true,
+          .z29 = true,
+          .z30 = true,
+          .z31 = true,
+          .p0 = true,
+          .p1 = true,
+          .p2 = true,
+          .p3 = true,
+          .p4 = true,
+          .p5 = true,
+          .p6 = true,
+          .p7 = true,
+          .p8 = true,
+          .p9 = true,
+          .p10 = true,
+          .p11 = true,
+          .p12 = true,
+          .p13 = true,
+          .p14 = true,
+          .p15 = true,
+          .fpcr = true,
+          .fpsr = true,
+          .ffr = true,
+          .memory = true,
+        });
 }
 
 /// The context that starts `entry(arg, message)` on the stack ending at

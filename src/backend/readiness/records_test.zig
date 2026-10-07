@@ -1,10 +1,13 @@
 //! The readiness backend's descriptor table.
+const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 
 const records = @import("records.zig");
 
 test "records are found, freed and found again across a full table" {
+    // Descriptors are handles there, and no readiness backend runs.
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     const W = struct {
         const Self = @This();
         prev: ?*Self = null,
