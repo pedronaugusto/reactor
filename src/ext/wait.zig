@@ -1,0 +1,220 @@
+//! Waits on kernel objects over any `Io`: descriptors readable or
+//! writable, a process ending, a Windows object, a `Wake`.
+//!
+//! On a runtime's task every member that is a descriptor is a readiness
+//! operation of the task's own loop, so the wait is a cancelation point
+//! and costs no thread. Members a loop cannot wait on (Windows objects; a
+//! process on a system with no descriptor for it) go to the runtime's
+//! `wait` lane. Any other `Io` waits on the calling thread, in slices of
+//! `slice_ms` so a cancel is seen between them.
+const builtin = @import("builtin");
+const std = @import("std");
+const assert = std.debug.assert;
+const Io = std.Io;
+const windows = std.os.windows;
+
+const Loop = @import("../Loop.zig");
+const Scheduler = @import("../Scheduler.zig");
+const perform = @import("../ops/perform.zig");
+const readiness = @import("../ops/readiness.zig");
+const lane_call = @import("../ops/lane_call.zig");
+const poll = @import("../sys/poll.zig");
+const process = @import("../sys/process.zig");
+const win32 = @import("../sys/win32.zig");
+const native = @import("native.zig");
+const Process = @import("Process.zig");
+const Wake = @import("Wake.zig");
+
+const is_windows = builtin.os.tag == .windows;
+
+/// The most members one wait takes.
+pub const max = 64;
+
+/// How long one wait on the calling thread lasts before it looks for a
+/// cancel, on an `Io` that is not a runtime.
+pub const slice_ms: u32 = 5;
+
+pub const Waitable = union(enum) {
+    /// A descriptor or socket has data, end of file, or an error (inotify,
+    /// kqueue, pipes, eventfd).
+    readable: Io.File.Handle,
+    writable: Io.File.Handle,
+    /// A process has ended. It is not reaped.
+    process: *const Process,
+    /// Windows: any waitable object (event, process, thread, timer).
+    object: if (is_windows) windows.HANDLE else noreturn,
+    /// Set by `Wake.signal`; the wait that reports it clears it.
+    wake: *Wake,
+
+    /// Readiness asked of a Windows handle that is not a socket.
+    pub const Error = error{ Unsupported, Unexpected };
+};
+
+pub const WaitError = Waitable.Error || error{Timeout} || Io.Cancelable;
+
+/// Waits until `what` is ready, or `timeout` passes.
+pub fn wait(io: Io, what: Waitable, timeout: Io.Timeout) WaitError!void {
+    _ = try waitAny(io, &.{what}, timeout);
+}
+
+/// The lowest index of a member that is ready, waiting until one is or
+/// `timeout` passes. At most `max` members.
+pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
+    assert(set.len > 0);
+    assert(set.len <= max);
+    const index = try waitFirst(io, set, timeout);
+    switch (set[index]) {
+        .wake => |w| w.notify.clear(),
+        else => {},
+    }
+    return index;
+}
+
+fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
+    // A process that had ended when it was opened needs no wait.
+    if (!is_windows) for (set, 0..) |m, i| switch (m) {
+        .process => |p| if (p.watch == .ended) return i,
+        else => {},
+    };
+    const core = native.runtimeOf(io) orelse return sliced(io, set, timeout.toDeadline(io));
+    if (!native.taskRuntime(core)) return sliced(io, set, timeout.toDeadline(io));
+    var members: [max]Loop.Waitable = undefined;
+    if (descriptors(set, &members)) {
+        const p = Scheduler.processor().?;
+        return readiness.first(&core.scheduler, members[0..set.len], perform.deadline(p, timeout)) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            error.Timeout => error.Timeout,
+            error.Unsupported => error.Unsupported,
+            error.Unexpected, error.SystemResources => error.Unexpected,
+        };
+    }
+    const lane_io = core.lanes.executor(.wait);
+    return lane_call.call(&core.scheduler, &core.lanes, .wait, &sliced, .{ lane_io, set, timeout.toDeadline(io) });
+}
+
+/// Each member as a descriptor the loop can wait on; false when one is
+/// not.
+fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
+    if (is_windows) return false;
+    for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
+        .readable => |h| .{ .readable = h },
+        .writable => |h| .{ .writable = h },
+        .process => |p| switch (p.watch) {
+            .descriptor => |h| .{ .readable = h },
+            .ended, .asking => return false,
+        },
+        .wake => |w| .{ .readable = w.notify.handle },
+        .object => return false,
+    };
+    return true;
+}
+
+/// Waits on the calling thread, in slices between which `io` is asked
+/// for a cancel, until a member is ready or `deadline` passes.
+fn sliced(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!usize {
+    while (true) {
+        try io.checkCancel();
+        const slice = sliceOf(io, deadline) orelse return error.Timeout;
+        if (try once(io, set, slice)) |i| return i;
+    }
+}
+
+/// The next slice's length in milliseconds; null once `deadline` passed.
+fn sliceOf(io: Io, deadline: Io.Timeout) ?u32 {
+    const left = deadline.toDurationFromNow(io) orelse return slice_ms;
+    if (left.raw.nanoseconds <= 0) return null;
+    const ms = std.math.divCeil(i96, left.raw.nanoseconds, std.time.ns_per_ms) catch unreachable; // unreachable: the divisor is a positive constant
+    return @intCast(@min(ms, slice_ms));
+}
+
+/// One wait of at most `ms` milliseconds: the ready member, or null.
+fn once(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
+    if (is_windows) return onceWindows(io, set, ms);
+    var entries: [max]poll.Entry = undefined;
+    var map: [max]usize = undefined;
+    var n: usize = 0;
+    for (set, 0..) |m, i| {
+        const entry: poll.Entry = switch (m) {
+            .readable => |h| .{ .handle = h, .interest = .readable },
+            .writable => |h| .{ .handle = h, .interest = .writable },
+            .process => |p| switch (p.watch) {
+                .descriptor => |h| .{ .handle = h, .interest = .readable },
+                .ended => return i,
+                .asking => {
+                    if (process.endedUnreaped(p.id) != .running) return i;
+                    continue;
+                },
+            },
+            .wake => |w| .{ .handle = w.notify.handle, .interest = .readable },
+            .object => unreachable, // unreachable: Windows' alone, which waits in `onceWindows`
+        };
+        entries[n] = entry;
+        map[n] = i;
+        n += 1;
+    }
+    if (n == 0) {
+        // Nothing to wait on but processes asked about: wait the slice.
+        try io.sleep(.fromMilliseconds(ms), .awake);
+        return null;
+    }
+    const ready = poll.descriptors(entries[0..n], ms) catch return error.Unexpected;
+    return if (ready) |r| map[r] else null;
+}
+
+fn onceWindows(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
+    var handles: [max]windows.HANDLE = undefined;
+    var map: [max]usize = undefined;
+    var n: usize = 0;
+    var sockets = false;
+    for (set, 0..) |m, i| switch (m) {
+        .readable, .writable => sockets = true,
+        .process => |p| {
+            handles[n] = p.watch;
+            map[n] = i;
+            n += 1;
+        },
+        .object => |h| {
+            handles[n] = h;
+            map[n] = i;
+            n += 1;
+        },
+        .wake => |w| {
+            handles[n] = w.notify.handle;
+            map[n] = i;
+            n += 1;
+        },
+    };
+    if (sockets) for (set, 0..) |m, i| switch (m) {
+        .readable => |h| if (try socketReady(io, h, .readable)) return i,
+        .writable => |h| if (try socketReady(io, h, .writable)) return i,
+        else => {},
+    };
+    if (n == 0) {
+        try io.sleep(.fromMilliseconds(ms), .awake);
+        return null;
+    }
+    const ready = poll.objects(handles[0..n], if (sockets) @min(ms, 1) else ms) catch return error.Unexpected;
+    return if (ready) |r| map[r] else null;
+}
+
+/// Whether a Windows socket is ready now: AFD's own poll, with no wait.
+fn socketReady(io: Io, socket: windows.HANDLE, interest: poll.Interest) WaitError!bool {
+    var info: win32.AfdPollInfo = .{ .Timeout = 0, .Handles = .{.{
+        .Handle = socket,
+        .Events = switch (interest) {
+            .readable => win32.afd_poll.receive | win32.afd_poll.disconnect | win32.afd_poll.abort | win32.afd_poll.accept | win32.afd_poll.local_close,
+            .writable => win32.afd_poll.send | win32.afd_poll.abort | win32.afd_poll.connect_fail | win32.afd_poll.local_close,
+        },
+        .Status = .SUCCESS,
+    }} };
+    const result = try io.operate(.{ .device_io_control = .{
+        .file = .{ .handle = socket, .flags = .{ .nonblocking = true } },
+        .code = windows.IOCTL.AFD.POLL,
+        .in = std.mem.asBytes(&info),
+        .out = std.mem.asBytes(&info),
+    } });
+    const status = result.device_io_control.u.Status;
+    if (status == .INVALID_HANDLE) return error.Unsupported;
+    if (status != .SUCCESS) return error.Unexpected;
+    return info.NumberOfHandles > 0 and info.Handles[0].Events != 0;
+}

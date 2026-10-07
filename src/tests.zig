@@ -6,4 +6,6 @@ test {
     _ = @import("runtime_test.zig");
     _ = @import("uring_test.zig");
     _ = @import("threaded_test.zig");
+    _ = @import("ext_test.zig");
+    _ = @import("net_test.zig");
 }

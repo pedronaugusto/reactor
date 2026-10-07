@@ -16,6 +16,7 @@ fn skipWithoutFibers() !void {
 }
 
 const Runtime = @import("Runtime.zig");
+const blocking = @import("ext/blocking.zig").blocking;
 
 const small: Runtime.Options = .{ .max_tasks = 256, .stack_size = 256 << 10, .offload = .none };
 
@@ -261,4 +262,31 @@ test "a deadline's timer is disarmed on the processor that armed it, wherever it
     for (0..32) |_| try group.concurrent(io, connectBriefly, .{ io, 20, &failures });
     try group.await(io);
     try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+}
+
+fn waitOnLane(gate: *std.atomic.Value(u32)) void {
+    const sys = Io.Threaded.global_single_threaded.io();
+    while (gate.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &gate.raw, 0);
+}
+
+fn laneCall(io: Io, gate: *std.atomic.Value(u32)) void {
+    blocking(io, .general, waitOnLane, .{gate});
+}
+
+test "calls beyond a lane's cap wait their turn, never inline on a worker" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 1100, .stack_size = 64 << 10, .offload = .{ .owned = .{ .general = 1 } } });
+    defer t.deinit();
+    const io = t.io();
+    var gate: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    // More calls than the lane's queue once held: the first holds the lane
+    // until all have been made.
+    for (0..1050) |_| try group.concurrent(io, laneCall, .{ io, &gate });
+    while (t.runtime.stats().lanes[@backingInt(Runtime.Lane.general)].queued < 1049) try io.sleep(.fromMilliseconds(1), .awake);
+    gate.store(1, .release);
+    Io.Threaded.global_single_threaded.io().futexWake(u32, &gate.raw, std.math.maxInt(u32));
+    try group.await(io);
+    try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(Runtime.Lane.general)].@"inline");
 }
