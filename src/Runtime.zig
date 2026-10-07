@@ -1,0 +1,109 @@
+//! N loops plus stackful tasks on a work-stealing scheduler: a complete
+//! `std.Io`. `init` builds everything and starts nothing; the thread that
+//! calls it is the home thread, where root code runs on its own stack and
+//! never migrates. `start` spawns the workers the options name; with
+//! `workers = 0` the runtime has no thread of its own and the host calls
+//! `run(mode)`, once per frame or when `backendHandle` is readable.
+const Runtime = @This();
+
+const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+
+const backend = @import("backend.zig");
+const Lanes = @import("Lanes.zig");
+const Loop = @import("Loop.zig");
+const Core = @import("runtime/Core.zig");
+const options = @import("runtime/options.zig");
+const slots = @import("runtime/slots.zig");
+
+pub const Backend = options.Backend;
+pub const Scheduling = options.Scheduling;
+pub const Lane = options.Lane;
+pub const Files = options.Files;
+pub const Offload = options.Offload;
+pub const StackGuard = options.StackGuard;
+pub const Options = options.Options;
+pub const InitError = Core.InitError;
+pub const StartError = Core.StartError;
+
+/// The runtime's; not to be touched.
+core: Core,
+
+/// Builds everything (stacks reserved, tables, rings, lane pools); starts
+/// no thread. The calling thread becomes the home thread. `r` must not
+/// move after this.
+pub fn init(r: *Runtime, gpa: Allocator, o: Options) InitError!void {
+    return r.core.init(gpa, o, .native, &slots.vtable);
+}
+
+/// Spawns the workers the options name. Lanes start threads on demand.
+pub fn start(r: *Runtime) StartError!void {
+    return r.core.start();
+}
+
+/// From the home thread: runs ready tasks and completions there as `mode`
+/// allows. A host loop calls it per frame or when `backendHandle` is
+/// readable; with `workers = 0` it is how tasks run.
+pub fn run(r: *Runtime, mode: Loop.RunMode) void {
+    r.core.run(mode);
+}
+
+/// The home loop's: readable when `run(.nowait)` has work.
+pub fn backendHandle(r: *Runtime) error{ Unsupported, SystemResources, Unexpected }!Io.File.Handle {
+    return r.core.processors[0].loop.backendHandle();
+}
+
+/// The longest the host may wait before calling `run(.nowait)`.
+pub fn nextTimeout(r: *const Runtime) ?Io.Duration {
+    return r.core.processors[0].loop.nextTimeout();
+}
+
+/// From the home thread, after every task has ended: joins every thread.
+pub fn stop(r: *Runtime) void {
+    r.core.stop();
+}
+
+pub fn deinit(r: *Runtime) void {
+    r.core.deinit();
+    r.* = undefined;
+}
+
+pub fn io(r: *Runtime) Io {
+    return r.core.io();
+}
+
+/// The kernel mechanism under this runtime.
+pub fn backendKind(r: *const Runtime) ?backend.Kind {
+    return r.core.backendKind();
+}
+
+/// The runtime an `Io` is, unless it is another `Io` (or one wrapping a
+/// runtime, which takes the other `Io`s' path).
+pub fn recognize(any: Io) ?*Runtime {
+    if (any.vtable != &slots.vtable) return null;
+    const c = Core.of(any.userdata);
+    return @fieldParentPtr("core", c);
+}
+
+pub const Stats = struct {
+    workers: u16,
+    tasks: u32,
+    max_tasks: u32,
+    steals: u64,
+    forced_yields: u64,
+    lanes: [Lanes.count]Lanes.Stats,
+};
+
+pub fn stats(r: *Runtime) Stats {
+    var lanes: [Lanes.count]Lanes.Stats = undefined;
+    for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
+    return .{
+        .workers = @intCast(r.core.processors.len - 1),
+        .tasks = r.core.scheduler.live.load(.monotonic),
+        .max_tasks = r.core.options.max_tasks,
+        .steals = r.core.scheduler.steals.load(.monotonic),
+        .forced_yields = r.core.scheduler.forced_yields.load(.monotonic),
+        .lanes = lanes,
+    };
+}

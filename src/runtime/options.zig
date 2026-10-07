@@ -1,0 +1,59 @@
+//! What a runtime is built with.
+const std = @import("std");
+const Io = std.Io;
+
+const Loop = @import("../Loop.zig");
+const Lanes = @import("../Lanes.zig");
+const Scheduler = @import("../Scheduler.zig");
+
+pub const Backend = Loop.Backend;
+pub const Scheduling = Scheduler.Scheduling;
+pub const Lane = Lanes.Lane;
+
+pub const Files = enum {
+    /// io_uring: ring operations, calls with no ring operation on a lane.
+    /// Elsewhere: on a lane.
+    auto,
+    /// Every file call on a lane: no worker ever waits on a disk.
+    pool,
+};
+
+pub const Offload = Lanes.Config;
+
+pub const StackGuard = enum {
+    /// A guard below each stack where it costs no mapping (Linux 6.13+
+    /// guard regions, macOS), else one per 64-stack slab.
+    auto,
+    per_stack,
+    /// One guard per 64-stack slab and a canary checked at every switch.
+    per_slab,
+};
+
+pub const Options = struct {
+    backend: Backend = .auto,
+    /// Worker threads `start` spawns beside the home thread. null: logical
+    /// CPUs - 1. 0: none; tasks run on the home thread whenever it waits in
+    /// the `Io` or calls `run`.
+    workers: ?u16 = null,
+    scheduling: Scheduling = .stealing,
+    /// A task that has not parked for this many cancelation points yields
+    /// at the next one.
+    budget_ops: u16 = 64,
+    /// Each task's stack reservation; what a task costs is the pages it
+    /// touches.
+    stack_size: usize = 1 << 20,
+    stack_guard: StackGuard = .auto,
+    /// Past this, `concurrent` fails with `ConcurrencyUnavailable` and
+    /// `async` runs the function inline (both legal for `std.Io`).
+    max_tasks: u32 = 16 << 10,
+    files: Files = .auto,
+    offload: Offload = .{ .owned = .{} },
+    /// Submission queue entries per ring.
+    ring_entries: u16 = 256,
+    uring_off: Loop.UringFeatures = .{},
+    /// Linux: worker n on CPU n.
+    pin_workers: bool = false,
+    /// As `Io.Threaded`'s.
+    environ: std.process.Environ = .empty,
+    argv0: Io.Threaded.Argv0 = .empty,
+};

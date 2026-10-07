@@ -1,0 +1,19 @@
+.{
+    .name = .reactor,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x3cf52171583e3432,
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
+    .dependencies = .{
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight#045cd2d68a7a9be3c03a6175744f639fc4751718",
+            .hash = "preflight-0.1.0-LX1ZwnBQBgBceaBSMsgOeQ7SHX_0AinOBImDX4xKQvI-",
+            .lazy = true,
+        },
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown#59e7e2c5a2557eb2eff0b89512807c5b0c603886",
+            .hash = "shakedown-0.1.0-BR8U40ysBwCaMSj_dNrcfybX5fZyMcm_SbqE6k0Xiptx",
+            .lazy = true,
+        },
+    },
+}
