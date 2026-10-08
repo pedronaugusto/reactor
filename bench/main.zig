@@ -508,7 +508,7 @@ fn lanes(r: Report, io: Io, c: Config) !void {
     const n: usize = if (c.smoke) 100 else 20_000;
     var total: u32 = 0;
     const t0 = now(io);
-    for (0..n) |_| total += reactor.blocking(io, .general, emptyCall, .{});
+    for (0..n) |_| total += try reactor.blocking(io, .general, emptyCall, .{});
     const t1 = now(io);
     std.debug.assert(total == n);
     try r.line("lanes", "blocking, empty call on general", nsBetween(t0, t1) / @as(f64, @floatFromInt(n)), "ns/call");

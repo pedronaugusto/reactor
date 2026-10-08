@@ -1,4 +1,9 @@
-# Executor refusal: owner decision pending
+# Executor refusal
+
+Owner decision db221e5 requires refusal errors for raw offloads, including
+void functions, with no inline fallback. `blocking` and `blockingHook` now
+implement that fallible surface. The remaining fixed std.Io signature and
+injected cancellation-capacity seam is explicitly under review.
 
 The current implementation returns an available resource error when a call's
 result can represent one. Refusal of a void/narrow call, or of a cancellation

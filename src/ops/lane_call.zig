@@ -29,9 +29,27 @@ fn isCanceled(comptime R: type, result: R) bool {
     if (result) |_| return false else |err| return err == error.Canceled;
 }
 
-/// Calls `func(args)` on `lane` and waits for it.
+pub const OffloadError = error{ Canceled, ConcurrencyUnavailable };
+
+pub fn Result(comptime F: type) type {
+    const R = ReturnOf(F);
+    return switch (@typeInfo(R)) {
+        .error_union => |eu| (eu.error_set || OffloadError)!eu.payload,
+        else => OffloadError!R,
+    };
+}
+
+/// Fixed std.Io slots keep their specified result and cancellation shape.
 pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
-    const R = ReturnOf(@TypeOf(func));
+    return perform(ReturnOf(@TypeOf(func)), false, s, lanes, lane, func, args);
+}
+
+/// A refused raw call never ran; all result shapes report the refusal.
+pub fn fallible(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
+    return perform(Result(@TypeOf(func)), true, s, lanes, lane, func, args);
+}
+
+fn perform(comptime R: type, comptime raw: bool, s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
     const t = Scheduler.current() orelse return direct(lanes, lane, func, args);
     if (lanes.inlined()) return direct(lanes, lane, func, args);
     const previous_lane = t.lane;
@@ -85,7 +103,10 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     t.leaveWait();
     // The executor lets go of the job's group just after the call returns.
     while (c.job.held()) Scheduler.yield();
-    if (c.job.rejected) return unavailable(R);
+    if (c.job.rejected) {
+        if (comptime raw) return error.ConcurrencyUnavailable;
+        return unavailable(R);
+    }
     if (comptime cancelable(R)) {
         if (c.job.dropped) return t.acknowledge();
         if (isCanceled(R, c.result)) t.acknowledged();

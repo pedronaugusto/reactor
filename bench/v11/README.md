@@ -1,5 +1,10 @@
 # V11: actual suite stack measurements
 
+Owner decision db221e5 moves V11 completion to each package's own adoption of
+reactor. These fixtures preserve the earlier investigation; incomplete suites
+and consumer seams are not successful measurements. This batch leaves the
+1 MiB stack default unchanged.
+
 `prepare.zig` clones an owned immutable consumer source fixture into a separate
 adapted fixture. Zig token matching changes only `testing.io` and
 `std.testing.io` selections in its `src/` files to the shared reactor Io.

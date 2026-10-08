@@ -253,7 +253,7 @@ test "resolve on a runtime is bounded inline; blocking runs on a lane" {
     try testing.expect(found.len >= 1);
     try testing.expectEqual(@as(u16, 80), found[0].getPort());
     const before = r.stats().lanes[@backingInt(Runtime.Lane.sync)].@"inline";
-    try testing.expectEqual(@as(u32, 10), reactor.blocking(io, .sync, double, .{5}));
+    try testing.expectEqual(@as(u32, 10), try reactor.blocking(io, .sync, double, .{5}));
     try testing.expectEqual(before, r.stats().lanes[@backingInt(Runtime.Lane.sync)].@"inline");
 }
 
@@ -269,7 +269,8 @@ fn slowCall() u32 {
 }
 
 fn laneTask(io: Io, done: *std.atomic.Value(bool)) void {
-    std.debug.assert(reactor.blocking(io, .general, slowCall, .{}) == 7);
+    const result = reactor.blocking(io, .general, slowCall, .{}) catch @panic("test lane unexpectedly refused");
+    std.debug.assert(result == 7);
     done.store(true, .release);
 }
 
@@ -359,7 +360,7 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
         const current = try threadSnapshot();
         // A joined helper may disappear after the baseline snapshot. A
         // count alone also misses a new thread replacing that helper.
-        for (current.ids[0..current.len]) |id| try testing.expect(std.mem.containsScalar(u32, before.ids[0..before.len], id));
+        for (current.ids[0..current.len]) |id| try testing.expect(std.mem.findScalar(u32, before.ids[0..before.len], id) != null);
     }
     suite.await(io) catch |err| {
         std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });

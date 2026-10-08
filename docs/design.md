@@ -66,35 +66,41 @@ payload size where it justified enabling the default. SQPOLL owns an extra
 kernel thread and makes an unsupported explicit request fail. No feature cost
 or unavailable capability is counted as target success.
 
-## Remaining review gates
+## Final review and open work
 
-The existing immediate deep-stack discard policy differs from the intended
-one-second idle policy and has a measured reuse penalty. R6 must resolve the
-performance and idle-memory tradeoff with live-byte and lifecycle proofs.
-Default spawn, one-worker group spawn, wakes and linked deadlines also retain
-measured misses; the complete manual workload/target pass is still pending.
+Owner decision db221e5 makes speed and size targets reporting obligations;
+correctness and green CI determine landing. Missing or missed targets remain
+open in the mission. Shared-machine timing uses paired, interleaved ratios
+with spread. Native x86 rows stay open until hardware is available.
 
-Injected executor refusal returns a representable resource error for fallible
-calls. A narrow/void call or refused cancellation job currently terminates.
-The owner decision on a fallible raw-offload API and guaranteed cancellation
-capacity remains pending; [the minimal alternative](executor-decision.md)
-explains the remaining std.Io seam and required ownership accounting. This
-document does not accept the current behavior as the finished design. Refusal never runs a call inline.
+Immediate deep-stack discard retains a documented departure from the planned
+one-second idle policy. Forced reuse costs 93.9 times the old Linux path and
+14.5 times the old macOS path: discarding and refaulting the touched pages
+causes the extra work. It bounds retained dead pages without a concurrent
+scanner touching a resumable stack; live-byte and guard proofs remain required.
+It is an idle-memory tradeoff, not a throughput improvement. Changing the
+policy needs the deferred idle-connection and suite measurements.
 
-The published cloak source currently has no TLS engine suite. Its package
-floor cannot establish V11 TLS depth. Actual suites and partial observations
-are recorded by [the isolated harness](../bench/v11/README.md), without editing
-or adopting a consumer. No completion claim is made before all required
-measurements, native correctness, performance targets and final CI pass.
+The one-worker group-spawn observation remains +37.9%. The ownership follow-up
+adds scheduler identity checks so independent runtimes cannot run one
+another's tasks or retain one another's ring storage. That safety is retained;
+newer noisy samples do not establish recovery. Default spawn, wakes and linked
+timeout throughput also retain measured misses. Opt-in feature costs and
+missing workloads remain explicit in the private results.
 
-Actual airlock trials also expose a Linux raw-descriptor seam: its raw close
-bypasses reactor's fixed-file cache removal. Its macOS write-call bound differs
-under this Io. These actual-suite failures remain explicit consumer contract
-or adoption questions; no library source, expectation or default is changed
-by the instrumentation to hide them.
+Raw offload refusal is fallible for every result shape, including void, under
+db221e5. No refused call runs inline. The remaining fixed std.Io signatures
+and injected cancellation capacity are described in [the executor review](executor-decision.md).
 
-The actual conduit zero-worker suite can spin in a thread mutex while its
-holder is suspended in an Io wait. A thread yield cannot schedule a different
-fiber on that same thread. The required consumer profile or cooperative-lock
-seam remains an owner decision; instrumentation does not alter that lock or
-silently select a different profile.
+V11 completion moves to each package's own move onto reactor. The
+[isolated harness](../bench/v11/README.md) keeps the initial immutable
+measurements and uncovered seams: cloak has no published TLS suite; airlock's
+raw close bypasses fixed-file invalidation on Linux and its macOS write-call
+bound differs; conduit uses a thread-spin mutex with a parked holder in its
+zero-worker profile; relic has allocation/concurrency and transport questions;
+the Windows uplink fixture crashes between tests and needs adoption-time
+isolation. None is converted into a completed-suite watermark or hidden by a
+consumer edit. Default stack size and zero-copy defaults remain unchanged.
+
+The combined LATER/R6 phase is work in progress until its correctness review
+and exact final-head FAST and MERGE tiers pass and main is fast-forwarded.

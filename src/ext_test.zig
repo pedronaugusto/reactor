@@ -170,13 +170,13 @@ fn triple(x: u32) u32 {
 }
 
 test "blocking runs the call on the caller under Threaded, and on a lane under a runtime" {
-    try testing.expectEqual(@as(u32, 21), reactor.blocking(testing.io, .general, triple, .{7}));
+    try testing.expectEqual(@as(u32, 21), try reactor.blocking(testing.io, .general, triple, .{7}));
     try skipWithoutFibers();
     var t: Threads = undefined;
     try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
     defer t.deinit();
     const io = t.io();
-    try testing.expectEqual(@as(u32, 42), reactor.blocking(io, .sync, triple, .{14}));
+    try testing.expectEqual(@as(u32, 42), try reactor.blocking(io, .sync, triple, .{14}));
     try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.sync)].@"inline");
 }
 
@@ -265,9 +265,9 @@ test "an extension called with another Io counts a fallback; one with a runtime 
     try d.init(testing.allocator, 1, small);
     defer d.deinit();
     const before = reactor.fallbacks();
-    _ = reactor.blocking(d.io(), .general, triple, .{1});
+    _ = try reactor.blocking(d.io(), .general, triple, .{1});
     try testing.expectEqual(before, reactor.fallbacks());
-    _ = reactor.blocking(testing.io, .general, triple, .{1});
+    _ = try reactor.blocking(testing.io, .general, triple, .{1});
     try testing.expect(reactor.fallbacks() > before);
 }
 
@@ -324,10 +324,10 @@ test "a blocking hook runs a library's raw call on the sync lane" {
     defer t.deinit();
     var id: std.Thread.Id = undefined;
     const hook = reactor.blockingHook(t.io());
-    hook.call(hook.context, Call.run, &id);
+    try hook.call(hook.context, Call.run, &id);
     try testing.expect(id != std.Thread.getCurrentId());
     const inline_hook = reactor.blockingHook(testing.io);
-    inline_hook.call(inline_hook.context, Call.run, &id);
+    try inline_hook.call(inline_hook.context, Call.run, &id);
     try testing.expectEqual(std.Thread.getCurrentId(), id);
 }
 
@@ -398,4 +398,123 @@ test "a reaped operation can alternate kernel and timer requests without reiniti
         try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
         if (round % 2 == 0) try testing.expectError(error.Canceled, operation.result.timer) else try operation.result.timer;
     }
+}
+
+const RefusingOffload = shakedown.Layer(u8, .{ .groupConcurrent = struct {
+    fn refuse(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+        return error.ConcurrencyUnavailable;
+    }
+}.refuse });
+
+fn refusedVoid(ran: *bool) void {
+    ran.* = true;
+}
+fn refusedValue(ran: *bool) u32 {
+    ran.* = true;
+    return 7;
+}
+fn refusedNarrow(ran: *bool) error{RawFailure}!u32 {
+    ran.* = true;
+    return error.RawFailure;
+}
+fn voidOffload(io: Io, ran: *bool) anyerror!void {
+    return reactor.blocking(io, .general, refusedVoid, .{ran});
+}
+fn valueOffload(io: Io, ran: *bool) anyerror!u32 {
+    return reactor.blocking(io, .general, refusedValue, .{ran});
+}
+fn narrowOffload(io: Io, ran: *bool) anyerror!u32 {
+    return reactor.blocking(io, .general, refusedNarrow, .{ran});
+}
+fn checkOffloadRefusal(io: Io) !void {
+    var ran = false;
+    try testing.expectError(error.ConcurrencyUnavailable, voidOffload(io, &ran));
+    try testing.expectError(error.ConcurrencyUnavailable, valueOffload(io, &ran));
+    try testing.expectError(error.ConcurrencyUnavailable, narrowOffload(io, &ran));
+    try testing.expect(!ran);
+}
+
+test "r6: refused void value and narrow offloads return an error without running" {
+    try skipWithoutFibers();
+    var refusing: RefusingOffload = .init(testing.io, 0);
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = refusing.io() } });
+    defer t.deinit();
+    const io = t.io();
+    try checkOffloadRefusal(io);
+    var task = try io.concurrent(checkOffloadRefusal, .{io});
+    try task.await(io);
+    try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].@"inline");
+}
+
+fn refusedHook(context: *anyopaque) void {
+    const ran: *bool = @ptrCast(@alignCast(context)); // safe: the test passed its live boolean
+    ran.* = true;
+}
+
+test "r6: a refused blocking hook returns an error without touching its context" {
+    try skipWithoutFibers();
+    var refusing: RefusingOffload = .init(testing.io, 0);
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = refusing.io() } });
+    defer t.deinit();
+    var ran = false;
+    const hook = reactor.blockingHook(t.io());
+    try testing.expectError(error.ConcurrencyUnavailable, hook.call(hook.context, refusedHook, &ran));
+    try testing.expect(!ran);
+}
+
+fn originalOffloadError() error{RawFailure}!void {
+    return error.RawFailure;
+}
+test "r6: fallible offloads preserve user errors and successful void results" {
+    try testing.expectError(error.RawFailure, reactor.blocking(testing.io, .general, originalOffloadError, .{}));
+    var ran = false;
+    try reactor.blocking(testing.io, .general, refusedVoid, .{&ran});
+    try testing.expect(ran);
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    defer t.deinit();
+    try testing.expectError(error.RawFailure, reactor.blocking(t.io(), .general, originalOffloadError, .{}));
+    ran = false;
+    try reactor.blocking(t.io(), .general, refusedVoid, .{&ran});
+    try testing.expect(ran);
+}
+
+const OffloadGate = struct {
+    io: Io,
+    begun: Io.Event = .unset,
+    release: Io.Event = .unset,
+    fn wait(gate: *OffloadGate) void {
+        gate.begun.set(gate.io);
+        gate.release.waitUncancelable(gate.io);
+    }
+};
+fn waitOffload(io: Io, gate: *OffloadGate) !void {
+    return reactor.blocking(io, .general, OffloadGate.wait, .{gate});
+}
+test "r6: canceling a queued void offload drains without invoking it" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .owned = .{ .general = 1 } } });
+    defer t.deinit();
+    const io = t.io();
+    var gate: OffloadGate = .{ .io = testing.io };
+    var first = try io.concurrent(waitOffload, .{ io, &gate });
+    defer _ = first.cancel(io) catch {};
+    // Drive the first task onto the lane before blocking on test infrastructure.
+    t.runtime.run(.nowait);
+    try gate.begun.wait(testing.io);
+    defer gate.release.set(testing.io);
+    var ran = false;
+    var queued = try io.concurrent(voidOffload, .{ io, &ran });
+    defer _ = queued.cancel(io) catch {};
+    t.runtime.run(.nowait);
+    try testing.expectEqual(@as(u32, 1), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].queued);
+    try testing.expectError(error.Canceled, queued.cancel(io));
+    try testing.expect(!ran);
+    gate.release.set(testing.io);
+    try first.await(io);
+    try testing.expectEqual(@as(u32, 0), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].running);
 }

@@ -289,7 +289,7 @@ fn waitOnLane(gate: *std.atomic.Value(u32)) void {
 }
 
 fn laneCall(io: Io, gate: *std.atomic.Value(u32)) void {
-    blocking(io, .general, waitOnLane, .{gate});
+    blocking(io, .general, waitOnLane, .{gate}) catch @panic("test lane unexpectedly refused");
 }
 
 test "calls beyond a lane's cap wait their turn, never inline on a worker" {
@@ -328,12 +328,12 @@ test "an injected executor carries every lane call" {
     try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = counting.io() } });
     defer t.deinit();
     const io = t.io();
-    for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));
+    for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, try blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));
     try testing.expectEqual(@as(u32, 5), counting.state.load(.monotonic));
 }
 
 fn manyCalls(io: Io, rounds: usize) !void {
-    for (0..rounds) |_| if (blocking(io, .general, addOne, .{0}) != 1) return error.WrongResult;
+    for (0..rounds) |_| if (try blocking(io, .general, addOne, .{0}) != 1) return error.WrongResult;
 }
 
 test "lane calls one after another from a task and from the root keep their frames" {

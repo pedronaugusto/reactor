@@ -119,6 +119,9 @@ counted by `reactor.fallbacks()`.
 - **`Job`** (Windows): a job object's messages.
 - **`blocking(io, lane, f, args)`**: a raw call that can take milliseconds,
   run on one of the runtime's lanes (`sync`, `lookup`, `wait`, `general`).
+  Use `try`: even a void function returns `Canceled` or
+  `ConcurrencyUnavailable` when it could not run. `blockingHook` has the same
+  fallible contract. Refused work never runs inline.
 - **`Signals`**: signals and console control events, to several listeners.
 - **`net`**: `connect` with a timeout, a bounded `resolve`, `abort`,
   per-operation `Deadlines`, and a `Receiver` whose idle connections hold no
@@ -154,9 +157,10 @@ examples and the own benchmarks. `zig build bench` runs manual timings; CI
 compiles them without timing. The [LATER evidence](bench/later-evidence.md)
 retains native ownership and failing-before regression receipts.
 
-V11 suite measurements use immutable published source snapshots and isolated
-adapted copies under this clone, as described in [the V11 harness](bench/v11/README.md).
-No consumer checkout or adoption is involved.
+V11 suite measurements belong to each package's move onto reactor. The
+[isolated harness](bench/v11/README.md) preserves the measurements and consumer
+seams already investigated here. Stacks stay at 1 MiB until those suite and
+guard measurements justify a different default.
 
 ## Licence
 

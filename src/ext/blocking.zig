@@ -7,8 +7,10 @@ const Core = @import("../runtime/Core.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const native = @import("native.zig");
 
+pub const Error = lane_call.OffloadError;
+
 fn Return(comptime F: type) type {
-    return @typeInfo(F).@"fn".return_type.?;
+    return lane_call.Result(*const F);
 }
 
 /// Runs `function(args)` where it holds up no worker: on `lane` under a
@@ -18,16 +20,18 @@ fn Return(comptime F: type) type {
 /// `Io.Threaded`, which interrupts what std code the function runs there
 /// by std's own mechanism; a call that finishes anyway keeps its result,
 /// and the cancel stays pending for the caller's next cancelation point.
+/// Every result adds Canceled and ConcurrencyUnavailable, including void.
+/// Refusal never invokes the function or falls back to the caller.
 pub fn blocking(io: Io, lane: Lanes.Lane, function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Return(@TypeOf(function)) {
     const core = native.runtimeOf(io) orelse return @call(.auto, function, args);
-    return lane_call.call(&core.scheduler, &core.lanes, lane, &function, args);
+    return lane_call.fallible(&core.scheduler, &core.lanes, lane, &function, args);
 }
 
 /// A raw call adapter for libraries that keep their own syscall vocabulary.
 /// The library puts arguments and the typed result in its own context.
 pub const Hook = struct {
     context: ?*anyopaque,
-    call: *const fn (?*anyopaque, *const fn (*anyopaque) void, *anyopaque) void,
+    call: *const fn (?*anyopaque, *const fn (*anyopaque) void, *anyopaque) Error!void,
 };
 
 /// Device flushes use the sync lane. Another Io executes on the caller.
@@ -36,7 +40,7 @@ pub fn blockingHook(io: Io) Hook {
     return .{ .context = native.runtimeOf(io), .call = invoke };
 }
 
-fn invoke(context: ?*anyopaque, function: *const fn (*anyopaque) void, args: *anyopaque) void {
+fn invoke(context: ?*anyopaque, function: *const fn (*anyopaque) void, args: *anyopaque) Error!void {
     const core = if (context) |c| @as(*Core, @ptrCast(@alignCast(c))) else return function(args); // safe: blockingHook retained the recognized core
-    lane_call.call(&core.scheduler, &core.lanes, .sync, function, .{args});
+    return lane_call.fallible(&core.scheduler, &core.lanes, .sync, function, .{args});
 }

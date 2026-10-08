@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `blocking` adds `Canceled` and `ConcurrencyUnavailable` to every function result, including void and ordinary values. `blockingHook.call` now returns that error union; callers must handle refusal. Consumer hook adoption is a separate package batch.
+
 - Remove the unreleased scheduler-only `Loop.wakeFrom` surface; standalone and foreign loops use `Loop.wake`.
 
 ### Added
