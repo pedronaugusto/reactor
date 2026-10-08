@@ -73,7 +73,7 @@ scans stack memory, so leave it off when timing production workloads.
 Family-suite V11 measurements belong to each package's adoption.
 
 Architecture and ownership: [design](docs/design.md).
-A [short dated results note](bench/results-2026-10-08.md) links the private evidence.
+Benchmarks are code in `bench/`; measurements are maintained separately.
 
 ## API
 
@@ -159,10 +159,10 @@ examples and the own benchmarks. `zig build bench` runs manual timings; CI
 compiles them without timing. Native lifetime regressions live in
 [src/later_test.zig](src/later_test.zig) and
 [src/r1_regression_test.zig](src/r1_regression_test.zig); raw receipts stay in
-the private trials revision linked by the dated results note.
+CI runs linked in the landing report.
 
 V11 suite measurements belong to each package's move onto reactor. The
-[isolated harness](bench/v11/README.md) preserves the measurements and consumer
+[isolated harness](bench/v11/prepare.zig) preserves the measurements and consumer
 seams already investigated here. Stacks stay at 1 MiB until those suite and
 guard measurements justify a different default.
 

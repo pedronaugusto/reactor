@@ -93,7 +93,7 @@ db221e5. No refused call runs inline. The remaining fixed std.Io signatures
 and injected cancellation capacity are described in the executor review below.
 
 V11 completion moves to each package's own move onto reactor. The
-[isolated harness](../bench/v11/README.md) keeps the initial immutable
+[isolated harness](../bench/v11/prepare.zig) keeps the initial immutable
 measurements and uncovered seams: cloak has no published TLS suite; airlock's
 raw close bypasses fixed-file invalidation on Linux and its macOS write-call
 bound differs; conduit uses a thread-spin mutex with a parked holder in its
