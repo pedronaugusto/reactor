@@ -1,9 +1,15 @@
 //! Every test of reactor, reached from here.
 test {
     _ = @import("reactor.zig");
+    _ = @import("ext/tasks_test.zig");
     _ = @import("wheel_test.zig");
     _ = @import("scheduler/run_queue_test.zig");
     _ = @import("runtime_test.zig");
+    _ = @import("lanes_test.zig");
+    _ = @import("r1_regression_test.zig");
+    _ = @import("later_test.zig");
+    _ = @import("testing/overflow_test.zig");
+    _ = @import("testing/seh_test.zig");
     _ = @import("uring_test.zig");
     _ = @import("backends_test.zig");
     _ = @import("handoff_test.zig");

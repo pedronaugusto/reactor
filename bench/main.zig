@@ -47,6 +47,11 @@ const Config = struct {
     only: ?[]const u8 = null,
     workers: ?u16 = null,
     backend: reactor.Loop.Backend = .auto,
+    registered: bool = false,
+    zero_copy_min: ?usize = 16 << 10,
+    sqpoll: bool = false,
+    bytes: usize = 64 << 10,
+    msg_ring_off: bool = false,
 
     fn wants(c: Config, workload: []const u8) bool {
         const o = c.only orelse return true;
@@ -75,6 +80,13 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--backend")) {
             i += 1;
             c.backend = std.meta.stringToEnum(reactor.Loop.Backend, args[i]) orelse return error.UnknownBackend;
+        } else if (std.mem.eql(u8, arg, "--registered")) c.registered = true else if (std.mem.eql(u8, arg, "--sqpoll")) c.sqpoll = true else if (std.mem.eql(u8, arg, "--msg-ring-off")) c.msg_ring_off = true else if (std.mem.eql(u8, arg, "--zero-copy-min")) {
+            i += 1;
+            c.zero_copy_min = if (std.mem.eql(u8, args[i], "off")) null else try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--bytes")) {
+            i += 1;
+            c.bytes = try std.fmt.parseInt(usize, args[i], 10);
+            if (c.bytes == 0 or c.bytes > 1 << 20) return error.InvalidSize;
         } else return error.UnknownArgument;
     }
     var buffer: [4096]u8 = undefined;
@@ -94,7 +106,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     var runtime: reactor.Runtime = undefined;
-    runtime.init(gpa, .{ .workers = c.workers, .backend = c.backend }) catch |err| switch (err) {
+    runtime.init(gpa, .{
+        .workers = c.workers,
+        .backend = c.backend,
+        .zero_copy_min = c.zero_copy_min,
+        .sqpoll = if (c.sqpoll) .{} else null,
+        .uring_off = .{ .msg_ring = c.msg_ring_off },
+    }) catch |err| switch (err) {
         error.BackendUnavailable => {
             try r.line("runtime", "no evented backend on this system", 0, "-");
             return;
@@ -112,7 +130,9 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("timers")) try sleeps(r, io, c);
     if (c.wants("echo")) try echo(r, gpa, io, c);
     if (c.wants("accept")) try accepts(r, io, c);
-    if (c.wants("files")) try files(r, io, c);
+    if (c.wants("files")) try files(r, gpa, io, c);
+    if (c.wants("open-stat")) try openStat(r, io, c);
+    if (c.wants("bulk")) try bulk(r, gpa, io, c);
     if (c.wants("waits")) try waits(r, io, c);
     if (c.wants("lanes")) try lanes(r, io, c);
     if (c.wants("deadlines")) try deadlines(r, io, c);
@@ -342,7 +362,7 @@ fn accepts(r: Report, io: Io, c: Config) !void {
 
 // files
 
-fn files(r: Report, io: Io, c: Config) !void {
+fn files(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     var tmp = Io.Dir.cwd();
     const path = "reactor-bench-file.bin";
     const file = try tmp.createFile(io, path, .{ .read = true });
@@ -350,13 +370,18 @@ fn files(r: Report, io: Io, c: Config) !void {
         file.close(io);
         tmp.deleteFile(io, path) catch {};
     }
-    var block: [4096]u8 = @splat(1);
-    for (0..256) |k| try file.writePositionalAll(io, &block, k * block.len);
+    var pool: ?reactor.net.Receiver.Pool = null;
+    defer if (pool) |*p| p.deinit(gpa, io);
+    if (c.registered) pool = try .init(gpa, io, .{ .buffers = (c.workers orelse 0) + 1, .registered = true });
+    var ordinary: [4096]u8 = @splat(1);
+    const block = if (pool) |*p| p.memory[0..4096] else &ordinary;
+    @memset(block, 1);
+    for (0..256) |k| try file.writePositionalAll(io, block, k * block.len);
     const n: usize = if (c.smoke) 100 else 200_000;
     var prng: std.Random.DefaultPrng = .init(3);
     const random = prng.random();
     const t0 = now(io);
-    for (0..n) |_| _ = try file.readPositional(io, &.{&block}, random.uintLessThan(u64, 256) * block.len);
+    for (0..n) |_| _ = try file.readPositional(io, &.{block}, random.uintLessThan(u64, 256) * block.len);
     const t1 = now(io);
     try r.line("files", "cached 4 KiB positional read", nsBetween(t0, t1) / @as(f64, @floatFromInt(n)), "ns/read");
 }
@@ -569,4 +594,68 @@ fn receivers(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     try client(io, server.socket.address, n);
     try task.await(io);
     try r.line("receiver", "64 B round trips, pooled receives", @as(f64, @floatFromInt(n)) * std.time.ns_per_s / nsBetween(t0, now(io)), "msg/s");
+}
+
+// Native opens/stat and large contiguous sends. Feature switches are
+// benchmark controls, so each optimization has an interleaved control.
+fn openStat(r: Report, io: Io, c: Config) !void {
+    const dir = Io.Dir.cwd();
+    const path = "reactor-bench-open.bin";
+    const file = try dir.createFile(io, path, .{});
+    file.close(io);
+    defer dir.deleteFile(io, path) catch {};
+    const n: usize = if (c.smoke) 4 else 20_000;
+    const start = now(io);
+    for (0..n) |_| {
+        const opened = try dir.openFile(io, path, .{});
+        _ = try opened.stat(io);
+        opened.close(io);
+    }
+    try r.line("open-stat", "open, stat, close", nsBetween(start, now(io)) / @as(f64, @floatFromInt(n)), "ns/call");
+}
+fn drainBulk(io: Io, server: *Io.net.Server, total: usize) !void {
+    const stream = try server.accept(io);
+    defer stream.close(io);
+    var buffer: [16 << 10]u8 = undefined;
+    var received: usize = 0;
+    while (received < total) {
+        var data: [1][]u8 = .{&buffer};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read).data_len;
+        if (n == 0) return error.EndOfStream;
+        if (buffer[0] != 0x69 or buffer[n - 1] != 0x69) return error.BadPayload;
+        received += n;
+    }
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{"ok"} } })).net_write;
+}
+fn bulk(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
+    const messages = if (c.smoke) 2 else @max(8, (16 << 20) / c.bytes);
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+    defer server.deinit(io);
+    var receiver = try io.concurrent(drainBulk, .{ io, &server, messages * c.bytes });
+    defer _ = receiver.cancel(io) catch {};
+    const stream = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    const bytes = try gpa.alloc(u8, c.bytes);
+    defer gpa.free(bytes);
+    @memset(bytes, 0x69);
+    const start = now(io);
+    for (0..messages) |_| {
+        var sent: usize = 0;
+        while (sent < bytes.len) {
+            const n = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{bytes[sent..]} } })).net_write;
+            if (n == 0) return error.ShortSend;
+            sent += n;
+        }
+    }
+    var acknowledgment: [2]u8 = undefined;
+    var got: usize = 0;
+    while (got < 2) {
+        var data: [1][]u8 = .{acknowledgment[got..]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read).data_len;
+        if (n == 0) return error.EndOfStream;
+        got += n;
+    }
+    const elapsed = nsBetween(start, now(io));
+    try receiver.await(io);
+    try r.line("bulk", "contiguous loopback send", @as(f64, @floatFromInt(messages * c.bytes)) / elapsed * std.time.ns_per_s / (1 << 20), "MiB/s");
 }

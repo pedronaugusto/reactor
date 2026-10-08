@@ -103,7 +103,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     @memset(c.csprngs, .uninitialized);
 
     var stacks: Stacks = undefined;
-    stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size }) catch |err| return switch (err) {
+    stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size, .classes = options.stack_classes }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooManyTasks => error.TooManyTasks,
         error.SystemResources => error.SystemResources,
@@ -192,6 +192,8 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
             .max_ops = @max(2 * c.options.max_tasks / @as(u32, @intCast(c.processors.len)), 256),
             .submission_entries = c.options.ring_entries,
             .uring_off = c.options.uring_off,
+            .sqpoll = c.options.sqpoll,
+            .zero_copy_min = c.options.zero_copy_min,
             .owner = if (p.index == 0) .caller else .adopter,
         }),
         .custom => |custom| loop_internal.initWith(&p.loop, .{ .custom = custom.backendFor(custom.context, p.index) }, custom.clock, 1 << 16),

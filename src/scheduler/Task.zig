@@ -30,7 +30,11 @@ cancel_next: ?*Task = null,
 stack: ?u32 = null,
 /// The immutable upper bound, also used for parked stack watermarks.
 stack_top: usize = 0,
+/// Deepest sampled use since pages were last discarded. Owned by the task.
+resident_water: usize = 0,
 kind: Kind,
+/// Latency-sensitive tasks receive a bounded share ahead of normal work.
+priority: Priority = .normal,
 /// The processor it runs or last ran on (an opaque `*Processor`).
 processor: ?*anyopaque = null,
 /// Never leaves `processor`: the root, and every task under `per_core`.
@@ -64,6 +68,8 @@ spawned_at: usize = 0,
 /// The crashing task's own summary; no other thread reads these fields.
 operation: ?std.meta.Tag(op.Kind) = null,
 lane: ?Lanes.Lane = null,
+
+pub const Priority = Lanes.Priority;
 
 pub const Kind = enum(u8) { root, future, member };
 

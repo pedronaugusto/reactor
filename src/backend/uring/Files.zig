@@ -74,7 +74,7 @@ pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
 
 /// Accepted requests retain their file references. Unsubmitted requests
 /// revert to the ordinary descriptor before its slot is removed; only
-/// this thread submits, so the kernel cannot consume them during the edit.
+/// this thread publishes submissions. SQPOLL first acquires published requests.
 pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
     const start = @as(u32, @bitCast(fd)) % f.slots.len;
     for (0..@min(8, f.slots.len)) |offset| {
@@ -87,6 +87,7 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
             slot.store(-2, .release); // tombstone: a later colliding file remains reachable
             return;
         }
+        u.consumePublished();
         var head = @atomicLoad(u32, u.ring.sq.head, .acquire);
         while (head != u.ring.sq.sqe_tail) : (head +%= 1) {
             const sqe = &u.ring.sq.sqes[head & u.ring.sq.mask];

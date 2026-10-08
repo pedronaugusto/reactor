@@ -6,6 +6,8 @@ const std = @import("std");
 const Io = std.Io;
 const Wheel = @import("../Wheel.zig");
 
+pub const SqPoll = struct { idle_ms: u32 = 1000, cpu: ?u32 = null };
+
 pub const Kind = union(enum) {
     /// Every `Io.Operation`: net and file reads and writes, device control.
     io: Io.Operation,
@@ -94,6 +96,9 @@ pub fn State(comptime Scratch: type) type {
         phase: Phase = .idle,
         /// The owner asked the kernel to end it.
         canceled: bool = false,
+        /// Kernel ownership beyond the primary CQE: linked timeout and
+        /// SEND_ZC notification must both settle before the frame is freed.
+        uring: if (builtin.os.tag == .linux) UringState else struct { timeout_pending: bool = false, timed_out: bool = false } = .{},
         /// The completion queue's link.
         next: ?*anyopaque = null,
         /// The phase owns the wheel node or kernel scratch, never both.
@@ -116,3 +121,32 @@ pub const Raw = union(enum) {
     },
 };
 pub const RawResult = union(enum) { uring: i32, windows: std.os.windows.IO_STATUS_BLOCK };
+
+pub const UringState = struct {
+    timeout_pending: bool = false,
+    notification_pending: bool = false,
+    notification_seen: bool = false,
+    primary_done: bool = false,
+    use_copy: bool = false,
+    zero_copy: bool = false,
+    fixed_buffer: ?u16 = null,
+    timed_out: bool = false,
+    timespec: std.os.linux.kernel_timespec = undefined,
+    primary: std.os.linux.io_uring_cqe = undefined,
+
+    /// Completion ordering is independent of storage lifetime. Every
+    /// ownership grant ends before ready becomes true, in either order.
+    pub fn completed(state: *UringState, cqe: std.os.linux.io_uring_cqe) void {
+        if (cqe.flags & std.os.linux.IORING_CQE_F_NOTIF != 0) {
+            state.notification_seen = true;
+            state.notification_pending = false;
+        } else {
+            state.primary_done = true;
+            state.primary = cqe;
+            state.notification_pending = cqe.flags & std.os.linux.IORING_CQE_F_MORE != 0 and !state.notification_seen;
+        }
+    }
+    pub fn ready(state: *const UringState) bool {
+        return state.primary_done and !state.timeout_pending and !state.notification_pending;
+    }
+};

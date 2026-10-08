@@ -8,6 +8,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const Source = @import("shakedown").Source;
 const Runtime = @import("../Runtime.zig");
 const backend = @import("../backend.zig");
 const clock = @import("../clock.zig");
@@ -56,4 +57,12 @@ pub fn io(d: *Driver) Io {
 /// Virtual nanoseconds since the start.
 pub fn elapsed(d: *const Driver) u64 {
     return d.virtual.ns.load(.acquire);
+}
+
+/// Every fake scheduling and completion choice joins the property's tape.
+/// check then shrinks inputs, timings, cancellation and completion races
+/// in one replay, using the production scheduler throughout.
+pub fn initSource(d: *Driver, gpa: Allocator, source: *Source, options: Runtime.Options) !void {
+    try d.init(gpa, 0, options);
+    d.fake.shared_source = source;
 }

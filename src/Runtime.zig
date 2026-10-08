@@ -100,12 +100,15 @@ pub const Stats = struct {
     handoffs: u64,
     /// Tasks that held their processor past `report_after`.
     stalls: u64,
+    /// Deep parked or ended stacks whose unused pages were discarded.
+    stack_trims: u64,
 };
 
 pub fn stats(r: *Runtime) Stats {
     var lanes: [Lanes.count]Lanes.Stats = undefined;
     for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
     return .{
+        .stack_trims = r.core.scheduler.stack_trims.load(.monotonic),
         .workers = @intCast(r.core.processors.len - 1),
         .tasks = r.core.scheduler.stacks.in_use.load(.monotonic),
         .max_tasks = r.core.options.max_tasks,

@@ -24,6 +24,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "fibers, time and lanes", .patterns = &.{
         "src/fiber.zig",
         "src/fiber/Stacks.zig",
+        "src/fiber/Stacks/Pool.zig",
         "src/Wheel.zig",
         "src/clock.zig",
         "src/Lanes.zig",
@@ -41,6 +42,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/uring/Accept.zig",
         "src/backend/uring/Receive.zig",
         "src/backend/uring/Files.zig",
+        "src/backend/uring/Buffers.zig",
         "src/backend/iocp/Notifications.zig",
         "src/backend/wait.zig",
         "src/backend/readiness.zig",
@@ -85,11 +87,13 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/runtime/slots.zig",
         "src/runtime/io_ops.zig",
         "src/runtime/child.zig",
+        "src/runtime/files.zig",
     } },
     .{ .name = "extensions", .patterns = &.{
         "src/ext.zig",
         "src/ext/native.zig",
         "src/ext/kernel.zig",
+        "src/ext/tasks.zig",
         "src/ext/Wake.zig",
         "src/ext/Process.zig",
         "src/ext/wait.zig",
@@ -103,6 +107,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/net/Deadlines.zig",
         "src/ext/net/Receiver.zig",
         "src/ext/net/receiver/Groups.zig",
+        "src/ext/net/receiver/Registrations.zig",
     } },
     .{ .name = "public", .patterns = &.{
         "src/reactor.zig",
@@ -114,11 +119,18 @@ pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{};
 
 pub const references: []const gantry.rules.ReferenceRule = &.{
-    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{
-        "builtin",
-        "shakedown",
-        "std",
-    } },
+    .{
+        .name = "named dependencies",
+        .unresolved_only = true,
+        .except_targets = &.{
+            "builtin",
+            "shakedown",
+            // The death test selects one test through its portable runner.
+            "preflight_order",
+            "preflight_runner_options",
+            "std",
+        },
+    },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
 

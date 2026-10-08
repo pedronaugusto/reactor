@@ -3,6 +3,7 @@
 //! seed), and on real worker threads.
 const builtin = @import("builtin");
 const std = @import("std");
+const shakedown = @import("shakedown");
 const testing = std.testing;
 const Io = std.Io;
 const posix = std.posix;
@@ -183,7 +184,7 @@ test "blocking runs the call on the caller under Threaded, and on a lane under a
 
 /// A script under which readiness never comes: a wait ends only by its
 /// deadline or a cancel.
-fn neverReady(context: ?*anyopaque, o: *Loop.Op, random: std.Random) ?Loop.Op.Result {
+fn neverReady(context: ?*anyopaque, o: *Loop.Op, random: *shakedown.Source) ?Loop.Op.Result {
     return switch (o.kind) {
         .wait => null,
         else => Fake.defaultScript(context, o, random),

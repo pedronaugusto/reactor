@@ -409,13 +409,13 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
 }
 
 // Child processes. On IOCP a wait is the process handle's wait packet,
-// then std's own wait, which finds the process ended; elsewhere std's wait
-// on the `wait` lane. std's cleanup closes the child's pipes itself:
+// then std's own wait, which finds the process ended; Linux and kqueue
+// systems use their process watches. Missing watches use the wait lane. std's cleanup closes the child's pipes itself:
 // their bindings are forgotten first.
 
 pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
     const r = Core.of(userdata);
-    if (builtin.os.tag == .linux) return child_ops.childWait(userdata, child);
+    if (builtin.os.tag != .windows) return child_ops.childWait(userdata, child);
     if (!iocp(r)) return onLane(r, .wait, "childWait", .{child});
     if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
     var o: Loop.Op = .{ .kind = .{ .wait = .{ .object = child.id.? } } };

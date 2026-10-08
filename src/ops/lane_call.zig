@@ -73,7 +73,7 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane },
+        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.priority },
         .func = func,
         .args = args,
         .task = t,
@@ -85,6 +85,7 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     t.leaveWait();
     // The executor lets go of the job's group just after the call returns.
     while (c.job.held()) Scheduler.yield();
+    if (c.job.rejected) return unavailable(R);
     if (comptime cancelable(R)) {
         if (c.job.dropped) return t.acknowledge();
         if (isCanceled(R, c.result)) t.acknowledged();
@@ -123,4 +124,21 @@ pub fn borrow(func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
         if (Scheduler.current()) |t| if (t.takeCancel()) return error.Canceled;
     }
     return @call(.auto, func, args);
+}
+
+/// A void or narrow result cannot invent a successful result for a call
+/// that never ran. Resource failures are explicit, including injected
+/// executors that violate their ability to accept cancellation jobs.
+fn unavailable(comptime R: type) R {
+    if (comptime @typeInfo(R) == .error_union) {
+        const names = @typeInfo(@typeInfo(R).error_union.error_set).error_set.error_names orelse return error.SystemResources;
+        inline for (names) |name| {
+            if (comptime std.mem.eql(u8, name, "SystemResources")) return error.SystemResources;
+        }
+        inline for (names) |name| {
+            if (comptime std.mem.eql(u8, name, "Unexpected")) return error.Unexpected;
+            if (comptime std.mem.eql(u8, name, "ConcurrencyUnavailable")) return error.ConcurrencyUnavailable;
+        }
+    }
+    @panic("reactor: lane executor refused a call whose result cannot report resource exhaustion");
 }

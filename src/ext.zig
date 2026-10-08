@@ -12,3 +12,5 @@ pub const Signals = @import("ext/Signals.zig");
 pub const net = @import("ext/net.zig");
 
 pub const kernel = @import("ext/kernel.zig");
+
+pub const tasks = @import("ext/tasks.zig");

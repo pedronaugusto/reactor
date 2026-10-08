@@ -9,7 +9,9 @@
     "src/testing/**"
   ],
   "test_dependencies": [
-    "shakedown"
+    "shakedown",
+    "preflight_order",
+    "preflight_runner_options"
   ],
   "function_exceptions": {},
   "layout_exceptions": {},

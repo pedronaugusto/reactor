@@ -24,6 +24,8 @@ const op = backends.op;
 const clocks = @import("clock.zig");
 const Wheel = @import("Wheel.zig");
 
+pub const SqPoll = op.SqPoll;
+
 pub const Backend = enum { auto, io_uring, epoll, kqueue, iocp };
 
 pub const Options = struct {
@@ -37,6 +39,10 @@ pub const Options = struct {
     uring_off: UringFeatures = .{},
     /// The thread that will own the loop.
     owner: Owner = .caller,
+    /// Linux only, explicitly requested; failure is reported, never downgraded.
+    sqpoll: ?SqPoll = null,
+    /// Minimum contiguous send eligible for SEND_ZC; null disables it.
+    zero_copy_min: ?usize = 16 << 10,
     /// Windows: the host's completion port, which the loop shares. The host
     /// waits on it and hands the entries that carry `completionKey()` to
     /// `complete`; `run` then waits on nothing, so the host calls
@@ -58,6 +64,7 @@ pub const UringFeatures = packed struct {
     msg_ring: bool = false,
     waitid: bool = false,
     linked_timeout: bool = false,
+    zero_copy: bool = false,
 };
 
 /// Caller-owned and pinned from `submit` until its completion is
@@ -70,6 +77,9 @@ pub const Op = struct {
     /// for `reap`.
     callback: ?*const fn (l: *Loop, o: *Op) void align(@alignOf(Kind)) = null,
     user_data: usize = 0,
+    /// Absolute deadline, linked in the kernel where supported. Other
+    /// backends are timed by the runtime's wheel.
+    deadline: if (builtin.os.tag == .linux) ?Io.Clock.Timestamp else void = if (builtin.os.tag == .linux) null else {},
     /// Valid once completed, under the field of `kind`.
     result: Result align(@alignOf(Kind)) = undefined,
     /// The loop's and its backend's from `submit` to delivery.
@@ -141,10 +151,11 @@ const List = struct {
 /// the BSDs. io_uring: the calling thread is the ring's only submitter for
 /// the loop's life.
 pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
+    if (options.sqpoll != null and (builtin.os.tag != .linux or (options.backend != .auto and options.backend != .io_uring))) return error.BackendUnavailable;
     const native: backends.Backend = switch (options.backend) {
         .auto => if (builtin.os.tag == .linux)
             initUring(gpa, options) catch |err| switch (err) {
-                error.BackendUnavailable => try initEpoll(gpa, options),
+                error.BackendUnavailable => if (options.sqpoll != null) return error.BackendUnavailable else try initEpoll(gpa, options),
                 else => |e| return e,
             }
         else if (has_kqueue) try initKqueue(gpa, options) else if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
@@ -175,6 +186,8 @@ fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
             .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
             .off = @bitCast(options.uring_off),
             .disabled = options.owner == .adopter,
+            .sqpoll = options.sqpoll,
+            .zero_copy_min = options.zero_copy_min,
         }) catch |err| return switch (err) {
             error.BackendUnavailable => error.BackendUnavailable,
             error.SystemResources => error.SystemResources,
@@ -203,6 +216,7 @@ fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
+    l.installPressure();
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
         .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
@@ -242,6 +256,7 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
 /// this returns true, `o.result` is set, and nothing is delivered for it.
 /// A host that runs its own tasks saves a trip through its scheduler.
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
+    l.installPressure();
     l.assertOwner();
     assert(o.state.phase == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
@@ -322,6 +337,7 @@ fn cancelKernel(l: *Loop, o: *Op) void {
 /// Delivers completions (callbacks run, or queued for `reap`) as `mode`
 /// allows and returns how many.
 pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
+    l.installPressure();
     l.assertOwner();
     var delivered: u32 = 0;
     const deadline: ?u64 = switch (mode) {
@@ -528,5 +544,44 @@ const Fired = struct {
         o.result = .{ .timer = {} };
         f.count += 1;
         f.loop.deliver(o);
+    }
+};
+
+/// The caller owns source on this thread. A message wakes another ring;
+/// other backends and foreign threads use the target's ordinary wake.
+pub fn wakeFrom(l: *Loop, source: *Loop) void {
+    l.woken.store(true, .release);
+    if (comptime builtin.os.tag == .linux) if (source != l and source.backend == .io_uring and l.backend == .io_uring) {
+        if (source.backend.io_uring.messageWake(&l.backend.io_uring)) return;
+    };
+    l.backend.wake();
+}
+
+/// Backend pressure can release kernel references during submission, but
+/// user callbacks remain owned by run's ready queue.
+fn installPressure(l: *Loop) void {
+    if (comptime builtin.os.tag == .linux) if (l.backend == .io_uring) {
+        l.backend.io_uring.pressure = .{ .context = l, .complete = Pressure.dispatch };
+    };
+}
+const Pressure = struct {
+    loop: *Loop,
+    fn dispatch(raw: *anyopaque, cqe: std.os.linux.io_uring_cqe) void {
+        const loop: *Loop = @ptrCast(@alignCast(raw)); // safe: installPressure retains the owning loop
+        var sink: Pressure = .{ .loop = loop };
+        loop.backend.io_uring.complete(cqe, &sink);
+    }
+    pub fn complete(p: *Pressure, o: *Op) void {
+        o.state.phase = .done;
+        p.loop.ready.push(o);
+    }
+    pub fn completePending(p: *Pressure, token: backends.pending.Token, outcome: backends.pending.Outcome) void {
+        p.loop.in_flight -= 1;
+        const sink = p.loop.batch_sink.?;
+        sink.complete(sink.context, token, outcome);
+        p.notified();
+    }
+    pub fn notified(p: *Pressure) void {
+        p.loop.woken.store(true, .release);
     }
 };

@@ -461,3 +461,10 @@ fn trampoline() callconv(.naked) noreturn {
         else => @compileError("no fiber switch for this architecture"),
     }
 }
+
+/// Only while the context's stack is stopped; includes saved spill frames.
+pub fn stackPointer(c: *const Context) usize {
+    const native = if (builtin.sanitize_thread) &c.registers else c;
+    const registers = if (is_windows) &native.registers else native;
+    return @intCast(if (builtin.cpu.arch == .x86_64) registers.rsp else registers.sp);
+}

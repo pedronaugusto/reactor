@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const receive = @import("../../sys/receive.zig");
 const Scheduler = @import("../../Scheduler.zig");
 const Receive = @import("../../backend/uring/Receive.zig");
+const Registrations = @import("receiver/Registrations.zig");
 const Groups = @import("receiver/Groups.zig");
 const native = @import("../native.zig");
 const wait = @import("../wait.zig");
@@ -31,12 +32,19 @@ pub const Pool = struct {
     links: []u32,
     lengths: []u32,
     groups: if (builtin.os.tag == .linux) ?Groups else void = if (builtin.os.tag == .linux) null else {},
+    fixed: if (builtin.os.tag == .linux) ?Registrations else void = if (builtin.os.tag == .linux) null else {},
     /// The free list's head: an index plus one, and a tag against ABA.
     head: std.atomic.Value(u64) = .init(0),
     receivers: std.atomic.Value(u32) = .init(0),
 
-    pub const Options = struct { buffer_len: u32 = 4096, buffers: u32 = 4096 };
-    pub const InitError = Groups.Error;
+    pub const Options = struct {
+        buffer_len: u32 = 4096,
+        buffers: u32 = 4096,
+        /// Pin the pool on every ring for positional READ_FIXED/WRITE_FIXED.
+        /// Unsupported is reported; every operation using the pool must end before deinit.
+        registered: bool = false,
+    };
+    pub const InitError = Groups.Error || Registrations.Error;
 
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Pool {
         std.debug.assert(options.buffer_len > 0);
@@ -48,6 +56,11 @@ pub const Pool = struct {
         const lengths = try gpa.alloc(u32, options.buffers);
         errdefer gpa.free(lengths);
         var p: Pool = .{ .memory = memory, .buffer_len = options.buffer_len, .links = links, .lengths = lengths };
+        if (options.registered) {
+            if (builtin.os.tag != .linux) return error.Unsupported;
+            p.fixed = try Registrations.init(gpa, io, memory);
+        }
+        errdefer if (builtin.os.tag == .linux) if (p.fixed) |*fixed| fixed.deinit(gpa, io);
         if (builtin.os.tag == .linux) p.groups = try Groups.init(gpa, io, memory, options.buffer_len, options.buffers);
         var i = options.buffers;
         while (i > 0) {
@@ -60,7 +73,10 @@ pub const Pool = struct {
     /// Every buffer given back; before the owning runtime stops.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
         std.debug.assert(p.receivers.load(.acquire) == 0);
-        if (builtin.os.tag == .linux) if (p.groups) |*groups| groups.deinit(gpa, io);
+        if (builtin.os.tag == .linux) {
+            if (p.groups) |*groups| groups.deinit(gpa, io);
+            if (p.fixed) |*fixed| fixed.deinit(gpa, io);
+        }
         gpa.free(p.lengths);
         gpa.free(p.memory);
         gpa.free(p.links);

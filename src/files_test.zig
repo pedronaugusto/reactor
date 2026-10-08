@@ -25,7 +25,13 @@ test "a positional read of a write-only file reports its missing read capability
 
 test "removing a fixed file preserves requests not submitted yet" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var owner: struct { ring: linux.IoUring } = .{ .ring = linux.IoUring.init(32, 0) catch return error.SkipZigTest };
+    var owner: struct {
+        const Self = @This();
+        ring: linux.IoUring,
+        pub fn consumePublished(self: *Self) void {
+            std.debug.assert(self.ring.flags & linux.IORING_SETUP_SQPOLL == 0);
+        }
+    } = .{ .ring = linux.IoUring.init(32, 0) catch return error.SkipZigTest };
     defer owner.ring.deinit();
     var files = try Files.init(testing.allocator, &owner.ring, 32, true);
     defer files.deinit(testing.allocator);

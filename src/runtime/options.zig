@@ -22,6 +22,8 @@ pub const Files = enum {
 
 pub const Offload = Lanes.Config;
 
+pub const StackClass = @import("../fiber/Stacks.zig").Class;
+
 pub const Options = struct {
     backend: Backend = .auto,
     /// Worker threads `start` spawns beside the home thread. null: logical
@@ -37,6 +39,8 @@ pub const Options = struct {
     /// Each task's stack reservation; what a task costs is the pages it
     /// touches.
     stack_size: usize = 1 << 20,
+    /// Additional size classes, counted within max_tasks; reserved at init.
+    stack_classes: []const StackClass = &.{},
     /// Past this, `concurrent` fails with `ConcurrencyUnavailable` and
     /// `async` runs the function inline (both legal for `std.Io`).
     max_tasks: u32 = 16 << 10,
@@ -49,6 +53,8 @@ pub const Options = struct {
     /// Submission queue entries per ring.
     ring_entries: u16 = 256,
     uring_off: Loop.UringFeatures = .{},
+    sqpoll: ?Loop.SqPoll = null,
+    zero_copy_min: ?usize = 16 << 10,
     /// Linux: worker n on CPU n.
     pin_workers: bool = false,
     /// The monitor thread: stall reports, and on epoll, kqueue and IOCP under

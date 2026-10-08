@@ -26,17 +26,19 @@ const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const Receive = @import("uring/Receive.zig");
 const Accept = @import("uring/Accept.zig");
+const Buffers = @import("uring/Buffers.zig");
 const Files = @import("uring/Files.zig");
 const Allocator = std.mem.Allocator;
 const results = @import("uring/results.zig");
 
-pub const Features = packed struct(u6) {
+pub const Features = packed struct(u7) {
     accept_ahead: bool = false,
     fixed_files: bool = false,
     defer_taskrun: bool = false,
     msg_ring: bool = false,
     waitid: bool = false,
     linked_timeout: bool = false,
+    zero_copy: bool = false,
 };
 
 pub const Options = struct {
@@ -48,6 +50,9 @@ pub const Options = struct {
     off: Features = .{},
     /// Built for another thread, which calls `enable`.
     disabled: bool = false,
+    sqpoll: ?op.SqPoll = null,
+    zero_copy_min: ?usize = 16 << 10,
+    registered_pools: u16 = 64,
 };
 
 pub const InitError = error{ BackendUnavailable, SystemResources, Unexpected };
@@ -84,6 +89,7 @@ const Tag = enum(u3) {
     ignore = 4,
     listener = 5,
     receiver = 6,
+    auxiliary = 7,
 };
 
 fn userData(address: u64, tag: Tag) u64 {
@@ -96,12 +102,14 @@ fn tagOf(user_data: u64) Tag {
 }
 
 ring: linux.IoUring,
+zero_copy_min: ?usize,
 next_group: std.atomic.Value(u32) = .init(1),
 accepts: Accept,
 /// Requests that a descriptor-wide cancellation could end, excluding
 /// listener slots (which close cancels individually) and the wake poll.
 active: usize = 0,
 files: Files,
+buffers: Buffers,
 /// Opcodes the kernel has.
 supported: std.EnumSet(linux.IORING_OP),
 features: Features,
@@ -115,12 +123,20 @@ notify_fd: ?linux.fd_t = null,
 enabled: bool,
 /// The kernel flags the ring when completions wait to be run.
 taskrun_flag: bool = false,
+/// Installed by the loop on its owner before submissions. Pressure drains
+/// kernel ownership while leaving user callbacks queued until Loop.run.
+pressure: ?struct {
+    context: *anyopaque,
+    complete: *const fn (*anyopaque, linux.io_uring_cqe) void,
+} = null,
 
 pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uring {
     var u: Uring = .{
         .ring = undefined,
+        .zero_copy_min = options.zero_copy_min,
         .accepts = undefined,
         .files = undefined,
+        .buffers = undefined,
         .supported = .empty,
         .features = .{},
         .wake_fd = undefined,
@@ -129,10 +145,16 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
+    u.features.waitid = !options.off.waitid and u.has(.WAITID);
+    u.features.msg_ring = !options.off.msg_ring and u.has(.MSG_RING);
+    u.features.linked_timeout = !options.off.linked_timeout and u.has(.LINK_TIMEOUT);
+    u.features.zero_copy = !options.off.zero_copy and u.has(.SEND_ZC);
     u.accepts = try Accept.init(gpa, options.entries, !options.off.accept_ahead and u.has(.ACCEPT));
     errdefer u.accepts.deinit(gpa);
     u.files = try Files.init(gpa, &u.ring, options.entries, !options.off.fixed_files);
     errdefer u.files.deinit(gpa);
+    u.buffers = try Buffers.init(gpa, &u.ring, options.registered_pools);
+    errdefer u.buffers.deinit(gpa);
     u.features.accept_ahead = u.accepts.enabled;
     u.features.fixed_files = u.files.enabled;
     const efd = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
@@ -143,7 +165,8 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
 
 /// The ring, with every flag the kernel takes, dropping them one by one.
 fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!linux.IoUring {
-    const want_defer = !options.off.defer_taskrun;
+    if (options.entries < 2) return error.BackendUnavailable;
+    const want_defer = options.sqpoll == null and !options.off.defer_taskrun;
     // TASKRUN_FLAG: the kernel marks the ring when completions wait to be
     // run, so a poll that has nothing to submit or wait for can skip the
     // syscall.
@@ -157,7 +180,9 @@ fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!l
     for (tries) |t| {
         if (t.defer_taskrun and !want_defer) continue;
         var params = std.mem.zeroInit(linux.io_uring_params, .{
-            .flags = t.flags | linux.IORING_SETUP_CQSIZE | @as(u32, if (options.disabled) linux.IORING_SETUP_R_DISABLED else 0),
+            .flags = (if (options.sqpoll) |polling| linux.IORING_SETUP_SQPOLL | linux.IORING_SETUP_SUBMIT_ALL | @as(u32, if (polling.cpu != null) linux.IORING_SETUP_SQ_AFF else 0) else t.flags) | linux.IORING_SETUP_CQSIZE | @as(u32, if (options.disabled) linux.IORING_SETUP_R_DISABLED else 0),
+            .sq_thread_idle = if (options.sqpoll) |polling| polling.idle_ms else 0,
+            .sq_thread_cpu = if (options.sqpoll) |polling| polling.cpu orelse 0 else 0,
             .cq_entries = options.completions,
         });
         const ring = linux.IoUring.init_params(options.entries, &params) catch |err| switch (err) {
@@ -172,8 +197,8 @@ fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!l
             r.deinit();
             return error.BackendUnavailable;
         }
-        features.defer_taskrun = t.defer_taskrun;
-        taskrun_flag.* = t.taskrun_flag;
+        features.defer_taskrun = options.sqpoll == null and t.defer_taskrun;
+        taskrun_flag.* = options.sqpoll == null and t.taskrun_flag;
         return ring;
     }
     return error.BackendUnavailable;
@@ -204,6 +229,7 @@ pub fn deinit(u: *Uring, gpa: Allocator) void {
     u.drainListeners();
     u.accepts.deinit(gpa);
     u.files.deinit(gpa);
+    u.buffers.deinit(gpa);
     if (u.notify_fd) |fd| _ = linux.close(fd);
     _ = linux.close(u.wake_fd);
     u.ring.deinit();
@@ -227,6 +253,7 @@ pub fn drainListeners(u: *Uring) void {
                 u.accepts.drain(slot, cqe.res);
             },
             .wake, .ignore => {},
+            .auxiliary => if (cqe.user_data & ~@as(u64, 7) != 0) std.debug.panic("reactor: an operation outlived its owner", .{}),
             else => std.debug.panic("reactor: an operation outlived its owner", .{}),
         };
     }
@@ -244,7 +271,8 @@ pub fn entry(u: *Uring) *linux.io_uring_sqe {
     while (true) {
         return u.ring.get_sqe() catch {
             _ = u.ring.submit() catch |err| switch (err) {
-                error.SignalInterrupt, error.SystemResources => std.atomic.spinLoopHint(),
+                error.SignalInterrupt => {},
+                error.SystemResources => u.drainPressure(),
                 else => std.debug.panic("reactor: the ring refused its submissions: {t}", .{err}),
             };
             continue;
@@ -252,7 +280,35 @@ pub fn entry(u: *Uring) *linux.io_uring_sqe {
     }
 }
 
+/// Free CQ capacity without running user callbacks inside submission.
+fn drainPressure(u: *Uring) void {
+    const pressure = u.pressure orelse std.debug.panic("reactor: unowned ring exhausted its completion queue", .{});
+    var cqes: [256]linux.io_uring_cqe = undefined;
+    const count = u.ring.copy_cqes(&cqes, 0) catch |err| switch (err) {
+        error.SignalInterrupt => return,
+        else => std.debug.panic("reactor: pressure drain failed: {t}", .{err}),
+    };
+    for (cqes[0..count]) |cqe| pressure.complete(pressure.context, cqe);
+}
+
+/// SQPOLL may consume published entries concurrently. Wait until it has
+/// acquired their file references before editing or unregistering a slot.
+pub fn consumePublished(u: *Uring) void {
+    if (u.ring.flags & linux.IORING_SETUP_SQPOLL == 0) return;
+    const tail = u.ring.sq.sqe_head;
+    while (@atomicLoad(u32, u.ring.sq.head, .acquire) != tail) {
+        u.enter(.nowait) catch |err| std.debug.panic("reactor: SQPOLL submission failed: {t}", .{err});
+        if (u.ring.cq_ready() == u.ring.cq.cqes.len) u.drainPressure();
+        std.atomic.spinLoopHint();
+    }
+}
+
 pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
+    const linked = u.features.linked_timeout and o.deadline != null and switch (o.kind) {
+        .connect, .io, .read_at, .write_at, .sync, .wait, .raw => true,
+        else => false,
+    };
+    if (linked) u.reserveEntries(2);
     const ud = userData(@intFromPtr(o), .op); // safe: read back as the `Op` in `complete`
     switch (o.kind) {
         .raw => |raw| switch (raw) {
@@ -285,12 +341,14 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.prep_read(r.file, r.buffer[0..@min(r.buffer.len, max_rw)], r.offset);
             sqe.user_data = ud;
             u.files.use(&u.ring, sqe);
+            o.state.uring.fixed_buffer = u.buffers.use(sqe);
         },
         .write_at => |w| {
             const sqe = u.entry();
             sqe.prep_write(w.file, w.bytes[0..@min(w.bytes.len, max_rw)], w.offset);
             sqe.user_data = ud;
             u.files.use(&u.ring, sqe);
+            o.state.uring.fixed_buffer = u.buffers.use(sqe);
         },
         .sync => |fd| {
             const sqe = u.entry();
@@ -329,7 +387,31 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
     }
+    if (linked) {
+        const primary = &u.ring.sq.sqes[(u.ring.sq.sqe_tail -% 1) & u.ring.sq.mask];
+        primary.flags |= linux.IOSQE_IO_LINK;
+        const at = o.deadline.?;
+        o.state.uring.timespec = timespecOf(at.raw.nanoseconds);
+        o.state.uring.timeout_pending = true;
+        const sqe = u.entry();
+        sqe.prep_link_timeout(&o.state.uring.timespec, linux.IORING_TIMEOUT_ABS | @as(u32, switch (at.clock) {
+            .real => linux.IORING_TIMEOUT_REALTIME,
+            .boot => linux.IORING_TIMEOUT_BOOTTIME,
+            else => 0,
+        }));
+        sqe.user_data = userData(@intFromPtr(o), .auxiliary); // safe: retained until primary and timeout complete
+    }
     u.active += 1;
+}
+
+fn reserveEntries(u: *Uring, count: u32) void {
+    while (u.ring.sq_ready() + count > u.ring.sq.sqes.len) {
+        _ = u.ring.submit() catch |err| switch (err) {
+            error.SignalInterrupt => {},
+            error.SystemResources => u.drainPressure(),
+            else => std.debug.panic("reactor: reserving linked entries failed: {t}", .{err}),
+        };
+    }
 }
 
 /// A kernel without multishot support uses ordinary accept requests.
@@ -363,7 +445,8 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
             const m = &o.state.storage.scratch.io_uring.message;
             const count = scatter(&m.iovecs, &m.splat, w.header, w.data, w.splat);
             if (count == 1 and w.control.len == 0) {
-                sqe.prep_send(w.socket_handle, @as([*]const u8, m.iovecs[0].base)[0..m.iovecs[0].len], posix.MSG.NOSIGNAL);
+                const bytes = @as([*]const u8, m.iovecs[0].base)[0..m.iovecs[0].len];
+                if (!o.state.uring.use_copy and u.features.zero_copy and bytes.len >= (u.zero_copy_min orelse std.math.maxInt(usize))) sqe.prep_send_zc(w.socket_handle, bytes, posix.MSG.NOSIGNAL, 0) else sqe.prep_send(w.socket_handle, bytes, posix.MSG.NOSIGNAL);
             } else {
                 m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // safe: the kernel only reads what a send gives it
                 sqe.prep_sendmsg(w.socket_handle, @ptrCast(&m.header), posix.MSG.NOSIGNAL); // safe: msghdr and msghdr_const share their layout
@@ -387,9 +470,13 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
         },
         .device_io_control => unreachable, // unreachable: device control runs borrowed
     }
+    o.state.uring.zero_copy = sqe.opcode == .SEND_ZC;
     sqe.user_data = ud;
     switch (operation.*) {
-        .file_read_streaming, .file_write_streaming => u.files.use(&u.ring, sqe),
+        .file_read_streaming, .file_write_streaming => {
+            u.files.use(&u.ring, sqe);
+            o.state.uring.fixed_buffer = u.buffers.use(sqe);
+        },
         else => {},
     }
 }
@@ -506,12 +593,15 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
             break :blk 1;
         },
     };
-    const to_submit = u.ring.flush_sq();
+    const queued = u.ring.flush_sq();
+    var sq_flags: u32 = 0;
+    const needs_enter = u.ring.sq_ring_needs_enter(&sq_flags) and (queued > 0 or sq_flags != 0);
+    const to_submit = if (u.ring.flags & linux.IORING_SETUP_SQPOLL == 0) queued else 0;
     // Nothing to submit and nothing to wait for: no syscall, unless the
     // kernel holds completions back until asked (deferred task work, or an
     // overflow), which it flags when it can.
-    if (to_submit == 0 and min == 0 and !u.pendingInKernel()) return;
-    const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG;
+    if (!needs_enter and min == 0 and !u.pendingInKernel()) return;
+    const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG | sq_flags;
     while (true) {
         // The extended argument's size goes where a signal mask's would:
         // std's wrapper passes the mask's.
@@ -534,16 +624,23 @@ fn pendingInKernel(u: *Uring) bool {
     return u.features.defer_taskrun;
 }
 
-fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
+pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     const ud = cqe.user_data;
     switch (tagOf(ud)) {
         .op => {
-            u.active -= 1;
             const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
-            const o: *Op = @ptrFromInt(ud);
-            o.result = results.of(o, cqe);
-            u.finishOp(o, cqe);
-            sink.complete(o);
+            const o: *Op = @ptrFromInt(ud); // safe: submit retains this op through every completion
+            o.state.uring.completed(cqe);
+            u.settle(o, sink);
+        },
+        .auxiliary => {
+            const address = ud & ~@as(u64, 7);
+            if (address == 0) return sink.notified();
+            const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
+            const o: *Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
+            o.state.uring.timeout_pending = false;
+            if (cqe.err() == .TIME) o.state.uring.timed_out = true;
+            u.settle(o, sink);
         },
         .batch => {
             u.active -= 1;
@@ -575,8 +672,34 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             const r: *Accept.Slot = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion
             u.accepts.complete(u, r, cqe, sink);
         },
-        .ignore => {},
+        .ignore => if (cqe.res < 0 and ud & ~@as(u64, 7) != 0) {
+            const target: *Uring = @ptrFromInt(ud & ~@as(u64, 7)); // safe: runtimes retain every ring until workers stop
+            target.wake();
+        },
     }
+}
+
+fn settle(u: *Uring, o: anytype, sink: anytype) void {
+    const ownership = &o.state.uring;
+    if (!ownership.ready()) return;
+    const primary = ownership.primary;
+    if (ownership.fixed_buffer) |index| {
+        u.buffers.release(index);
+        ownership.fixed_buffer = null;
+    }
+    if (!o.state.canceled and !ownership.timed_out and (primary.err() == .OPNOTSUPP or primary.err() == .INVAL) and ownership.zero_copy and !ownership.use_copy) {
+        if (o.kind == .io and o.kind.io == .net_write) {
+            o.state.uring = .{ .use_copy = true };
+            u.active -= 1;
+            u.submit(o) catch unreachable; // unreachable: native submission queues or flushes an SQE
+            return;
+        }
+    }
+    u.active -= 1;
+    if (ownership.timed_out and primary.err() == .CANCELED) o.state.canceled = true;
+    o.result = results.of(o, primary);
+    u.finishOp(o, primary);
+    sink.complete(o);
 }
 
 /// What a completion leaves to do: the rest of a multi-message send.
@@ -698,4 +821,13 @@ fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.soc
 fn timespecOf(ns: i96) linux.kernel_timespec {
     const clamped: i96 = @max(ns, 0);
     return .{ .sec = @intCast(@divFloor(clamped, std.time.ns_per_s)), .nsec = @intCast(@mod(clamped, std.time.ns_per_s)) };
+}
+
+/// Only the source owner calls this. Failed messages fall back when their
+/// CQE is reaped; neither ring's mutable queues are touched cross-thread.
+pub fn messageWake(source: *Uring, target: *Uring) bool {
+    if (!source.features.msg_ring) return false;
+    const sqe = source.entry();
+    sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = userData(0, .auxiliary), .len = 0, .user_data = userData(@intFromPtr(target), .ignore) }); // safe: target outlives source polling and worker shutdown
+    return true;
 }

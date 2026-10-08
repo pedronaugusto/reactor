@@ -41,3 +41,7 @@ pub const fallbacks = ext.native.fallbacks;
 
 /// Backend-native requests, with the runtime's cancellation and deadlines.
 pub const kernel = ext.kernel;
+
+/// Per-task stack reservation and latency class.
+pub const TaskOptions = ext.tasks.Options;
+pub const concurrentWith = ext.tasks.concurrentWith;

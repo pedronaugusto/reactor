@@ -23,6 +23,7 @@ const SlotPool = @import("lanes/SlotPool.zig");
 
 pub const Lane = enum(u2) { sync, lookup, wait, general };
 pub const count = 4;
+pub const Priority = enum { normal, latency };
 
 pub const Config = union(enum) {
     owned: Owned,
@@ -57,12 +58,15 @@ pub const Job = struct {
     /// finished last.
     done: *const fn (job: *Job) void,
     lane: Lane,
+    priority: Priority = .normal,
     group: Io.Group = .init,
     next: ?*Job = null,
     /// The call, plus one while a cancel of it runs.
     pending: std.atomic.Value(u32) = .init(1),
     /// Cancelled before it started: `run` never ran.
     dropped: bool = false,
+    /// The executor refused the call; no user code ran.
+    rejected: bool = false,
 
     /// Whether the executor still holds the job's group: wait until not
     /// before the job's frame goes.
@@ -76,8 +80,9 @@ pub const Stats = struct { queued: u32, running: u32, threads: u16, @"inline": u
 const State = struct {
     cap: u16,
     running: u16 = 0,
-    head: ?*Job = null,
-    tail: ?*Job = null,
+    head: [2]?*Job = .{ null, null },
+    tail: [2]?*Job = .{ null, null },
+    latency_runs: u8 = 0,
     queued: u32 = 0,
     lock: Io.Mutex = .init,
     inlined: std.atomic.Value(u64) = .init(0),
@@ -189,15 +194,21 @@ pub fn countInline(l: *Lanes, lane: Lane) void {
 pub fn submit(l: *Lanes, job: *Job) void {
     const s = &l.states[@backingInt(job.lane)];
     s.lock.lockUncancelable(system());
+    if (s.cap == 0) {
+        s.lock.unlock(system());
+        job.rejected = true;
+        return finish(job);
+    }
     if (s.running < s.cap) {
         s.running += 1;
         s.lock.unlock(system());
-        if (!l.start(job)) l.runHere(job);
+        if (!l.start(job)) l.reject(job);
         return;
     }
     job.next = null;
-    if (s.tail) |t| t.next = job else s.head = job;
-    s.tail = job;
+    const class = @backingInt(job.priority);
+    if (s.tail[class]) |t| t.next = job else s.head[class] = job;
+    s.tail[class] = job;
     s.queued += 1;
     s.lock.unlock(system());
 }
@@ -211,16 +222,14 @@ fn start(l: *Lanes, job: *Job) bool {
     return true;
 }
 
-/// A call the executor could take no thread for, made on this thread
-/// rather than failed (counted), and after it the lane's queued calls, one
-/// after another, until one can be started on a thread of its own.
-fn runHere(l: *Lanes, first: *Job) void {
+/// Refused calls finish without running user code. Error-returning callers
+/// report resource exhaustion; a caller whose result cannot represent it
+/// fails explicitly. No scheduler worker becomes a lane thread.
+fn reject(l: *Lanes, first: *Job) void {
     var job = first;
     while (true) {
-        const lane = job.lane;
-        l.countInline(lane);
-        job.run(job);
-        const following = l.next(lane);
+        const following = l.next(job.lane);
+        job.rejected = true;
         finish(job);
         job = following orelse return;
         if (l.start(job)) return;
@@ -237,7 +246,7 @@ fn runEntry(context: *const anyopaque) void {
     job.run(job);
     const following = l.next(lane);
     finish(job);
-    if (following) |f| if (!l.start(f)) l.runHere(f);
+    if (following) |f| if (!l.start(f)) l.reject(f);
 }
 
 /// A call on `lane` ended: the oldest queued one takes its slot, or the
@@ -246,12 +255,14 @@ fn next(l: *Lanes, lane: Lane) ?*Job {
     const s = &l.states[@backingInt(lane)];
     s.lock.lockUncancelable(system());
     defer s.lock.unlock(system());
-    const job = s.head orelse {
+    const class: usize = if (s.head[1] != null and (s.latency_runs < 8 or s.head[0] == null)) 1 else 0;
+    const job = s.head[class] orelse {
         s.running -= 1;
         return null;
     };
-    s.head = job.next;
-    if (s.head == null) s.tail = null;
+    s.head[class] = job.next;
+    if (s.head[class] == null) s.tail[class] = null;
+    if (class == 1) s.latency_runs +|= 1 else s.latency_runs = 0;
     s.queued -= 1;
     return job;
 }
@@ -278,19 +289,20 @@ pub fn cancel(l: *Lanes, job: *Job) void {
     }
     const io = l.executor(job.lane);
     const context: Context = .{ .lanes = l, .job = job };
-    io.vtable.groupConcurrent(io.userdata, &l.cancels, std.mem.asBytes(&context), .of(Context), cancelEntry) catch finish(job);
+    io.vtable.groupConcurrent(io.userdata, &l.cancels, std.mem.asBytes(&context), .of(Context), cancelEntry) catch @panic("reactor: lane executor refused cancellation");
 }
 
 fn unqueue(s: *State, job: *Job) bool {
     var prev: ?*Job = null;
-    var it = s.head;
+    const class = @backingInt(job.priority);
+    var it = s.head[class];
     while (it) |j| : ({
         prev = j;
         it = j.next;
     }) {
         if (j != job) continue;
-        if (prev) |p| p.next = j.next else s.head = j.next;
-        if (s.tail == j) s.tail = prev;
+        if (prev) |p| p.next = j.next else s.head[class] = j.next;
+        if (s.tail[class] == j) s.tail[class] = prev;
         s.queued -= 1;
         return true;
     }

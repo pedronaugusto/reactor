@@ -1,5 +1,8 @@
 # reactor
 
+The LATER batch on branch `later` is work in progress. Native hosted evidence,
+performance tuning and the R6 architecture and rival pass are pending.
+
 reactor is an evented `std.Io` for Zig: every slot of the interface on the
 kernel's own completion queue, with stackful tasks on a work-stealing
 scheduler, and the loop under it usable alone. A program swaps `Io.Threaded`

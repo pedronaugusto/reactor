@@ -17,6 +17,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 
+const Loop = @import("../Loop.zig");
 const backend = @import("../backend.zig");
 const pending = backend.pending;
 const loop_internal = @import("../loop/internal.zig");
@@ -109,6 +110,7 @@ pub fn awaitAsync(s: *Scheduler, borrowed: Io, batch: *Io.Batch) Io.Cancelable!v
 
 pub fn awaitConcurrent(s: *Scheduler, borrowed: Io, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     _ = Scheduler.current() orelse return borrowed.vtable.batchAwaitConcurrent(borrowed.userdata, batch, timeout);
+    if (try awaitSingle(s, batch, timeout)) return;
     try drain(s, borrowed, batch, true);
     if (ready(batch)) return;
     const p = Scheduler.processor().?;
@@ -393,4 +395,26 @@ pub fn completed(context: *anyopaque, token: pending.Token, outcome: pending.Out
         .any => if (ready(batch)) w.wake(.completed),
         .empty => if (batch.pending.head == .none) w.wake(.completed),
     }
+}
+
+/// A fresh one-operation timed batch can use the loop's linked timeout.
+/// Leave its submission intact until all kernel completions are drained.
+fn awaitSingle(s: *Scheduler, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!bool {
+    if (comptime builtin.os.tag != .linux) return false;
+    if (timeout == .none or batch.pending.head != .none or batch.completed.head != .none or batch.submitted.head == .none or batch.submitted.head != batch.submitted.tail) return false;
+    const p = Scheduler.processor().?;
+    if (p.loop.backend != .io_uring or !p.loop.backend.io_uring.features.linked_timeout) return false;
+    const index = batch.submitted.head;
+    const operation = batch.storage[index.toIndex()].submission.operation;
+    if (!loop_internal.canPend(&p.loop, operation)) return false;
+    var op: Loop.Op = .{ .kind = .{ .io = operation } };
+    perform.run(s, &op, .{ .deadline = perform.deadline(p, timeout) }) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        error.Timeout => error.Timeout,
+        error.SystemResources => error.ConcurrencyUnavailable,
+    };
+    const result = try op.result.io;
+    complete(batch, index, result);
+    batch.submitted = .{ .head = .none, .tail = .none };
+    return true;
 }

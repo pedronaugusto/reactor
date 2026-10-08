@@ -19,8 +19,12 @@ const Scheduler = @import("../Scheduler.zig");
 
 /// A future's task, or `ConcurrencyUnavailable` when every stack is in use.
 pub fn concurrent(s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize) Io.ConcurrentError!*Task {
+    return concurrentWith(s, result_len, result_alignment, context, context_alignment, start, spawned_at, null, .normal);
+}
+
+pub fn concurrentWith(s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize, stack_size: ?usize, priority: Task.Priority) Io.ConcurrentError!*Task {
     const layout = Layout.of(context.len, context_alignment, result_len, result_alignment);
-    const t, const extra = s.create(.future, layout.size, layout.alignment, futureEntry) orelse return error.ConcurrencyUnavailable;
+    const t, const extra = s.createWith(.future, layout.size, layout.alignment, futureEntry, stack_size, priority) orelse return error.ConcurrencyUnavailable;
     t.context_bytes = extra + layout.context_offset;
     t.result_bytes = extra + layout.result_offset;
     @memcpy(t.context_bytes[0..context.len], context);

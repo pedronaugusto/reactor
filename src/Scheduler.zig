@@ -87,6 +87,9 @@ pub const Processor = struct {
     lifo_runs: u8 = 0,
     local: RunQueue = .{},
     pinned: Fifo = .{},
+    latency: RunQueue = .{},
+    latency_pinned: Fifo = .{},
+    latency_runs: u8 = 0,
     inbox: Inbox(Task, "next") = .{},
     cancels: Inbox(Task, "cancel_next") = .{},
     errands: Inbox(Errand, "next") = .{},
@@ -193,6 +196,11 @@ pub const Processor = struct {
     pub fn pushLocal(p: *Processor, t: *Task, how: How) void {
         p.scheduler.records.publish(t, p.index, .ready);
         t.processor = p;
+        if (t.priority == .latency) {
+            if (t.home or t.pins > 0) p.latency_pinned.push(t) else p.pushLatency(t);
+            p.scheduler.notify(p);
+            return;
+        }
         if (t.home or t.pins > 0) {
             p.pinned.push(t);
             return;
@@ -221,6 +229,16 @@ pub const Processor = struct {
         p.scheduler.inject(t);
     }
 
+    fn pushLatency(p: *Processor, t: *Task) void {
+        if (p.latency.push(t)) return;
+        var half: [run_queue.capacity / 2]*Task = undefined;
+        if (p.latency.takeHalf(&half)) {
+            p.scheduler.injectMany(&half);
+            if (p.latency.push(t)) return;
+        }
+        p.scheduler.inject(t);
+    }
+
     /// From any thread: `t` runs on this processor next time it looks.
     pub fn pushRemote(p: *Processor, t: *Task) void {
         p.scheduler.records.publish(t, p.index, .ready);
@@ -237,13 +255,13 @@ pub const Processor = struct {
     /// After a push from another thread: a processor waiting in the kernel,
     /// or whose root is back in its host, is woken through its loop.
     fn wakeIfIdle(p: *Processor) void {
-        if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) p.loop.wake();
+        if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) wakeProcessor(p);
     }
 
     /// Whether this processor has a task to run or a message to serve: a
     /// host driving the home processor calls `run` again at once.
     pub fn hasWork(p: *const Processor) bool {
-        return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or
+        return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or !p.latency.isEmpty() or !p.latency_pinned.isEmpty() or
             !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0;
     }
 
@@ -298,6 +316,23 @@ pub const Processor = struct {
     /// The next task to run, from the queues this processor owns and the
     /// global queue.
     inline fn next(p: *Processor) ?*Task {
+        // Eight latency tasks at most before offering normal work a turn.
+        if (p.latency_runs < 8) if (p.takeLatency()) |t| {
+            p.latency_runs += 1;
+            return t;
+        };
+        if (p.nextNormal()) |t| {
+            if (t.priority == .normal) p.latency_runs = 0 else p.latency_runs +|= 1;
+            return t;
+        }
+        return p.takeLatency();
+    }
+
+    fn takeLatency(p: *Processor) ?*Task {
+        return p.latency_pinned.pop() orelse p.latency.pop();
+    }
+
+    inline fn nextNormal(p: *Processor) ?*Task {
         p.tick +%= 1;
         if (p.tick % 61 == 0) {
             _ = p.pollKernel(.nowait);
@@ -387,6 +422,17 @@ pub const Processor = struct {
             // The first home entry parks the root without runTask starting it.
             if (was_running) p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
+        // Trim only after switching off the stack and before publishing a
+        // wake hook. Another processor cannot resume this task yet.
+        if (action == .park) if (t.stack) |index| {
+            const sp = fiber.stackPointer(&t.context);
+            const live = t.stack_top - sp;
+            if (t.resident_water > live + (64 << 10)) {
+                p.scheduler.stacks.trim(index, sp -| 256);
+                t.resident_water = live;
+                _ = p.scheduler.stack_trims.fetchAdd(1, .monotonic);
+            }
+        };
         p.current = null;
         if (t.kind == .root) p.away.store(false, .monotonic);
         if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
@@ -402,7 +448,7 @@ pub const Processor = struct {
     fn pollKernel(p: *Processor, mode: Loop.RunMode) bool {
         const n = p.loop.run(mode) catch |err| std.debug.panic("reactor: the kernel's queue failed: {t}", .{err});
         if (p.serving) |*s| s.delivered += n;
-        return n > 0 or !p.pinned.isEmpty() or !p.local.isEmpty() or p.lifo != null;
+        return n > 0 or !p.pinned.isEmpty() or !p.local.isEmpty() or !p.latency_pinned.isEmpty() or !p.latency.isEmpty() or p.lifo != null;
     }
 
     /// Waits in the kernel until a completion, a timer, or a wake.
@@ -461,6 +507,11 @@ pub const Processor = struct {
         for (0..all.len) |i| {
             const victim = &all[(start + i) % all.len];
             if (victim == p) continue;
+            if (victim.latency.stealInto(&p.latency)) |t| {
+                _ = p.scheduler.steals.fetchAdd(1, .monotonic);
+                p.pushLatency(t);
+                return true;
+            }
             if (victim.local.stealInto(&p.local)) |t| {
                 _ = p.scheduler.steals.fetchAdd(1, .monotonic);
                 p.pushQueueFront(t);
@@ -537,8 +588,11 @@ budget_ns: u64,
 inject_lock: Io.Mutex = .init,
 inject_head: ?*Task = null,
 inject_tail: ?*Task = null,
+latency_head: ?*Task = null,
+latency_tail: ?*Task = null,
 inject_len: std.atomic.Value(u32) = .init(0),
 idle_count: std.atomic.Value(u32) = .init(0),
+stack_trims: std.atomic.Value(u64) = .init(0),
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
 listener_lock: std.atomic.Value(bool) = .init(false),
@@ -628,7 +682,11 @@ pub fn park(after: ?Processor.After) void {
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
         .action = .{ .park = after },
     };
-    if (t.stack != null) p.scheduler.records.parked(t, p.index, t.stack_top - @intFromPtr(&message)); // safe: message is a frame below this task's stack top
+    if (t.stack != null) {
+        const bytes = t.stack_top - @intFromPtr(&message); // safe: message is a live frame below this task's owned stack top
+        t.resident_water = @max(t.resident_water, bytes);
+        p.scheduler.records.parked(t, p.index, bytes);
+    } // safe: message is a frame below this task's stack top
     _ = fiber.switchTo(&message.switch_);
 }
 
@@ -714,10 +772,21 @@ fn injectChain(s: *Scheduler, first: *Task, last: *Task, count: u32) void {
         if (task == last) break;
         task = task.next.?;
     }
-    last.next = null;
     s.inject_lock.lockUncancelable(system());
-    if (s.inject_tail) |tail| tail.next = first else s.inject_head = first;
-    s.inject_tail = last;
+    task = first;
+    while (true) {
+        const next_task = task.next;
+        task.next = null;
+        if (task.priority == .latency) {
+            if (s.latency_tail) |tail| tail.next = task else s.latency_head = task;
+            s.latency_tail = task;
+        } else {
+            if (s.inject_tail) |tail| tail.next = task else s.inject_head = task;
+            s.inject_tail = task;
+        }
+        if (task == last) break;
+        task = next_task.?;
+    }
     _ = s.inject_len.fetchAdd(count, .release);
     s.inject_lock.unlock(system());
     s.wakeIdle();
@@ -729,13 +798,18 @@ pub fn injectedLen(s: *const Scheduler) u32 {
 
 /// One task from the global queue for `p`.
 pub fn takeInjected(s: *Scheduler, p: *Processor) ?*Task {
-    _ = p;
     if (s.inject_len.load(.acquire) == 0) return null;
     s.inject_lock.lockUncancelable(system());
     defer s.inject_lock.unlock(system());
-    const t = s.inject_head orelse return null;
-    s.inject_head = t.next;
-    if (s.inject_head == null) s.inject_tail = null;
+    const latency = s.latency_head != null and (p.latency_runs < 8 or s.inject_head == null);
+    const t = (if (latency) s.latency_head else s.inject_head) orelse return null;
+    if (latency) {
+        s.latency_head = t.next;
+        if (s.latency_head == null) s.latency_tail = null;
+    } else {
+        s.inject_head = t.next;
+        if (s.inject_head == null) s.inject_tail = null;
+    }
     t.next = null;
     _ = s.inject_len.fetchSub(1, .release);
     return t;
@@ -802,7 +876,7 @@ pub fn leaveBlocking(b: *Blocking) void {
     if (b.task.kind == .root) {
         // The root never leaves its thread: the processor comes back.
         b.processor.home_wants.store(true, .seq_cst);
-        b.processor.loop.wake();
+        wakeProcessor(b.processor);
         reclaim(b.processor);
         b.processor.sched_context = b.home;
         b.processor.current = b.task;
@@ -879,7 +953,7 @@ pub fn notify(s: *Scheduler, p: *Processor) void {
     if (s.idle_count.load(.seq_cst) == 0) return;
     // A spinning processor will find it.
     if (s.searching.load(.seq_cst) > 0) return;
-    if (p.local.isEmpty() and p.lifo == null) return;
+    if (p.local.isEmpty() and p.latency.isEmpty() and p.lifo == null) return;
     s.wakeIdle();
 }
 
@@ -887,11 +961,11 @@ fn wakeIdle(s: *Scheduler) void {
     // A host outside run() is waiting on the home loop's handle, rather
     // than counted as a processor waiting in its kernel.
     const home = &s.processors[0];
-    if (home.away.load(.seq_cst)) home.loop.wake();
+    if (home.away.load(.seq_cst)) wakeProcessor(home);
     if (s.idle_count.load(.seq_cst) == 0) return;
     for (s.processors) |*other| {
         if (other.sleeping.load(.seq_cst)) {
-            other.loop.wake();
+            wakeProcessor(other);
             return;
         }
     }
@@ -899,7 +973,7 @@ fn wakeIdle(s: *Scheduler) void {
 
 /// Every processor's thread looks at its queues again.
 pub fn wakeAll(s: *Scheduler) void {
-    for (s.processors) |*p| p.loop.wake();
+    for (s.processors) |*p| wakeProcessor(p);
 }
 
 // Tasks.
@@ -908,17 +982,21 @@ pub fn wakeAll(s: *Scheduler) void {
 /// (aligned to `extra_align`) below its record for the caller's context
 /// and result; null when every stack is in use. `entry` runs first.
 pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
-    const index = s.stacks.take() orelse return null;
+    return s.createWith(kind, extra, extra_align, entry, null, .normal);
+}
+
+pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?usize, priority: Task.Priority) ?struct { *Task, [*]u8 } {
+    const index = s.stacks.takeSized(size) orelse return null;
     const top = s.stacks.top(index);
     const record_at = std.mem.alignBackward(usize, top - @sizeOf(Task), @alignOf(Task));
     const extra_at = extra_align.backward(record_at - extra);
     const sp = std.mem.alignBackward(usize, extra_at, 16);
-    if (sp - s.stacks.bottom(index) < s.stacks.size / 2 or !s.stacks.reach(index, sp - 48)) {
+    if (sp - s.stacks.bottom(index) < s.stacks.sizeAt(index) / 2 or !s.stacks.reach(index, sp - 48)) {
         s.stacks.give(index);
         return null;
     }
     const t: *Task = @ptrFromInt(record_at);
-    t.* = .{ .kind = kind, .stack = index, .stack_top = top, .home = s.scheduling == .per_core };
+    t.* = .{ .kind = kind, .stack = index, .stack_top = top, .home = s.scheduling == .per_core, .priority = priority };
     t.context = fiber.initial(s.stacks.stack(index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
     return .{ t, @ptrFromInt(extra_at) };
 }
@@ -927,6 +1005,12 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
     s.stacks.ended(index, fiber.committedLimit(&t.context));
+    const water = s.records.items[index].highWater();
+    if (water > 64 << 10) {
+        // The record at the top stays live through fiber.deinit below.
+        s.stacks.trim(index, @intFromPtr(t)); // safe: release exclusively owns this ended task's stack
+        _ = s.stack_trims.fetchAdd(1, .monotonic);
+    }
     s.records.release(t);
     fiber.deinit(&t.context);
     t.* = undefined;
@@ -954,4 +1038,9 @@ fn taskEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) noretur
     _ = message;
     const entry: *const fn (t: *Task) noreturn = @ptrCast(@alignCast(arg)); // safe: `create` passed the entry
     entry(current().?);
+}
+
+fn wakeProcessor(target: *Processor) void {
+    if (heldNow()) |source| return target.loop.wakeFrom(&source.loop);
+    target.loop.wake();
 }

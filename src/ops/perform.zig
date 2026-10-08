@@ -138,6 +138,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (options.cancelable) try t.enterWait(&w.hook);
     const fd = descriptorOf(o.kind);
     if (fd) |d| p.hold(d);
+    if (builtin.os.tag == .linux) o.deadline = options.deadline;
     const done = p.loop.start(o) catch {
         if (fd) |d| p.release(d);
         t.leaveWait();
@@ -151,19 +152,19 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
         s.spend();
         return;
     }
-    if (options.deadline) |at| {
+    if (!o.state.uring.timeout_pending) if (options.deadline) |at| {
         // No room for the timer: end the operation now.
         if (!w.deadline.arm(s, at)) {
             w.timed_out = true;
             p.loop.cancel(o);
         }
-    }
+    };
     Scheduler.park(null);
     w.deadline.disarm();
     t.leaveWait();
     if (!canceledResult(o)) return;
     if (w.requested) return t.acknowledge();
-    if (w.timed_out) return error.Timeout;
+    if (w.timed_out or o.state.uring.timed_out) return error.Timeout;
 }
 
 /// Runs an accept on its listener's one processor. Persistent accept queues

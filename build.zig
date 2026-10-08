@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    if (target.result.os.tag == .windows) {
+        test_module.link_libc = true;
+        test_module.addCSourceFile(.{ .file = b.path("src/testing/seh.c"), .flags = &.{"-fms-extensions"} });
+    }
+    test_module.sanitize_thread = b.option(bool, "sanitize-thread", "Run focused native race tests with thread sanitizer") orelse false;
     // std's own Threaded.zig, read by the test that checks which slots may
     // run std's code on a worker.
     const threaded_source = b.addWriteFiles().addCopyFile(std.Build.LazyPath.zig_lib.path(b, "std/Io/Threaded.zig"), "Threaded.zig.txt");

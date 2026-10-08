@@ -6,7 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Init-reserved per-task stack classes and `concurrentWith` options for stack size and latency priority. CPU and lane queues give normal work a turn after eight latency jobs.
+- Optional sparse registered buffer pools for fixed file reads/writes; io_uring SEND_ZC for contiguous sends and explicit SQPOLL configuration.
+- Native Linux OPENAT, STATX, WAITID and linked deadlines, ring-message wakes, and BSD process-watch waits.
+- Shrinkable test-driver choices, submission fault injection, native lifetime regressions and portable guard-page death tests.
+
 ### Changed
+
+- Lane executor rejection no longer runs blocking work on the submitting scheduler worker. Disabled lanes reject rather than queue forever.
+- Deep ended or shallow parked stacks discard unused pages on systems that support it.
+- SQ/CQ pressure releases kernel ownership while keeping user callbacks queued for `run`; SQPOLL file close waits for published file references before unregistering.
+
 
 - Buffer-pool registration follows the ring owner as soon as runtime startup begins, avoiding a race with worker adoption.
 - Native receiver completions count as loop progress, so a waiting processor runs the task they woke before sleeping again.

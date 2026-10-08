@@ -12,9 +12,9 @@ context: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    submit: *const fn (context: *anyopaque, op: *anyopaque) void,
+    submit: *const fn (context: *anyopaque, op: *anyopaque) error{ SystemResources, Unexpected }!void,
     cancel: *const fn (context: *anyopaque, op: *anyopaque) void,
-    submitPending: *const fn (context: *anyopaque, token: pending.Token, operation: Io.Operation) void,
+    submitPending: *const fn (context: *anyopaque, token: pending.Token, operation: Io.Operation) error{ SystemResources, Unexpected }!void,
     cancelPending: *const fn (context: *anyopaque, token: pending.Token) void,
     /// Delivers completions to `sink`, waiting as `wait` allows.
     poll: *const fn (context: *anyopaque, wait: Wait, sink: Sink) void,

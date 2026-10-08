@@ -87,7 +87,7 @@ pub const Backend = union(enum) {
             .epoll => |*e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
             .iocp => |*w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.submit(c.context, o),
+            .custom => |c| try c.vtable.submit(c.context, o),
         }
         return false;
     }
@@ -121,7 +121,7 @@ pub const Backend = union(enum) {
             .epoll => |*e| if (has_epoll) try e.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) try k.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .iocp => |*w| if (has_iocp) return w.submitPending(token, operation) else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.submitPending(c.context, token, operation),
+            .custom => |c| try c.vtable.submitPending(c.context, token, operation),
         }
         return null;
     }

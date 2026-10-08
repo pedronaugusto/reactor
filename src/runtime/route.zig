@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const Core = @import("Core.zig");
+const native_files = @import("files.zig");
 const Lanes = @import("../Lanes.zig");
 const lane_call = @import("../ops/lane_call.zig");
 
@@ -40,6 +41,7 @@ pub fn files(comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
             const r = Core.of(userdata);
+            if (native_files.call(name, r, rest)) |result| return result;
             if (r.options.files == .auto) {
                 const b = r.lanes.borrowedIo();
                 if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ rest)) |result| return result;
