@@ -4,7 +4,7 @@
 //! The head packs two indices: `real`, where the owner pops, and `steal`,
 //! where a steal in progress began. They differ only while a stealer copies
 //! tasks out, and a second stealer waits for that to finish. The tail is
-//! written by the owner alone. The shape is tokio's local queue.
+//! written by the owner alone.
 const std = @import("std");
 const assert = std.debug.assert;
 

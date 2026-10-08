@@ -93,6 +93,5 @@ counted by `reactor.fallbacks()`.
 Linux (io_uring 5.19+, epoll where io_uring is older, missing or refused),
 macOS and the BSDs (kqueue), and Windows 8+ (IOCP). On other systems `init` returns
 `BackendUnavailable`. A descriptor a readiness backend has waited on must be
-closed through the `Io` (or announced with `Loop.closing`), as with Go's and
-tokio's pollers.
+closed through the `Io` (or announced with `Loop.closing`).
 The extensions also work over any `Io`.

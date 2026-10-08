@@ -69,7 +69,7 @@ const spin_ns = 20 * std.time.ns_per_us;
 /// processor's queue. With nothing to run the processor waits in its
 /// loop's kernel call until a completion, a timer or a wake.
 ///
-/// Every switch goes through the scheduler's context, as Go's g0: a task
+/// Every switch goes through the scheduler's context: a task
 /// parks by switching there with an action (unlock this, publish that),
 /// which runs only once the task's stack is still, so no other thread can
 /// resume a task that has not finished switching away.
@@ -181,7 +181,7 @@ pub const Processor = struct {
         /// Started by a task here: the LIFO slot, so a spawn-then-await pair
         /// stays on one processor.
         spawned,
-        /// Woken by a task here: the LIFO slot, as tokio and Go do.
+        /// Woken by a task here: the LIFO slot.
         woken,
         /// An operation of its completed: the back of the queue.
         completed,
@@ -297,7 +297,7 @@ pub const Processor = struct {
 
     /// The next task to run, from the queues this processor owns and the
     /// global queue.
-    fn next(p: *Processor) ?*Task {
+    inline fn next(p: *Processor) ?*Task {
         p.tick +%= 1;
         if (p.tick % 61 == 0) {
             _ = p.pollKernel(.nowait);
@@ -468,8 +468,8 @@ pub const Processor = struct {
         return false;
     }
 
-    /// Looks for work a while before waiting in the kernel, as Go's
-    /// spinning Ms do: a burst of wakes then finds a processor awake. At
+    /// Looks for work a while before waiting in the kernel: a burst of
+    /// wakes then finds a processor awake. At
     /// most half the processors spin at once.
     fn spin(p: *Processor) bool {
         const s = p.scheduler;

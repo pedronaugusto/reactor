@@ -87,8 +87,8 @@ pub fn make(operation: Io.Operation) ?Io.Operation.Result {
 /// much it took of what it asked for (less means it took all there was), a
 /// stream write that sent less than it was given filled the socket. The
 /// readiness core keeps a descriptor it knows to be drained from being
-/// called again before its next event (tokio clears its readiness the same
-/// way). Datagram receives say nothing of what remains.
+/// called again before its next event. Datagram receives say nothing of
+/// what remains.
 pub const Progress = union(enum) {
     other,
     read: struct { got: usize, asked: usize },
