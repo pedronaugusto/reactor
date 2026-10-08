@@ -220,11 +220,7 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
     const r = Core.of(userdata);
     _ = Scheduler.processor() orelse return borrowed(r, "netAccept", .{ server, options });
     var o: Loop.Op = .{ .kind = .{ .accept = server } };
-    // A descriptor has one accept queue even as its consumer migrates.
-    const owner = if (comptime builtin.os.tag == .linux)
-        if (r.backendKind() == .io_uring) &r.processors[@as(u32, @bitCast(server)) % r.processors.len] else Scheduler.processor().?
-    else
-        Scheduler.processor().?;
+    const owner = r.scheduler.listenerOwner(server, Scheduler.processor().?);
     perform.accept(&r.scheduler, owner, &o) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,

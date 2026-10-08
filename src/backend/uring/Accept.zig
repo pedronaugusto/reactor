@@ -65,6 +65,21 @@ pub fn contains(a: *const Accept, fd: linux.fd_t) bool {
     return false;
 }
 
+/// Reserves ownership without touching the ring owner's record. The runtime
+/// serializes first claims across rings; the record is initialized at submit.
+pub fn reserve(a: *Accept, fd: linux.fd_t) bool {
+    if (!a.enabled) return false;
+    const first = @as(u32, @bitCast(fd)) % a.records.len;
+    for (0..@min(8, a.records.len)) |offset| {
+        const descriptor = &a.descriptors[(first + offset) % a.records.len];
+        const found = descriptor.load(.acquire);
+        if (found == fd) return true;
+        if (found >= 0) continue;
+        if (descriptor.cmpxchgStrong(found, fd, .acq_rel, .acquire) == null) return true;
+    }
+    return false;
+}
+
 fn index(a: *Accept, r: *Record) usize {
     return (@intFromPtr(r) - @intFromPtr(a.records.ptr)) / @sizeOf(Record); // safe: r is an entry in this table
 }
@@ -104,6 +119,8 @@ pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
         for (0..@min(8, a.records.len)) |offset| {
             const r = &a.records[(first + offset) % a.records.len];
             if (r.fd != -1) continue;
+            const reserved = a.descriptors[a.index(r)].load(.acquire);
+            if (reserved >= 0 and reserved != fd) continue;
             r.* = .{ .fd = fd };
             a.descriptors[a.index(r)].store(fd, .release);
             break :free r;

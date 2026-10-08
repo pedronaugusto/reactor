@@ -470,6 +470,7 @@ inject_len: std.atomic.Value(u32) = .init(0),
 idle_count: std.atomic.Value(u32) = .init(0),
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
+listener_lock: std.atomic.Value(bool) = .init(false),
 holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
 /// Processors spinning for work before they wait.
 searching: std.atomic.Value(u32) = .init(0),
@@ -519,6 +520,21 @@ pub fn processor() ?*Processor {
 pub fn current() ?*Task {
     const p = heldNow() orelse return null;
     return p.current;
+}
+
+/// Persistent listener queues stay on the first processor that accepts.
+/// Claims are serialized, but the descriptor tables are atomically readable
+/// by close routing. No ring or owner-only record is touched here.
+pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Processor {
+    if (comptime builtin.os.tag != .linux) return caller;
+    if (caller.loop.backend != .io_uring) return caller;
+    while (s.listener_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer s.listener_lock.store(false, .release);
+    for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.contains(fd)) return p;
+    if (caller.loop.backend.io_uring.accepts.reserve(fd)) return caller;
+    for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.reserve(fd)) return p;
+    // No accept-ahead slot: an ordinary, task-owned accept on this ring.
+    return caller;
 }
 
 // Parking and waking.
