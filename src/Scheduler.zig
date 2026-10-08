@@ -76,6 +76,8 @@ const spin_ns = 20 * std.time.ns_per_us;
 pub const Processor = struct {
     scheduler: *Scheduler,
     index: u16,
+    /// Whether the current owner is the thread on which the root runs.
+    on_home_thread: bool = false,
     loop: Loop,
     /// Where the scheduler waits while a task runs.
     sched_context: fiber.Context = undefined,
@@ -151,13 +153,13 @@ pub const Processor = struct {
     pub const Action = union(enum) {
         /// Back of the queue.
         yield,
-        /// Its processor went to another thread while it sat in a blocking
-        /// call: it runs on next wherever a processor takes it.
-        relocate,
         /// Parked; `after` (if any) runs now, off the task's stack.
         park: ?After,
         /// Ended; `after` runs now and releases what the task held.
         exit: After,
+        /// Its processor went to another thread while it sat in a blocking
+        /// call: it runs on next wherever a processor takes it.
+        relocate,
     };
 
     /// Work to do once a task is off its stack.
@@ -269,12 +271,19 @@ pub const Processor = struct {
     /// The scheduler, on this processor's thread, until the runtime stops
     /// (workers) or forever (the home processor, which the root leaves).
     pub fn schedule(p: *Processor) void {
+        if (p.scheduler.monitor != null) return p.scheduleMode(true);
+        return p.scheduleMode(false);
+    }
+
+    // Monitoring is fixed at init. The normal loop needs no handoff checks
+    // or thread-local reads at every task switch.
+    fn scheduleMode(p: *Processor, comptime watched: bool) void {
         while (true) {
-            if (p.index == 0 and p.home_wants.load(.seq_cst) and p.scheduler.home_thread != std.Thread.getCurrentId()) return p.giveBack();
+            if (watched and p.index == 0 and p.home_wants.load(.seq_cst) and !p.on_home_thread) return p.giveBack();
             if (p.next()) |t| {
-                p.runTask(t);
+                p.runTask(watched, t);
                 // The processor was handed on: this thread lets go of it.
-                if (held != p) return;
+                if (watched and held != p) return;
                 continue;
             }
             if (p.drainInboxes()) continue;
@@ -340,43 +349,51 @@ pub const Processor = struct {
     }
 
     /// Runs `t` until it switches back, then does what it asked.
-    fn runTask(p: *Processor, t: *Task) void {
-        // The root runs on the home thread alone: another thread holding
-        // the home processor gives it back instead.
-        if (t.kind == .root and p.scheduler.home_thread != std.Thread.getCurrentId()) {
-            p.pushLocal(t, .completed);
-            return p.giveBack();
-        }
+    fn runTask(p: *Processor, comptime watched: bool, t: *Task) void {
         p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
         t.slice_start = 0;
-        p.site.store(t.spawned_at, .monotonic);
-        p.passes.store(p.passes.load(.monotonic) +% 1, .release);
+        if (watched) {
+            // The root runs on the home thread alone: another thread holding
+            // the home processor gives it back instead.
+            if (t.kind == .root and !p.on_home_thread) {
+                p.pushLocal(t, .completed);
+                return p.giveBack();
+            }
+
+            p.site.store(t.spawned_at, .monotonic);
+            p.passes.store(p.passes.load(.monotonic) +% 1, .release);
+        }
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
-        const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
-        // Another thread holds the processor now: touch nothing of it.
-        if (message.action == .relocate) return relocated(p.scheduler, t);
-        p.passes.store(p.passes.load(.monotonic) +% 1, .release);
-        p.afterSwitch(t, back);
+        p.afterSwitchMode(watched, t, back);
     }
 
     /// What the scheduler does once `t` has switched back to it: `t`'s stack
     /// is still now, so `t` may be published to whoever will resume it.
     pub fn afterSwitch(p: *Processor, t: *Task, back: *const fiber.Switch) void {
-        p.current = null;
-        // The root is back in the scheduler's hands.
-        if (t.kind == .root) p.away.store(false, .monotonic);
+        if (p.scheduler.monitor != null) return p.afterSwitchMode(true, t, back);
+        return p.afterSwitchMode(false, t, back);
+    }
+
+    inline fn afterSwitchMode(p: *Processor, comptime watched: bool, t: *Task, back: *const fiber.Switch) void {
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
+        // A spare owns the processor after handoff: touch no mutable state.
+        if (watched) {
+            if (action == .relocate) return relocated(p.scheduler, t);
+            p.passes.store(p.passes.load(.monotonic) +% 1, .release);
+        }
+        p.current = null;
+        if (t.kind == .root) p.away.store(false, .monotonic);
         if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
             .park => |after| if (after) |a| a.func(a.context, t),
             .exit => |a| a.func(a.context, t),
-            .relocate => unreachable, // unreachable: `runTask` takes it before
+            .relocate => unreachable, // unreachable: handoff above takes it before
         }
     }
 
@@ -560,6 +577,7 @@ noinline fn heldNow() ?*Processor {
 pub fn enter(p: *Processor) void {
     assert(heldNow() == null);
     held = p;
+    p.on_home_thread = std.Thread.getCurrentId() == p.scheduler.home_thread;
 }
 
 pub fn leave() void {

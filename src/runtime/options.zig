@@ -12,7 +12,7 @@ pub const Lane = Lanes.Lane;
 
 pub const Files = enum {
     /// io_uring: ring operations, calls with no ring operation on a lane.
-    /// epoll, kqueue: std's own calls on the worker, which the monitor
+    /// epoll, kqueue, IOCP: std's own calls on the worker, which the monitor
     /// rescues by handing its processor on should one block; on a lane
     /// where there is no handoff (no monitor, `per_core`, the home thread).
     auto,
@@ -51,7 +51,7 @@ pub const Options = struct {
     uring_off: Loop.UringFeatures = .{},
     /// Linux: worker n on CPU n.
     pin_workers: bool = false,
-    /// The monitor thread: stall reports, and on epoll and kqueue under
+    /// The monitor thread: stall reports, and on epoll, kqueue and IOCP under
     /// `stealing`, handoff of a worker stuck in a blocking call. null: on
     /// when there are workers and the backend is epoll or kqueue.
     monitor: ?bool = null,

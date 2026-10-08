@@ -158,14 +158,14 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
 }
 
 /// The monitor, as the options ask, and the spare pool handoff draws on.
-/// Handoff needs a poller any thread may wait on (epoll, kqueue), workers
+/// Handoff needs a poller any thread may wait on (epoll, kqueue, IOCP), workers
 /// to hand from, and tasks free to move (`stealing`).
 fn initMonitor(c: *Core, workers: u16) InitError!void {
     const kind = c.backendKind();
-    const readiness = kind == .epoll or kind == .kqueue;
-    const on = c.options.monitor orelse (workers > 0 and readiness);
+    const handable = kind == .epoll or kind == .kqueue or kind == .iocp;
+    const on = c.options.monitor orelse (workers > 0 and handable);
     if (!on) return;
-    const handoff = readiness and workers > 0 and c.scheduler.scheduling == .stealing;
+    const handoff = handable and workers > 0 and c.scheduler.scheduling == .stealing;
     const cap: u16 = if (handoff) c.options.spares orelse @max(workers / 2, 1) else 0;
     c.scheduler.spares = try .init(c.gpa, c.processors.len, cap);
     errdefer c.scheduler.spares.deinit(c.gpa);

@@ -157,3 +157,54 @@ test "a task that holds its processor past report_after without switching out is
     task.await(io);
     try testing.expect(r.stats().stalls >= 1);
 }
+
+const windows = std.os.windows;
+const Pipe = struct {
+    extern "kernel32" fn CreateNamedPipeW([*:0]const u16, u32, u32, u32, u32, u32, u32, ?*windows.SECURITY_ATTRIBUTES) callconv(.winapi) windows.HANDLE;
+    extern "kernel32" fn CreateFileW([*:0]const u16, u32, u32, ?*windows.SECURITY_ATTRIBUTES, u32, u32, ?windows.HANDLE) callconv(.winapi) windows.HANDLE;
+
+    fn send(handle: windows.HANDLE) !void {
+        var status: windows.IO_STATUS_BLOCK = undefined;
+        const byte = [_]u8{'x'};
+        try testing.expectEqual(windows.NTSTATUS.SUCCESS, windows.ntdll.NtWriteFile(handle, null, null, null, &status, &byte, 1, null, null));
+    }
+
+    fn read(io: Io, file: Io.File, writer: windows.HANDLE) !void {
+        var sending = try io.concurrent(send, .{writer});
+        defer sending.cancel(io) catch {};
+        var byte: [1]u8 = undefined;
+        try testing.expectEqual(@as(usize, 1), try file.readStreaming(io, &.{&byte}));
+        try testing.expectEqual(@as(u8, 'x'), byte[0]);
+        try sending.await(io);
+    }
+
+    fn outside(io: Io, file: Io.File, writer: windows.HANDLE, result: *anyerror!void) void {
+        var reading = io.concurrent(read, .{ io, file, writer }) catch |err| {
+            result.* = err;
+            return;
+        };
+        result.* = reading.await(io);
+    }
+};
+
+test "a synchronous Windows pipe read hands its IOCP processor to a spare" {
+    if (builtin.os.tag != .windows or !fiber.supported) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer r.deinit();
+    try r.start();
+    const io = r.io();
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("\\\\.\\pipe\\reactor-handoff");
+    const server = Pipe.CreateNamedPipeW(name, 1, 0, 1, 64, 64, 0, null);
+    try testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    const file: Io.File = .{ .handle = server, .flags = .{ .nonblocking = false } };
+    defer file.close(io);
+    const client = Pipe.CreateFileW(name, 0x40000000, 0, null, 3, 0, null);
+    try testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    defer windows.CloseHandle(client);
+    var outcome: anyerror!void = error.NotRun;
+    const thread = try std.Thread.spawn(.{}, Pipe.outside, .{ io, file, client, &outcome });
+    thread.join();
+    try outcome;
+    try testing.expect(r.stats().handoffs > 0);
+}

@@ -34,7 +34,7 @@ pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotF
 
 /// A file call per `Options.files`: std's code on the worker inside a
 /// blocking bracket, where the monitor can hand the worker's processor on
-/// should it block (epoll, kqueue); on the `general` lane otherwise. For
+/// should it block (epoll, kqueue, IOCP); on the `general` lane otherwise. For
 /// calls that never call back into their own `Io`.
 pub fn files(comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {

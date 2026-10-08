@@ -41,7 +41,7 @@ pub fn open(io: Io, id: std.process.Child.Id) OpenError!Process {
 
 pub fn close(p: *Process, io: Io) void {
     if (is_windows) {
-        const file: Io.File = .{ .handle = p.watch, .flags = .{} };
+        const file: Io.File = .{ .handle = p.watch, .flags = .{ .nonblocking = false } };
         file.close(io);
     } else process.close(p.watch, io);
     p.* = undefined;
