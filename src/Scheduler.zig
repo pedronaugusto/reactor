@@ -244,7 +244,7 @@ pub const Processor = struct {
     /// host driving the home processor calls `run` again at once.
     pub fn hasWork(p: *const Processor) bool {
         return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or
-            !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty();
+            !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0;
     }
 
     /// The owner's: this processor's kernel queue now holds one more
@@ -409,13 +409,15 @@ pub const Processor = struct {
     fn block(p: *Processor) void {
         p.sleeping.store(true, .seq_cst);
         defer p.sleeping.store(false, .monotonic);
+        // Publish idleness before checking the global queue. An injector
+        // between the check and publication must still find someone to wake.
+        p.scheduler.idle(p, true);
+        defer p.scheduler.idle(p, false);
         if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
         if (p.index != 0 and p.scheduler.stopping.load(.acquire)) return;
         // The home thread wants its processor back: its wake may have come
         // while this thread was still taking an earlier one.
         if (p.index == 0 and p.home_wants.load(.seq_cst)) return;
-        p.scheduler.idle(p, true);
-        defer p.scheduler.idle(p, false);
         const mode: Loop.RunMode = if (p.serving) |s| switch (s.mode) {
             .within, .until => |deadline| .{ .within = deadline },
             .nowait, .once => .once,
@@ -882,6 +884,10 @@ pub fn notify(s: *Scheduler, p: *Processor) void {
 }
 
 fn wakeIdle(s: *Scheduler) void {
+    // A host outside run() is waiting on the home loop's handle, rather
+    // than counted as a processor waiting in its kernel.
+    const home = &s.processors[0];
+    if (home.away.load(.seq_cst)) home.loop.wake();
     if (s.idle_count.load(.seq_cst) == 0) return;
     for (s.processors) |*other| {
         if (other.sleeping.load(.seq_cst)) {

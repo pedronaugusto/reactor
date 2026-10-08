@@ -338,16 +338,18 @@ fn manyCalls(io: Io, rounds: usize) !void {
 
 test "lane calls one after another from a task and from the root keep their frames" {
     try skipWithoutFibers();
-    var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 64, .stack_size = 256 << 10 });
-    defer t.deinit();
-    const io = t.io();
-    // A value the caller keeps in a register across every switch.
-    const me = std.Thread.getCurrentId();
-    var task = try io.concurrent(manyCalls, .{ io, 5000 });
-    try task.await(io);
-    try manyCalls(io, 5000);
-    try testing.expectEqual(me, std.Thread.getCurrentId());
+    for ([_]u16{ 0, 3 }) |workers| {
+        var t: Threads = undefined;
+        try t.init(testing.allocator, .{ .workers = workers, .max_tasks = 64, .stack_size = 256 << 10 });
+        defer t.deinit();
+        const io = t.io();
+        // A value the caller keeps in a register across every switch.
+        const me = std.Thread.getCurrentId();
+        var task = try io.concurrent(manyCalls, .{ io, 5000 });
+        try task.await(io);
+        try manyCalls(io, 5000);
+        try testing.expectEqual(me, std.Thread.getCurrentId());
+    }
 }
 
 test "process spawn on a lane has space for std's temporary arena" {
@@ -417,4 +419,28 @@ test "dump streams a parked task without visiting its live stack" {
     try testing.expect(t.runtime.core.scheduler.records.items[0].highWater() > 0);
     event.set(io);
     try task.await(io);
+}
+
+test "global lane completions wake a host driving the home loop" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    defer t.deinit();
+    // Exercise the global queue, as an unpinned migrating task uses it.
+    t.runtime.core.scheduler.scheduling = .stealing;
+    const io = t.io();
+    const system = Io.Threaded.global_single_threaded.io();
+    var gate: std.atomic.Value(u32) = .init(0);
+    var task = try io.concurrent(laneCall, .{ io, &gate });
+    t.runtime.run(.nowait);
+    gate.store(1, .release);
+    system.futexWake(u32, &gate.raw, 1);
+    const until = Io.Clock.awake.now(system).addDuration(.fromSeconds(2));
+    while (t.fakes[0].woken.load(.acquire) == 0 and Io.Clock.awake.now(system).nanoseconds < until.nanoseconds)
+        try system.sleep(.fromMilliseconds(1), .awake);
+    const queued = t.runtime.core.scheduler.injectedLen();
+    const woken = t.fakes[0].woken.load(.acquire);
+    task.await(io);
+    try testing.expect(queued > 0);
+    try testing.expectEqual(@as(u32, 1), woken);
 }
