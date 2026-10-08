@@ -577,7 +577,7 @@ pub fn wakeFrom(l: *Loop, source: *Loop) void {
 fn installPressure(l: *Loop) void {
     if (comptime builtin.os.tag == .linux) if (l.backend == .io_uring) {
         const engine = l.backend.io_uring;
-        if (engine.pressure == null or engine.pressure.?.context != l) engine.pressure = .{ .context = l, .complete = Pressure.dispatch };
+        if (engine.pressure == null or engine.pressure.?.context != @as(*anyopaque, l)) engine.pressure = .{ .context = l, .complete = Pressure.dispatch };
     };
 }
 const Pressure = struct {
