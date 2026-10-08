@@ -18,6 +18,7 @@ const Task = @import("../scheduler/Task.zig");
 const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const socket = @import("../sys/socket.zig");
+const sys_file = @import("../sys/file.zig");
 
 /// Whether `r`'s loops are the kernel's, which run file and socket calls
 /// as operations of their own (else a test's fake, which runs only the
@@ -29,6 +30,17 @@ fn native(r: *Core) bool {
 fn onLane(r: *Core, comptime lane: Lanes.Lane, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
     const lane_io = r.lanes.executor(lane);
     return lane_call.call(&r.scheduler, &r.lanes, lane, @field(lane_io.vtable, name), .{lane_io.userdata} ++ args);
+}
+
+/// A file call per `Options.files` where it is no ring operation: on the
+/// worker inside a blocking bracket where handoff can rescue it, else on
+/// the `general` lane.
+fn perFiles(r: *Core, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
+    if (r.options.files == .auto) {
+        const b = r.lanes.borrowedIo();
+        if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ args)) |result| return result;
+    }
+    return onLane(r, .general, name, args);
 }
 
 fn borrowed(r: *Core, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
@@ -66,13 +78,34 @@ fn failure(operation: Io.Operation) Io.Operation.Result {
     };
 }
 
+/// Whether `r`'s loops are epoll's or kqueue's.
+fn readiness(r: *Core) bool {
+    const kind = r.backendKind();
+    return kind == .epoll or kind == .kqueue;
+}
+
+/// Whether file calls are ring operations: io_uring's, with `files = .auto`.
 fn fileOnRing(r: *Core) bool {
-    return native(r) and r.options.files == .auto and Scheduler.processor() != null;
+    return r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
 }
 
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return onLane(r, .general, "fileReadPositional", .{ file, data, offset });
+    if (!fileOnRing(r)) {
+        // The read itself inside the worker's blocking bracket: std's path
+        // around the same call costs ~10% of a cached read.
+        if (r.options.files == .auto and readiness(r)) if (Scheduler.enterBlocking()) |blocking| {
+            var b = blocking;
+            if (b.task.takeCancel()) {
+                Scheduler.leaveBlocking(&b);
+                return error.Canceled;
+            }
+            const result = sys_file.readAt(file.handle, data, offset);
+            Scheduler.leaveBlocking(&b);
+            return result;
+        };
+        return perFiles(r, "fileReadPositional", .{ file, data, offset });
+    }
     // A positional read may be short: the first buffer with room.
     const buffer = for (data) |d| {
         if (d.len > 0) break d;
@@ -102,7 +135,7 @@ fn cachedRead(fd: posix.fd_t, buffer: []u8, offset: u64) ?usize {
 
 pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return onLane(r, .general, "fileWritePositional", .{ file, header, data, splat, offset });
+    if (!fileOnRing(r)) return perFiles(r, "fileWritePositional", .{ file, header, data, splat, offset });
     // A positional write may be short: the first bytes there are.
     const bytes = first: {
         if (header.len > 0) break :first header;
@@ -133,12 +166,16 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return borrowed(r, "fileClose", .{files});
+    if (!native(r) or Scheduler.processor() == null) {
+        for (files) |f| Loop.closing(f.handle);
+        return borrowed(r, "fileClose", .{files});
+    }
     for (files) |f| closeOnRing(r, f.handle);
 }
 
-/// Closes `handle` through the kernel's queue, which first ends every
-/// operation this processor's queue holds on it.
+/// Closes `handle` through the loop, which first ends every operation this
+/// processor's kernel queue holds on it (and on epoll and kqueue lets go of
+/// its registration).
 fn closeOnRing(r: *Core, handle: posix.fd_t) void {
     var o: Loop.Op = .{ .kind = .{ .close = handle } };
     perform.run(&r.scheduler, &o, .{ .cancelable = false }) catch socket.close(handle);
@@ -146,7 +183,10 @@ fn closeOnRing(r: *Core, handle: posix.fd_t) void {
 
 pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     const r = Core.of(userdata);
-    if (!native(r) or Scheduler.processor() == null) return borrowed(r, "netClose", .{sockets});
+    if (!native(r) or Scheduler.processor() == null) {
+        for (sockets) |s| Loop.closing(s.handle);
+        return borrowed(r, "netClose", .{sockets});
+    }
     for (sockets) |s| {
         abortElsewhere(r, s.handle);
         closeOnRing(r, s.handle);
@@ -211,15 +251,19 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
 pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
     const r = Core.of(userdata);
     const p = Scheduler.processor() orelse return borrowed(r, "netConnectIp", .{ address, options });
-    const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol) catch |err| return narrow(net.IpAddress.ConnectError, err);
+    // On epoll and kqueue the socket connects in non-blocking mode, made so
+    // at its creation, and is put back once connected.
+    const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
+    const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol, start) catch |err| return narrow(net.IpAddress.ConnectError, err);
     errdefer socket.close(fd);
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* } } } };
+    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } };
     perform.run(&r.scheduler, &o, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => error.Timeout,
         error.SystemResources => error.SystemResources,
     };
     o.result.connect catch |err| return narrow(net.IpAddress.ConnectError, err);
+    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.IpAddress.ConnectError, err);
     return .{ .handle = fd, .address = socket.localAddress(fd) catch |err| return narrow(net.IpAddress.ConnectError, err) };
 }
 
@@ -240,18 +284,20 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
     const r = Core.of(userdata);
     _ = Scheduler.processor() orelse return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
-    const fd = socket.open(posix.AF.UNIX, .stream, null) catch |err| return switch (err) {
+    const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
+    const fd = socket.open(posix.AF.UNIX, .stream, null, start) catch |err| return switch (err) {
         error.ProtocolUnsupportedByAddressFamily, error.ProtocolUnsupportedBySystem => error.AddressFamilyUnsupported,
         else => |e| narrow(net.UnixAddress.ConnectError, e),
     };
     errdefer socket.close(fd);
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address } } } };
+    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } };
     perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
     o.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
+    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
     return fd;
 }
 

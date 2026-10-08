@@ -26,6 +26,50 @@ const borrowed = [_][]const u8{
     "netInterfaceName",
 };
 
+/// The file slots that run std's code on a worker inside a blocking
+/// bracket under `files = .auto` on epoll and kqueue (route.files), and the
+/// positional reads and writes there: they may block on a disk, which
+/// handoff rescues, but may not call back into their own `Io` either.
+const on_worker = [_][]const u8{
+    "dirCreateDir",
+    "dirCreateDirPath",
+    "dirOpenDir",
+    "dirStat",
+    "dirStatFile",
+    "dirAccess",
+    "dirCreateFile",
+    "dirOpenFile",
+    "dirRead",
+    "dirRealPath",
+    "dirRealPathFile",
+    "dirDeleteFile",
+    "dirDeleteDir",
+    "dirRename",
+    "dirRenamePreserve",
+    "dirSymLink",
+    "dirReadLink",
+    "dirSetOwner",
+    "dirSetFileOwner",
+    "dirSetPermissions",
+    "dirSetFilePermissions",
+    "dirSetTimestamps",
+    "dirHardLink",
+    "fileStat",
+    "fileLength",
+    "fileWriteFileStreaming",
+    "fileWriteFilePositional",
+    "fileSetLength",
+    "fileSetOwner",
+    "fileSetPermissions",
+    "fileSetTimestamps",
+    "fileRealPath",
+    "fileHardLink",
+    "fileMemoryMapCreate",
+    "fileMemoryMapSetLength",
+    "fileMemoryMapRead",
+    "fileMemoryMapWrite",
+};
+
 /// Every function of `Threaded.zig` under its qualified name (`f`,
 /// `Thread.f`, `Thread.Status.f`), and the calls in its body: `Q.f(` to a
 /// container `Q` resolves into it, a bare `f(` to the caller's own
@@ -202,6 +246,31 @@ test "no slot the runtime borrows on a worker calls back into its own Io" {
     var bad: usize = 0;
     inline for (borrowed) |slot| {
         try testing.expect(@field(slots.vtable, slot) == route.borrowed(slot));
+        var impls = try g.implementations(gpa, slot);
+        defer impls.deinit(gpa);
+        try testing.expect(impls.items.len > 0);
+        var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer seen.deinit(gpa);
+        if (try g.search(gpa, impls.items, &seen)) |culprit| {
+            std.debug.print("{s}: reaches io(t):", .{slot});
+            var at = culprit;
+            while (at.len > 0) : (at = seen.get(at) orelse "") std.debug.print(" {s} <-", .{at});
+            std.debug.print("\n", .{});
+            bad += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "no file slot the runtime runs on a worker inside a blocking bracket calls back into its own Io" {
+    const gpa = testing.allocator;
+    var g = try Graph.init(gpa);
+    defer g.deinit(gpa);
+    var bad: usize = 0;
+    inline for (on_worker ++ [_][]const u8{ "fileReadPositional", "fileWritePositional" }) |slot| {
+        if (comptime !std.mem.startsWith(u8, slot, "fileReadPositional") and !std.mem.startsWith(u8, slot, "fileWritePositional")) {
+            try testing.expect(@field(slots.vtable, slot) == route.files(slot));
+        }
         var impls = try g.implementations(gpa, slot);
         defer impls.deinit(gpa);
         try testing.expect(impls.items.len > 0);

@@ -17,6 +17,8 @@ const Task = @import("scheduler/Task.zig");
 const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
+pub const Monitor = @import("scheduler/Monitor.zig");
+pub const Spares = @import("scheduler/Spares.zig");
 
 pub const Scheduling = enum { stealing, per_core };
 
@@ -92,6 +94,18 @@ pub const Processor = struct {
     /// The root's `run(mode)` the home processor is serving.
     serving: ?Serving = null,
     thread: ?std.Thread = null,
+    /// For the monitor: odd while a task runs, moved at each switch in and
+    /// out of one.
+    passes: std.atomic.Value(u32) = .init(0),
+    /// Where the running task was started.
+    site: std.atomic.Value(usize) = .init(0),
+    /// A blocking call's state, generation << 2 | 0 (none), 1 (in one), 2
+    /// (the processor was handed to another thread meanwhile) or 3 (the
+    /// home processor, given back to the home thread).
+    blocking: std.atomic.Value(u32) = .init(0),
+    /// The home processor, held by another thread: the home thread wants
+    /// it back for the root.
+    home_wants: std.atomic.Value(bool) = .init(false),
 
     /// A task queue only the owner touches.
     pub const Fifo = struct {
@@ -127,6 +141,9 @@ pub const Processor = struct {
     pub const Action = union(enum) {
         /// Back of the queue.
         yield,
+        /// Its processor went to another thread while it sat in a blocking
+        /// call: it runs on next wherever a processor takes it.
+        relocate,
         /// Parked; `after` (if any) runs now, off the task's stack.
         park: ?After,
         /// Ended; `after` runs now and releases what the task held.
@@ -228,8 +245,11 @@ pub const Processor = struct {
     /// (workers) or forever (the home processor, which the root leaves).
     pub fn schedule(p: *Processor) void {
         while (true) {
+            if (p.index == 0 and p.home_wants.load(.seq_cst) and p.scheduler.home_thread != std.Thread.getCurrentId()) return p.giveBack();
             if (p.next()) |t| {
                 p.runTask(t);
+                // The processor was handed on: this thread lets go of it.
+                if (held != p) return;
                 continue;
             }
             if (p.drainInboxes()) continue;
@@ -296,12 +316,24 @@ pub const Processor = struct {
 
     /// Runs `t` until it switches back, then does what it asked.
     fn runTask(p: *Processor, t: *Task) void {
+        // The root runs on the home thread alone: another thread holding
+        // the home processor gives it back instead.
+        if (t.kind == .root and p.scheduler.home_thread != std.Thread.getCurrentId()) {
+            p.pushLocal(t, .completed);
+            return p.giveBack();
+        }
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
         t.slice_start = 0;
+        p.site.store(t.spawned_at, .monotonic);
+        p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
+        const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
+        // Another thread holds the processor now: touch nothing of it.
+        if (message.action == .relocate) return relocated(p.scheduler, t);
+        p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         p.afterSwitch(t, back);
     }
 
@@ -315,6 +347,7 @@ pub const Processor = struct {
             .yield => p.pushLocal(t, .yielded),
             .park => |after| if (after) |a| a.func(a.context, t),
             .exit => |a| a.func(a.context, t),
+            .relocate => unreachable, // unreachable: `runTask` takes it before
         }
     }
 
@@ -331,6 +364,9 @@ pub const Processor = struct {
         defer p.sleeping.store(false, .monotonic);
         if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
         if (p.index != 0 and p.scheduler.stopping.load(.acquire)) return;
+        // The home thread wants its processor back: its wake may have come
+        // while this thread was still taking an earlier one.
+        if (p.index == 0 and p.home_wants.load(.seq_cst)) return;
         p.scheduler.idle(p, true);
         defer p.scheduler.idle(p, false);
         const mode: Loop.RunMode = if (p.serving) |s| switch (s.mode) {
@@ -416,18 +452,40 @@ pub const Processor = struct {
     }
 
     /// The worker thread's body: own the processor's loop, then schedule on
-    /// this thread's stack until the runtime stops.
+    /// this thread's stack until the runtime stops; a spare, should the
+    /// processor be handed on.
     pub fn work(p: *Processor) void {
-        Scheduler.enter(p);
-        defer Scheduler.leave();
+        p.scheduler.serveThread(p);
+    }
+
+    /// On a thread holding the home processor for the home thread: back it
+    /// goes, and this thread lets go.
+    fn giveBack(p: *Processor) void {
+        leave();
+        p.blocking.store((p.blocking.load(.monotonic) & ~@as(u32, 3)) | 3, .release);
+        system().futexWake(u32, &p.blocking.raw, 1);
+    }
+
+    /// The calling thread takes this processor over.
+    fn adopt(p: *Processor) void {
         p.loop.adopt();
-        p.schedule();
+        p.current = null;
+        const passes = p.passes.load(.monotonic);
+        if (passes & 1 == 1) p.passes.store(passes +% 1, .release);
+        p.blocking.store(p.blocking.load(.monotonic) & ~@as(u32, 3), .release);
     }
 };
 
 processors: []Processor,
 root: *Task,
+/// The thread that built the runtime: the root runs there alone.
+home_thread: std.Thread.Id,
 stacks: Stacks,
+/// Samples the processors, hands on those stuck in blocking calls, records
+/// stalls; null when the options leave it off.
+monitor: ?Monitor = null,
+/// Threads waiting for a processor (handoff only).
+spares: Spares = undefined,
 scheduling: Scheduling,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
@@ -607,6 +665,124 @@ pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
         _ = s.idle_count.fetchAdd(1, .seq_cst);
     } else {
         _ = s.idle_count.fetchSub(1, .seq_cst);
+        // The monitor parks while every processor waits: one is back.
+        if (s.monitor) |*m| if (m.parked.load(.seq_cst)) m.poke();
+    }
+}
+
+/// Whether every processor waits in its kernel.
+pub fn allIdle(s: *const Scheduler) bool {
+    return s.idle_count.load(.seq_cst) == s.processors.len;
+}
+
+// Blocking calls and handoff.
+
+/// A blocking call under way on a worker, which the monitor may hand the
+/// worker's processor away from meanwhile.
+pub const Blocking = struct {
+    processor: *Processor,
+    task: *Task,
+    word: u32,
+    /// The scheduler of the thread making the call: where the task leaves
+    /// that thread if the processor goes elsewhere meanwhile.
+    home: fiber.Context,
+};
+
+/// Before a call that may block its thread (std's file code, borrowed on a
+/// worker): while it lasts, the processor is no longer this thread's to
+/// touch, and the monitor hands it to a spare thread if the call goes on
+/// past `handoff_after`. Null where that cannot be: no monitor or no
+/// handoff (io_uring, `per_core`), a task pinned (the root never
+/// leaves its thread, so the home processor comes back to it), a task held
+/// on its processor. Nothing between this and `leaveBlocking` may touch
+/// the scheduler.
+pub fn enterBlocking() ?Blocking {
+    const p = held orelse return null;
+    const m = if (p.scheduler.monitor) |*m| m else return null;
+    if (!m.handoff) return null;
+    const t = p.current orelse return null;
+    if (t.pins > 0 or (t.home and t.kind != .root)) return null;
+    const word = ((p.blocking.load(.monotonic) >> 2) +% 1) << 2 | 1;
+    const b: Blocking = .{ .processor = p, .task = t, .word = word, .home = p.sched_context };
+    p.blocking.store(word, .release);
+    m.poke();
+    return b;
+}
+
+/// After the call: the task goes on on this thread if it still holds the
+/// processor, else leaves the thread (which waits as a spare) and goes on
+/// wherever a processor takes it next.
+pub fn leaveBlocking(b: *Blocking) void {
+    if (b.processor.blocking.cmpxchgStrong(b.word, b.word & ~@as(u32, 3), .acquire, .monotonic) == null) return;
+    if (b.task.kind == .root) {
+        // The root never leaves its thread: the processor comes back.
+        b.processor.home_wants.store(true, .seq_cst);
+        b.processor.loop.wake();
+        reclaim(b.processor);
+        b.processor.sched_context = b.home;
+        b.processor.current = b.task;
+        return;
+    }
+    var message: Processor.Message = .{
+        .switch_ = .{ .old = &b.task.context, .new = &b.home },
+        .action = .relocate,
+    };
+    _ = fiber.switchTo(&message.switch_);
+}
+
+/// On the home thread: waits until the home processor is given back
+/// (`giveBack`), then holds it again.
+pub fn reclaim(p: *Processor) void {
+    while (true) {
+        const word = p.blocking.load(.acquire);
+        if (word & 3 == 3) break;
+        system().futexWaitUncancelable(u32, &p.blocking.raw, word);
+    }
+    p.home_wants.store(false, .monotonic);
+    if (held == null) enter(p);
+    p.adopt();
+}
+
+/// On the thread that lost its processor, `t` off its stack now: the
+/// thread lets go, and `t` goes to the global queue.
+fn relocated(s: *Scheduler, t: *Task) void {
+    leave();
+    s.inject(t);
+}
+
+/// From the monitor: hands `p`, whose thread has sat in a blocking call
+/// (`word`) too long, to a spare thread. False when there is none to hand
+/// it to, or the call has ended.
+pub fn handOff(s: *Scheduler, p: *Processor, word: u32) bool {
+    if (!s.spares.reserve(serveThread, s)) return false;
+    if (p.blocking.cmpxchgStrong(word, (word & ~@as(u32, 3)) | 2, .acq_rel, .monotonic) != null) return false;
+    s.spares.post(p);
+    return true;
+}
+
+/// The monitor thread's body.
+pub fn watch(s: *Scheduler) void {
+    s.monitor.?.run(s);
+}
+
+/// A thread's body: holds `first` (a spare: waits for a processor), runs
+/// its scheduler, and waits as a spare whenever the processor is handed
+/// on, until the runtime stops.
+pub fn serveThread(s: *Scheduler, first: ?*Processor) void {
+    var fresh = first == null;
+    var next = first;
+    while (true) {
+        const p: *Processor = next orelse @ptrCast(@alignCast(s.spares.wait(&s.stopping, fresh) orelse return)); // safe: only processors are posted
+        fresh = false;
+        next = null;
+        enter(p);
+        p.adopt();
+        p.schedule();
+        // Still held: the runtime stops.
+        if (held == p) {
+            leave();
+            return;
+        }
     }
 }
 

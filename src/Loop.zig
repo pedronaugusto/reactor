@@ -7,6 +7,10 @@
 //!
 //! One owner thread at a time; on io_uring the thread that called `init`,
 //! for the loop's whole life. Only `wake` is safe from any thread.
+//!
+//! On epoll and kqueue a regular file has no readiness: positional reads
+//! and writes, syncs, and streaming calls on such a file are made in place,
+//! inside `submit`.
 const Loop = @This();
 
 const builtin = @import("builtin");
@@ -124,27 +128,22 @@ const List = struct {
     }
 };
 
-/// Builds the backend `options` names. io_uring: the calling thread is
-/// the ring's only submitter for the loop's life.
+/// Builds the backend `options` names. `.auto` is io_uring on Linux, or
+/// epoll where io_uring is missing, older or refused; kqueue on macOS and
+/// the BSDs. io_uring: the calling thread is the ring's only submitter for
+/// the loop's life.
 pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
-    _ = gpa;
-    const entries = options.submission_entries orelse ringEntries(options.max_ops);
     const native: backends.Backend = switch (options.backend) {
-        .auto, .io_uring => if (builtin.os.tag == .linux) .{
-            .io_uring = backends.Uring.init(.{
-                .entries = entries,
-                // The kernel takes at most 65,536; operations beyond the
-                // queue's size wait in the kernel (no completion is dropped).
-                .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
-                .off = @bitCast(options.uring_off),
-                .disabled = options.owner == .adopter,
-            }) catch |err| return switch (err) {
-                error.BackendUnavailable => error.BackendUnavailable,
-                error.SystemResources => error.SystemResources,
-                error.Unexpected => error.Unexpected,
-            },
-        } else return error.BackendUnavailable,
-        .epoll, .kqueue, .iocp => return error.BackendUnavailable,
+        .auto => if (builtin.os.tag == .linux)
+            initUring(options) catch |err| switch (err) {
+                error.BackendUnavailable => try initEpoll(gpa, options),
+                else => |e| return e,
+            }
+        else if (has_kqueue) try initKqueue(gpa, options) else return error.BackendUnavailable,
+        .io_uring => try initUring(options),
+        .epoll => try initEpoll(gpa, options),
+        .kqueue => try initKqueue(gpa, options),
+        .iocp => return error.BackendUnavailable,
     };
     l.* = .{
         .backend = native,
@@ -155,13 +154,45 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
     };
 }
 
+const has_kqueue = backends.Kqueue != void;
+
+fn initUring(options: Options) InitError!backends.Backend {
+    if (builtin.os.tag != .linux) return error.BackendUnavailable;
+    const entries = options.submission_entries orelse ringEntries(options.max_ops);
+    return .{
+        .io_uring = backends.Uring.init(.{
+            .entries = entries,
+            // The kernel takes at most 65,536; operations beyond the
+            // queue's size wait in the kernel (no completion is dropped).
+            .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
+            .off = @bitCast(options.uring_off),
+            .disabled = options.owner == .adopter,
+        }) catch |err| return switch (err) {
+            error.BackendUnavailable => error.BackendUnavailable,
+            error.SystemResources => error.SystemResources,
+            error.Unexpected => error.Unexpected,
+        },
+    };
+}
+
+fn initEpoll(gpa: Allocator, options: Options) InitError!backends.Backend {
+    if (backends.Epoll == void) return error.BackendUnavailable;
+    return .{ .epoll = try .init(gpa, options.max_ops) };
+}
+
+fn initKqueue(gpa: Allocator, options: Options) InitError!backends.Backend {
+    if (!has_kqueue) return error.BackendUnavailable;
+    return .{ .kqueue = try .init(gpa, options.max_ops) };
+}
+
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
         .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
-        .custom => {},
+        // A poller serves whichever thread waits on it.
+        .epoll, .kqueue, .custom => {},
     }
 }
 
@@ -182,43 +213,68 @@ pub fn kind(l: *const Loop) ?backends.Kind {
 }
 
 /// Queued for the next `run`; never blocks. A timer goes on the loop's
-/// wheel (awake clock) or the kernel's absolute timers (real, boot); a
-/// zero-length read or write completes at once.
+/// wheel, or, on the `real` and `boot` clocks, the kernel's absolute
+/// timers. An operation that completes at once (a zero-length read or
+/// write; on epoll and kqueue, a call the descriptor is ready for) is
+/// delivered by the next `run` like any other.
 pub fn submit(l: *Loop, o: *Op) SubmitError!void {
+    if (!try l.start(o)) return;
+    l.in_flight += 1;
+    o.state.phase = .done;
+    l.ready.push(o);
+}
+
+/// As `submit`, but an operation that completes at once is not queued:
+/// this returns true, `o.result` is set, and nothing is delivered for it.
+/// A host that runs its own tasks saves a trip through its scheduler.
+pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     l.assertOwner();
     assert(o.state.phase == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
     o.state = .{};
-    l.in_flight += 1;
-    errdefer l.in_flight -= 1;
     switch (o.kind) {
-        .timer => |deadline| if (deadline.clock == .awake or l.backend.kind() == null) {
+        .timer => |deadline| if (l.backend.kind() == null or (deadline.clock != .real and deadline.clock != .boot)) {
             o.state.phase = .timer;
             l.wheel.arm(&o.state.node, l.deadlineTicks(deadline));
-            return;
+            l.in_flight += 1;
+            return false;
         },
         .io => |*operation| if (empty(operation)) |result| {
             o.result = .{ .io = result };
-            o.state.phase = .done;
-            l.ready.push(o);
-            return;
+            return true;
         },
         .read_at => |r| if (r.buffer.len == 0) {
             o.result = .{ .read_at = 0 };
-            o.state.phase = .done;
-            l.ready.push(o);
-            return;
+            return true;
         },
         .write_at => |w| if (w.bytes.len == 0) {
             o.result = .{ .write_at = 0 };
-            o.state.phase = .done;
-            l.ready.push(o);
-            return;
+            return true;
         },
         else => {},
     }
     o.state.phase = .kernel;
-    try l.backend.submit(o);
+    const done = l.backend.submit(o) catch |err| {
+        o.state.phase = .idle;
+        return err;
+    };
+    if (done) {
+        o.state.phase = .idle;
+        return true;
+    }
+    l.in_flight += 1;
+    return false;
+}
+
+/// Before `fd` is closed other than by a `close` operation: every loop in
+/// the process forgets what it knew of it. A readiness backend keeps a
+/// descriptor registered across waits, and the kernel drops that
+/// registration when the descriptor closes; were the number to come back
+/// for another file unannounced, a loop would wait on a registration that
+/// is gone. Nothing to do on io_uring.
+pub fn closing(fd: Io.File.Handle) void {
+    if (builtin.os.tag == .windows) return;
+    backends.readiness.forget(fd);
 }
 
 /// Asks the kernel to end `o`. Its completion still arrives: `Canceled`,
@@ -283,7 +339,8 @@ pub fn reap(l: *Loop, out: []*Op) []*Op {
 }
 
 /// Readable when `run(.nowait)` has work: io_uring an eventfd the ring
-/// signals. For a host's epoll, GLib or CFRunLoop.
+/// signals, epoll and kqueue their own descriptor. For a host's epoll,
+/// GLib or CFRunLoop.
 pub fn backendHandle(l: *Loop) error{ Unsupported, SystemResources, Unexpected }!Io.File.Handle {
     return try l.backend.handle() orelse error.Unsupported;
 }
@@ -291,7 +348,7 @@ pub fn backendHandle(l: *Loop) error{ Unsupported, SystemResources, Unexpected }
 /// The longest a host may wait before calling `run(.nowait)`; null when
 /// no timer is armed and nothing is ready.
 pub fn nextTimeout(l: *const Loop) ?Io.Duration {
-    if (l.ready.head != null) return .zero;
+    if (l.ready.head != null or l.backend.hasCompletions()) return .zero;
     const next = l.wheel.next() orelse return null;
     const now = l.clock.awake();
     const at = next * std.time.ns_per_us;

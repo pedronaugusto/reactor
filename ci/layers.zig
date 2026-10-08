@@ -7,6 +7,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys.zig",
         "src/sys/memory.zig",
         "src/sys/socket.zig",
+        "src/sys/file.zig",
     } },
     .{ .name = "fibers, time and lanes", .patterns = &.{
         "src/fiber.zig",
@@ -24,6 +25,12 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/Uring.zig",
         "src/backend/uring/results.zig",
         "src/backend/wait.zig",
+        "src/backend/readiness.zig",
+        "src/backend/readiness/calls.zig",
+        "src/backend/readiness/closes.zig",
+        "src/backend/readiness/records.zig",
+        "src/backend/readiness/Epoll.zig",
+        "src/backend/readiness/Kqueue.zig",
     } },
     .{ .name = "loop", .patterns = &.{
         "src/Loop.zig",
@@ -34,6 +41,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/scheduler/Task.zig",
         "src/scheduler/run_queue.zig",
         "src/scheduler/inbox.zig",
+        "src/scheduler/Monitor.zig",
+        "src/scheduler/Spares.zig",
     } },
     .{ .name = "operations", .patterns = &.{
         "src/ops.zig",

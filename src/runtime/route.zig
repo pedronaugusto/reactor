@@ -1,6 +1,6 @@
-//! Slots that run std's own `Threaded` code: on a lane, or borrowed on the
-//! worker. Each generator makes a function with the slot's exact
-//! signature from the slot's name.
+//! Slots that run std's own `Threaded` code: on a lane, per `files`, or
+//! borrowed on the worker. Each generator makes a function with the slot's
+//! exact signature from the slot's name.
 const std = @import("std");
 const Io = std.Io;
 
@@ -27,6 +27,25 @@ pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotF
             const r = Core.of(userdata);
             const io = r.lanes.executor(lane);
             return lane_call.call(&r.scheduler, &r.lanes, lane, @field(io.vtable, name), .{io.userdata} ++ rest);
+        }
+    };
+    return generate(Impl, name);
+}
+
+/// A file call per `Options.files`: std's code on the worker inside a
+/// blocking bracket, where the monitor can hand the worker's processor on
+/// should it block (epoll, kqueue); on the `general` lane otherwise. For
+/// calls that never call back into their own `Io`.
+pub fn files(comptime name: []const u8) *const SlotFn(name) {
+    const Impl = struct {
+        fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
+            const r = Core.of(userdata);
+            if (r.options.files == .auto) {
+                const b = r.lanes.borrowedIo();
+                if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ rest)) |result| return result;
+            }
+            const io = r.lanes.executor(.general);
+            return lane_call.call(&r.scheduler, &r.lanes, .general, @field(io.vtable, name), .{io.userdata} ++ rest);
         }
     };
     return generate(Impl, name);

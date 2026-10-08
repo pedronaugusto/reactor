@@ -92,6 +92,11 @@ pub const Stats = struct {
     steals: u64,
     forced_yields: u64,
     lanes: [Lanes.count]Lanes.Stats,
+    /// Processors the monitor handed from a worker stuck in a blocking call
+    /// to a spare thread.
+    handoffs: u64,
+    /// Tasks that held their processor past `report_after`.
+    stalls: u64,
 };
 
 pub fn stats(r: *Runtime) Stats {
@@ -104,5 +109,7 @@ pub fn stats(r: *Runtime) Stats {
         .steals = r.core.scheduler.steals.load(.monotonic),
         .forced_yields = r.core.scheduler.forced_yields.load(.monotonic),
         .lanes = lanes,
+        .handoffs = if (r.core.scheduler.monitor) |*m| m.handoffs.load(.monotonic) else 0,
+        .stalls = if (r.core.scheduler.monitor) |*m| m.stalls.load(.monotonic) else 0,
     };
 }

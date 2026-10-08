@@ -42,10 +42,16 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 ## What it does
 
 - **Every `std.Io` slot.** Sockets, files, timers, futexes, batches and
-  cancellation run on io_uring; calls that can block for milliseconds (directory
-  walks, `flock`, process waits) run off the workers on owned `Io.Threaded`
-  lanes, so std's own code and std's own cancellation serve them; calls that
-  never block run std's code on the worker.
+  cancellation run on io_uring, or on epoll or kqueue; calls that can block
+  for milliseconds (directory walks, `flock`, process waits) run off the
+  workers on owned `Io.Threaded` lanes, so std's own code and std's own
+  cancellation serve them; calls that never block run std's code on the
+  worker.
+- **epoll and kqueue** make a socket's call at once and wait for readiness
+  only when it would block, with each descriptor registered once for its
+  life. File calls run on the worker; should one block, a monitor thread
+  hands the worker's processor to a spare thread, so the tasks queued there
+  go on. A listening socket reactor accepts on is put in non-blocking mode.
 - **std's cancellation exactly.** A cancel lands at the next cancelation point;
   an operation the kernel finished first keeps its result. `operateTimeout` and
   `Batch.awaitConcurrent` never return while the kernel still holds a buffer.
@@ -59,4 +65,8 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 
 ## Scope
 
-Linux (io_uring 5.19+). On other systems `init` returns `BackendUnavailable`.
+Linux (io_uring 5.19+, epoll where io_uring is older, missing or refused),
+macOS and the BSDs (kqueue). On other systems `init` returns
+`BackendUnavailable`. A descriptor a readiness backend has waited on must be
+closed through the `Io` (or announced with `Loop.closing`), as with Go's and
+tokio's pollers.
