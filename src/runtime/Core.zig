@@ -44,7 +44,7 @@ lookup: Lookup,
 jobs: if (builtin.os.tag == .windows) Notifications else void,
 /// The home processor's scheduler runs here while the root waits.
 home_stack: []align(memory.page_size_min) u8,
-started: bool = false,
+started: std.atomic.Value(bool) = .init(false),
 stderr: Stderr = .{},
 csprngs: []Io.Threaded.Csprng,
 
@@ -211,7 +211,9 @@ fn schedulerEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) no
 }
 
 pub fn start(c: *Core) StartError!void {
-    assert(!c.started);
+    assert(!c.started.load(.acquire));
+    // Publish startup before adoption: native setup must go to each owner.
+    c.started.store(true, .release);
     // TSan’s thread-local storage needs more than the small normal OS stack.
     for (c.processors[1..]) |*p| {
         p.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
@@ -219,7 +221,6 @@ pub fn start(c: *Core) StartError!void {
     if (c.scheduler.monitor) |m| {
         m.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
     }
-    c.started = true;
 }
 
 pub fn run(c: *Core, mode: Loop.RunMode) void {
@@ -243,7 +244,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 }
 
 pub fn stop(c: *Core) void {
-    if (!c.started) return;
+    if (!c.started.load(.acquire)) return;
     assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
@@ -253,7 +254,7 @@ pub fn stop(c: *Core) void {
         c.scheduler.spares.stop();
     }
     for (c.processors[1..]) |*p| if (p.thread) |t| t.join();
-    c.started = false;
+    c.started.store(false, .release);
 }
 
 pub fn deinit(c: *Core) void {

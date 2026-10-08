@@ -568,6 +568,8 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.active -= 1;
             const r: *Receive = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the receiver owns this record through the terminal completion
             r.deliver(cqe);
+            // A receiver wakes tasks without completing a Loop.Op.
+            sink.notified();
         },
         .listener => {
             const r: *Accept.Slot = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion

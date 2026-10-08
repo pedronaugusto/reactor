@@ -466,3 +466,71 @@ test "a listener's queued connection follows a consumer on another processor" {
     try done.waitTimeout(io, ms(100));
     try accepting.await(io);
 }
+
+test "a native receive alone returns from a loop waiting for a completion" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    const Loop = @import("Loop.zig");
+    const BufferRing = @import("sys/BufferRing.zig");
+    const Receive = @import("backend/uring/Receive.zig");
+    const Observed = struct {
+        const Self = @This();
+        count: u32 = 0,
+        fn complete(context: *anyopaque, _: linux.io_uring_cqe) void {
+            const observed: *Self = @ptrCast(@alignCast(context)); // safe: this request retains the local counter
+            observed.count += 1;
+        }
+    };
+    var loop: Loop = undefined;
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer loop.deinit(testing.allocator);
+    var sockets: [2]posix.fd_t = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
+    defer closeAll(&sockets);
+    const ring = &loop.backend.io_uring;
+    var buffers = BufferRing.init(ring.ring.fd, 2, 1) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer buffers.deinit();
+    var bytes: [64]u8 = undefined;
+    linux.IoUring.buf_ring_init(buffers.br);
+    linux.IoUring.buf_ring_add(buffers.br, &bytes, 0, 1, 0);
+    linux.IoUring.buf_ring_advance(buffers.br, 1);
+    var observed: Observed = .{};
+    var request: Receive = .{ .socket = sockets[0], .group = 1, .context = &observed, .complete = Observed.complete };
+    request.arm(ring);
+    defer {
+        request.cancel(ring);
+        while (request.active) _ = loop.run(.nowait) catch unreachable; // unreachable: this live ring accepts its cancel
+    }
+    try testing.expectEqual(@as(usize, 1), linux.write(sockets[1], "x", 1));
+    const until = Io.Clock.Timestamp.now(Scheduler.system(), .awake).addDuration(.{ .raw = .fromMilliseconds(500), .clock = .awake });
+    const delivered = try loop.run(.{ .within = until });
+    try testing.expectEqual(@as(u32, 1), observed.count);
+    try testing.expectEqual(@as(u32, 1), delivered);
+}
+
+test "provided buffer pools register before startup and during worker adoption" {
+    if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
+    for (0..16) |_| {
+        var r: Runtime = undefined;
+        r.init(testing.allocator, .{ .workers = 3, .max_tasks = 8 }) catch |err| switch (err) {
+            error.BackendUnavailable => return error.SkipZigTest,
+            else => |e| return e,
+        };
+        defer r.deinit();
+        const io = r.io();
+        var before = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = 64 });
+        defer before.deinit(testing.allocator, io);
+        try r.start();
+        var during = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = 64 });
+        defer during.deinit(testing.allocator, io);
+        if (during.groups == null) return error.SkipZigTest;
+        try testing.expect(before.groups != null);
+        try testing.expectEqual(@as(usize, 4), during.groups.?.items.len);
+    }
+}

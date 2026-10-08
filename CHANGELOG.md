@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Buffer-pool registration follows the ring owner as soon as runtime startup begins, avoiding a race with worker adoption.
+- Native receiver completions count as loop progress, so a waiting processor runs the task they woke before sleeping again.
+
 - `Loop.reap` releases an operation for reuse; wheel timers and kernel requests share their internal storage, reducing operation size and timer cancellation cost.
 
 - Processors publish idleness before checking remote work, so lane completions cannot miss their wake; global completions also wake an embedded host and make `Runtime.nextTimeout` return zero.
