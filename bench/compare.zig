@@ -1,4 +1,4 @@
-//! Interleaved public reactor A/B evidence. All fixtures and the immutable
+//! Interleaved reactor A/B benchmark output. All fixtures and the immutable
 //! baseline checkout stay under this clone's cache. No timing is a CI gate.
 const std = @import("std");
 const builtin = @import("builtin");

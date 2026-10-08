@@ -70,9 +70,10 @@ an unsupported request returns an error. Both options are Linux-specific.
 `stats().parked_high_water` is retained across task release;
 `stack_high_water` is available with painting enabled. Profiling commits and
 scans stack memory, so leave it off when timing production workloads.
-The required family-suite V11 measurements are still pending.
+Family-suite V11 measurements belong to each package's adoption.
 
-Detailed implementation and evidence: [LATER evidence](bench/later-evidence.md).
+Architecture and ownership: [design](docs/design.md).
+A [short dated results note](bench/results-2026-10-08.md) links the private evidence.
 
 ## API
 
@@ -155,8 +156,10 @@ test-only dependency.
 Use `zig build test -Dtest-filter=<name>` for a focused test, `zig build lint`
 for source and architecture checks, and `zig build check` to compile tests,
 examples and the own benchmarks. `zig build bench` runs manual timings; CI
-compiles them without timing. The [LATER evidence](bench/later-evidence.md)
-retains native ownership and failing-before regression receipts.
+compiles them without timing. Native lifetime regressions live in
+[src/later_test.zig](src/later_test.zig) and
+[src/r1_regression_test.zig](src/r1_regression_test.zig); raw receipts stay in
+the private trials revision linked by the dated results note.
 
 V11 suite measurements belong to each package's move onto reactor. The
 [isolated harness](bench/v11/README.md) preserves the measurements and consumer
