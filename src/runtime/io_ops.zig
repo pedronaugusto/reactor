@@ -1,8 +1,14 @@
 //! The slots that are operations on the kernel's own queue: reads and
-//! writes of sockets and files, accept, connect, close, sync, and the
-//! resolver's bounded lane path. On a backend without an evented form of
-//! a call, the call goes to a lane (or std's code, borrowed, where it never
-//! blocks).
+//! writes of sockets and files, accept, connect, close, sync, process
+//! waits, and the resolver's bounded lane path. On a backend without an
+//! evented form of a call, the call goes to a lane (or std's code,
+//! borrowed, where it never blocks).
+//!
+//! On IOCP a socket is bound to a runtime's port for its life, and std's
+//! own socket calls, which complete by APC, are refused on a bound handle:
+//! every call on one goes through a port, a thread outside the runtime's
+//! too (a processor runs it), and closes and process cleanups forget the
+//! handles' bindings.
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -19,12 +25,17 @@ const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const socket = @import("../sys/socket.zig");
 const sys_file = @import("../sys/file.zig");
+const sys_windows = @import("../sys/windows.zig");
 
 /// Whether `r`'s loops are the kernel's, which run file and socket calls
 /// as operations of their own (else a test's fake, which runs only the
 /// operations it simulates).
 fn native(r: *Core) bool {
     return r.backendKind() != null;
+}
+
+fn iocp(r: *Core) bool {
+    return builtin.os.tag == .windows and r.backendKind() == .iocp;
 }
 
 fn onLane(r: *Core, comptime lane: Lanes.Lane, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
@@ -48,21 +59,63 @@ fn borrowed(r: *Core, comptime name: []const u8, args: anytype) @typeInfo(@typeI
     return lane_call.borrow(@field(b.vtable, name), .{b.userdata} ++ args);
 }
 
+/// Whether the calling thread is outside the runtime and the call runs as
+/// std's own code there; on IOCP it runs on a processor instead.
+fn outsideBorrowed(r: *Core) bool {
+    return Scheduler.processor() == null and !iocp(r);
+}
+
+/// Runs `o` for the caller and waits for it: a task on its own processor;
+/// a thread outside the runtime, on a processor it hands the operation to.
+fn run(r: *Core, o: *Loop.Op, options: perform.Options) perform.Error!void {
+    if (Scheduler.processor() != null) return perform.run(&r.scheduler, o, options);
+    return perform.runElsewhere(elsewhere(r), o, options.deadline);
+}
+
+/// The processor a thread outside the runtime has run its operations:
+/// the workers in turn, or the home processor when there are none.
+fn elsewhere(r: *Core) *Processor {
+    if (r.processors.len == 1) return &r.processors[0];
+    const n = r.scheduler.placement.fetchAdd(1, .monotonic);
+    return &r.processors[1 + n % (r.processors.len - 1)];
+}
+
+/// `timeout` as a deadline on the runtime's clocks.
+fn deadlineOf(r: *Core, timeout: Io.Timeout) ?Io.Clock.Timestamp {
+    return perform.deadline(Scheduler.processor() orelse &r.processors[0], timeout);
+}
+
 pub fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
     const r = Core.of(userdata);
-    _ = Scheduler.processor() orelse return borrowed(r, "operate", .{operation});
+    if (outsideBorrowed(r)) return borrowed(r, "operate", .{operation});
     switch (operation) {
-        .device_io_control => return borrowed(r, "operate", .{operation}),
-        .file_read_streaming, .file_write_streaming => if (r.options.files == .pool) return onLane(r, .general, "operate", .{operation}),
+        // On IOCP, device control on a handle opened for overlapped calls
+        // goes through the port; else std's call, which completes at once
+        // or waits on the handle.
+        .device_io_control => |d| if (!(iocp(r) and deviceOverlapped(d))) return borrowed(r, "operate", .{operation}),
+        .file_read_streaming => |f| if (fileOnLane(r, f.file)) return onLane(r, .general, "operate", .{operation}),
+        .file_write_streaming => |f| if (fileOnLane(r, f.file)) return onLane(r, .general, "operate", .{operation}),
         else => {},
     }
     var o: Loop.Op = .{ .kind = .{ .io = operation } };
-    perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
+    run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => failure(operation),
         error.Timeout => unreachable, // unreachable: no deadline given
     };
     return o.result.io;
+}
+
+fn deviceOverlapped(d: Io.Operation.DeviceIoControl) bool {
+    if (builtin.os.tag != .windows) return false;
+    return d.file.flags.nonblocking;
+}
+
+/// Whether a streaming call on `file` goes to a lane: every one under
+/// `files = .pool`; on IOCP, those on a handle opened for synchronous
+/// calls, which no port can finish.
+fn fileOnLane(r: *Core, file: Io.File) bool {
+    return r.options.files == .pool or (iocp(r) and !file.flags.nonblocking);
 }
 
 /// The result of an operation the kernel's queue had no room for.
@@ -74,7 +127,7 @@ fn failure(operation: Io.Operation) Io.Operation.Result {
         .net_write => .{ .net_write = error.SystemResources },
         .net_receive => .{ .net_receive = .{ error.SystemResources, 0 } },
         .net_send => .{ .net_send = .{ error.SystemResources, 0 } },
-        .device_io_control => unreachable, // unreachable: runs borrowed
+        .device_io_control => if (builtin.os.tag == .windows) .{ .device_io_control = .{ .u = .{ .Status = .INSUFFICIENT_RESOURCES }, .Information = 0 } } else unreachable, // unreachable: off Windows device control runs borrowed
     };
 }
 
@@ -89,9 +142,18 @@ fn fileOnRing(r: *Core) bool {
     return r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
 }
 
+/// Whether a positional call on `file` is a loop operation: on io_uring
+/// for a task (a thread outside reads on a lane, inline); on IOCP for a
+/// handle opened for overlapped calls, from any thread.
+fn positionalOnLoop(r: *Core, file: Io.File) bool {
+    if (!native(r) or r.options.files != .auto) return false;
+    if (iocp(r)) return file.flags.nonblocking;
+    return fileOnRing(r);
+}
+
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) {
+    if (!positionalOnLoop(r, file)) {
         // The read itself inside the worker's blocking bracket: std's path
         // around the same call costs ~10% of a cached read.
         if (r.options.files == .auto and readiness(r)) if (Scheduler.enterBlocking()) |blocking| {
@@ -112,7 +174,7 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
     } else return 0;
     if (cachedRead(file.handle, buffer, offset)) |n| return n;
     var o: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = buffer, .offset = offset } } };
-    perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
+    run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
@@ -124,7 +186,7 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
 /// waits on a disk (`RWF_NOWAIT`), instead of a trip through the ring.
 /// Null when the data is not cached or the call fails otherwise, which the
 /// ring then reports as std would.
-fn cachedRead(fd: posix.fd_t, buffer: []u8, offset: u64) ?usize {
+fn cachedRead(fd: Io.File.Handle, buffer: []u8, offset: u64) ?usize {
     if (builtin.os.tag != .linux) return null;
     const linux = std.os.linux;
     var iov: posix.iovec = .{ .base = buffer.ptr, .len = buffer.len };
@@ -135,7 +197,7 @@ fn cachedRead(fd: posix.fd_t, buffer: []u8, offset: u64) ?usize {
 
 pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return perFiles(r, "fileWritePositional", .{ file, header, data, splat, offset });
+    if (!positionalOnLoop(r, file)) return perFiles(r, "fileWritePositional", .{ file, header, data, splat, offset });
     // A positional write may be short: the first bytes there are.
     const bytes = first: {
         if (header.len > 0) break :first header;
@@ -144,7 +206,7 @@ pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const
         return 0;
     };
     var o: Loop.Op = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = bytes, .offset = offset } } };
-    perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
+    run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
@@ -152,9 +214,12 @@ pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const
     return o.result.write_at;
 }
 
+/// A sync is a ring operation on io_uring; elsewhere no kernel queue
+/// flushes (IOCP's flush is synchronous): the `sync` lane.
 pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     const r = Core.of(userdata);
-    if (!fileOnRing(r)) return onLane(r, .sync, "fileSync", .{file});
+    const on_ring = r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
+    if (!on_ring) return onLane(r, .sync, "fileSync", .{file});
     var o: Loop.Op = .{ .kind = .{ .sync = file.handle } };
     perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
@@ -166,6 +231,10 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
     const r = Core.of(userdata);
+    if (iocp(r)) {
+        for (files) |f| closeBound(f.handle);
+        return;
+    }
     if (!native(r) or Scheduler.processor() == null) {
         for (files) |f| Loop.closing(f.handle);
         return borrowed(r, "fileClose", .{files});
@@ -176,13 +245,26 @@ pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
 /// Closes `handle` through the loop, which first ends every operation this
 /// processor's kernel queue holds on it (and on epoll and kqueue lets go of
 /// its registration).
-fn closeOnRing(r: *Core, handle: posix.fd_t) void {
+fn closeOnRing(r: *Core, handle: Io.File.Handle) void {
     var o: Loop.Op = .{ .kind = .{ .close = handle } };
     perform.run(&r.scheduler, &o, .{ .cancelable = false }) catch socket.close(handle);
 }
 
+/// IOCP: ends every call on `handle`, from any thread of the process, and
+/// closes it, forgetting its binding. The calls' entries still arrive at
+/// the ports of the loops that made them.
+fn closeBound(handle: Io.File.Handle) void {
+    if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
+    sys_windows.cancel(handle, null);
+    sys_windows.close(handle);
+}
+
 pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     const r = Core.of(userdata);
+    if (iocp(r)) {
+        for (sockets) |s| closeBound(s.handle);
+        return;
+    }
     if (!native(r) or Scheduler.processor() == null) {
         for (sockets) |s| Loop.closing(s.handle);
         return borrowed(r, "netClose", .{sockets});
@@ -197,7 +279,7 @@ pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
 /// would keep the socket open past its close: each such processor ends
 /// its operations on `fd` first, and the close waits until it has, so the
 /// number cannot be reused under a cancel still on its way.
-fn abortElsewhere(r: *Core, fd: posix.fd_t) void {
+fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
     const me = Scheduler.processor().?;
     const t = me.current.?;
     for (r.processors) |*other| {
@@ -209,7 +291,7 @@ fn abortElsewhere(r: *Core, fd: posix.fd_t) void {
 
 /// An abort of a descriptor's operations, run on the processor holding them.
 const Abort = struct {
-    errand: Scheduler.Errand = .{ .run = run },
+    errand: Scheduler.Errand = .{ .run = start },
     op: Loop.Op,
     task: *Task,
     scheduler: *Scheduler,
@@ -222,7 +304,7 @@ const Abort = struct {
         a.target.send(&a.errand);
     }
 
-    fn run(e: *Scheduler.Errand, p: *Processor) void {
+    fn start(e: *Scheduler.Errand, p: *Processor) void {
         const a: *Abort = @alignCast(@fieldParentPtr("errand", e)); // safe: the field belongs to this record
         a.op.callback = done;
         a.op.user_data = @intFromPtr(a); // safe: read back by `done` while the closing task waits
@@ -231,16 +313,19 @@ const Abort = struct {
 
     fn done(l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const a: *Abort = @ptrFromInt(o.user_data); // safe: `run` stored it
+        const a: *Abort = @ptrFromInt(o.user_data); // safe: `start` stored it
         a.scheduler.ready(a.task, .completed);
     }
 };
 
 pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
     const r = Core.of(userdata);
-    _ = Scheduler.processor() orelse return borrowed(r, "netAccept", .{ server, options });
+    if (outsideBorrowed(r)) return borrowed(r, "netAccept", .{ server, options });
+    // On Windows the options name the accepted socket's mode: a listener is
+    // a stream socket there, and its connections are opened as stream
+    // sockets of the peer's family.
     var o: Loop.Op = .{ .kind = .{ .accept = server } };
-    perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
+    run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
@@ -250,14 +335,14 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
 
 pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
     const r = Core.of(userdata);
-    const p = Scheduler.processor() orelse return borrowed(r, "netConnectIp", .{ address, options });
+    if (outsideBorrowed(r)) return borrowed(r, "netConnectIp", .{ address, options });
     // On epoll and kqueue the socket connects in non-blocking mode, made so
     // at its creation, and is put back once connected.
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
     const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol, start) catch |err| return narrow(net.IpAddress.ConnectError, err);
     errdefer socket.close(fd);
     var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } };
-    perform.run(&r.scheduler, &o, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
+    run(r, &o, .{ .deadline = deadlineOf(r, options.timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => error.Timeout,
         error.SystemResources => error.SystemResources,
@@ -282,16 +367,16 @@ fn narrow(comptime E: type, err: anytype) E {
 
 pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Socket.Handle {
     const r = Core.of(userdata);
-    _ = Scheduler.processor() orelse return borrowed(r, "netConnectUnix", .{address});
+    if (outsideBorrowed(r)) return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
-    const fd = socket.open(posix.AF.UNIX, .stream, null, start) catch |err| return switch (err) {
+    const fd = socket.openUnix(address, start) catch |err| return switch (err) {
         error.ProtocolUnsupportedByAddressFamily, error.ProtocolUnsupportedBySystem => error.AddressFamilyUnsupported,
         else => |e| narrow(net.UnixAddress.ConnectError, e),
     };
     errdefer socket.close(fd);
     var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } };
-    perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
+    run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
@@ -299,6 +384,41 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
     o.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
     if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
     return fd;
+}
+
+// Child processes. On IOCP a wait is the process handle's wait packet,
+// then std's own wait, which finds the process ended; elsewhere std's wait
+// on the `wait` lane. std's cleanup closes the child's pipes itself:
+// their bindings are forgotten first.
+
+pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+    const r = Core.of(userdata);
+    if (!iocp(r)) return onLane(r, .wait, "childWait", .{child});
+    if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
+    var o: Loop.Op = .{ .kind = .{ .wait = .{ .object = child.id.? } } };
+    run(r, &o, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        // No packet to be had: std's own wait, on the lane.
+        error.SystemResources => return onLane(r, .wait, "childWait", .{child}),
+        error.Timeout => unreachable, // unreachable: no deadline given
+    };
+    o.result.wait catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Unsupported, error.Unexpected => return onLane(r, .wait, "childWait", .{child}),
+    };
+    forgetPipes(child);
+    return borrowed(r, "childWait", .{child});
+}
+
+pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
+    const r = Core.of(userdata);
+    if (iocp(r)) forgetPipes(child);
+    onLane(r, .wait, "childKill", .{child});
+}
+
+fn forgetPipes(child: *const std.process.Child) void {
+    if (builtin.os.tag != .windows) return;
+    inline for (.{ child.stdin, child.stdout, child.stderr }) |pipe| if (pipe) |file| sys_windows.forget(file.handle);
 }
 
 // The resolver's lane path: std's own lookup runs on the lookup lane into

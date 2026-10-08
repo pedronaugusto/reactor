@@ -8,6 +8,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys/memory.zig",
         "src/sys/socket.zig",
         "src/sys/file.zig",
+        "src/sys/afd.zig",
+        "src/sys/windows.zig",
     } },
     .{ .name = "fibers, time and lanes", .patterns = &.{
         "src/fiber.zig",
@@ -24,6 +26,8 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/pending.zig",
         "src/backend/Uring.zig",
         "src/backend/uring/results.zig",
+        "src/backend/Iocp.zig",
+        "src/backend/iocp/results.zig",
         "src/backend/wait.zig",
         "src/backend/readiness.zig",
         "src/backend/readiness/calls.zig",

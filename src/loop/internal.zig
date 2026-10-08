@@ -25,11 +25,31 @@ pub fn setBatchSink(l: *Loop, sink: Loop.BatchSink) void {
     l.batch_sink = sink;
 }
 
-/// One operation of a batch, kept in the batch's own storage.
-pub fn submitPending(l: *Loop, token: backend.pending.Token, operation: Io.Operation) backend.SubmitError!void {
-    l.in_flight += 1;
-    errdefer l.in_flight -= 1;
-    try l.backend.submitPending(token, operation);
+/// Whether a batch's `operation` can wait in this loop's kernel queue;
+/// the rest run as std's own code.
+pub fn canPend(l: *const Loop, operation: Io.Operation) bool {
+    return l.backend.canPend(operation);
+}
+
+/// One operation of a batch, kept in the batch's own storage: null while
+/// the kernel holds it, else its outcome, which it had at once.
+pub fn submitPending(l: *Loop, token: backend.pending.Token, operation: Io.Operation) backend.SubmitError!?backend.pending.Outcome {
+    const outcome = try l.backend.submitPending(token, operation);
+    if (outcome == null) l.in_flight += 1;
+    return outcome;
+}
+
+/// An operation `submit` finished at once, taken back before delivery:
+/// its result is the caller's now and no callback runs for it. False when
+/// it is under way, or not first in line for delivery.
+pub fn takeCompleted(l: *Loop, o: *Loop.Op) bool {
+    if (o.state.phase != .done or l.ready.head != o) return false;
+    l.ready.head = @ptrCast(@alignCast(o.state.next)); // safe: the ready list links `*Op`s only
+    if (l.ready.head == null) l.ready.tail = null;
+    o.state.next = null;
+    o.state.phase = .idle;
+    l.in_flight -= 1;
+    return true;
 }
 
 pub fn cancelPending(l: *Loop, token: backend.pending.Token) void {

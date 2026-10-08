@@ -6,6 +6,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
+const Allocator = std.mem.Allocator;
 
 pub const op = @import("backend/op.zig");
 pub const pending = @import("backend/pending.zig");
@@ -27,6 +28,10 @@ const has_kqueue = switch (builtin.os.tag) {
 };
 pub const Kqueue = if (has_kqueue) readiness.Readiness(kqueue_poller) else void;
 
+const has_iocp = builtin.os.tag == .windows;
+const iocp_file = @import("backend/Iocp.zig");
+pub const Iocp = if (has_iocp) iocp_file else void;
+
 /// The kernel mechanisms a loop can run on.
 pub const Kind = enum { io_uring, epoll, kqueue, iocp };
 
@@ -37,6 +42,7 @@ pub const PollError = error{ SystemResources, Unexpected };
 pub const Scratch = union {
     custom: Custom.Scratch,
     io_uring: if (has_uring) Uring.Scratch else void,
+    iocp: if (has_iocp) Iocp.Scratch else void,
     epoll: if (has_epoll) Epoll.Scratch else void,
     kqueue: if (has_kqueue) Kqueue.Scratch else void,
 };
@@ -45,6 +51,7 @@ pub const Backend = union(enum) {
     /// Absent (void) where the system has no io_uring.
     io_uring: Uring,
     /// Absent where the system has no epoll.
+    iocp: Iocp,
     epoll: Epoll,
     /// Absent where the system has no kqueue.
     kqueue: Kqueue,
@@ -53,17 +60,19 @@ pub const Backend = union(enum) {
     pub fn kind(b: *const Backend) ?Kind {
         return switch (b.*) {
             .io_uring => .io_uring,
+            .iocp => .iocp,
             .epoll => .epoll,
             .kqueue => .kqueue,
             .custom => null,
         };
     }
 
-    pub fn deinit(b: *Backend) void {
+    pub fn deinit(b: *Backend, gpa: Allocator) void {
         switch (b.*) {
             .io_uring => |*u| if (has_uring) u.deinit(),
             .epoll => |*e| if (has_epoll) e.deinit(),
             .kqueue => |*k| if (has_kqueue) k.deinit(),
+            .iocp => |*w| if (has_iocp) w.deinit(gpa),
             .custom => {},
         }
         b.* = undefined;
@@ -77,30 +86,44 @@ pub const Backend = union(enum) {
             .io_uring => |*u| if (has_uring) try u.submit(o) else unreachable, // unreachable: no such backend here
             .epoll => |*e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.submit(c.context, o),
         }
         return false;
     }
 
     /// Asks the kernel to end `o`; its completion still arrives.
-    pub fn cancel(b: *Backend, o: anytype) void {
+    pub fn cancel(b: *Backend, o: anytype) bool {
         switch (b.*) {
             .io_uring => |*u| if (has_uring) u.cancel(o) else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) e.cancel(o) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.cancel(o) else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) return w.cancel(o) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.cancel(c.context, o),
         }
+        return false;
+    }
+
+    /// Whether a batch's `operation` can wait in this kernel queue; the
+    /// rest run as std's own code.
+    pub fn canPend(b: *const Backend, operation: Io.Operation) bool {
+        return switch (b.*) {
+            .iocp => if (has_iocp) Iocp.canPend(operation) else unreachable, // unreachable: no such backend here
+            .io_uring, .epoll, .kqueue, .custom => operation != .device_io_control,
+        };
     }
 
     /// A batch's operation, kept packed in its storage (see `pending`);
     /// its completion comes back to the sink under `token`.
-    pub fn submitPending(b: *Backend, token: pending.Token, operation: Io.Operation) SubmitError!void {
+    pub fn submitPending(b: *Backend, token: pending.Token, operation: Io.Operation) SubmitError!?pending.Outcome {
         switch (b.*) {
             .io_uring => |*u| if (has_uring) try u.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) try e.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) try k.submitPending(token, operation) else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) return w.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.submitPending(c.context, token, operation),
         }
+        return null;
     }
 
     pub fn cancelPending(b: *Backend, token: pending.Token) void {
@@ -108,6 +131,7 @@ pub const Backend = union(enum) {
             .io_uring => |*u| if (has_uring) u.cancelPending(token) else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) e.cancelPending(token) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.cancelPending(token) else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) w.cancelPending(token) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.cancelPending(c.context, token),
         }
     }
@@ -120,6 +144,7 @@ pub const Backend = union(enum) {
             .io_uring => |*u| if (has_uring) try u.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) try e.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) try k.poll(wait, sink) else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) try w.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.poll(c.context, wait, CustomSink(@TypeOf(sink)).of(sink)),
         }
     }
@@ -130,6 +155,7 @@ pub const Backend = union(enum) {
             .io_uring => |*u| if (has_uring) u.wake() else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) e.wake() else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.wake() else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) w.wake() else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.wake(c.context),
         }
     }
@@ -151,6 +177,7 @@ pub const Backend = union(enum) {
             .io_uring => |*u| if (has_uring) try u.handle() else unreachable, // unreachable: no such backend here
             .epoll => |*e| if (has_epoll) e.handle() else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.handle() else unreachable, // unreachable: no such backend here
+            .iocp => |*w| if (has_iocp) w.waitHandle() else unreachable, // unreachable: no such backend here
             .custom => null,
         };
     }

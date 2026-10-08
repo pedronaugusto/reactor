@@ -823,13 +823,13 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
     const record_at = std.mem.alignBackward(usize, top - @sizeOf(Task), @alignOf(Task));
     const extra_at = extra_align.backward(record_at - extra);
     const sp = std.mem.alignBackward(usize, extra_at, 16);
-    if (sp - s.stacks.bottom(index) < s.stacks.size / 2) {
+    if (sp - s.stacks.bottom(index) < s.stacks.size / 2 or !s.stacks.reach(index, sp - 48)) {
         s.stacks.give(index);
         return null;
     }
     const t: *Task = @ptrFromInt(record_at);
     t.* = .{ .kind = kind, .stack = index, .home = s.scheduling == .per_core };
-    t.context = fiber.initial(sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
+    t.context = fiber.initial(s.stacks.stack(index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
     _ = s.live.fetchAdd(1, .monotonic);
     return .{ t, @ptrFromInt(extra_at) };
 }
@@ -837,6 +837,7 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
 /// Gives back the stack of a task that has ended and been forgotten.
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
+    s.stacks.ended(index, fiber.committedLimit(&t.context));
     t.* = undefined;
     s.stacks.give(index);
     _ = s.live.fetchSub(1, .release);

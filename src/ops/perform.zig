@@ -125,6 +125,8 @@ pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {
         .sync => |fd| fd,
         .wait => |w| switch (w) {
             .readable, .writable => |fd| fd,
+            // A kernel object, never closed under its wait by a close.
+            .object => null,
         },
         .close, .abort, .timer => null,
     };
@@ -164,3 +166,82 @@ pub fn deadline(p: *Processor, timeout: Io.Timeout) ?Io.Clock.Timestamp {
         .deadline => |d| d,
     };
 }
+
+/// From a thread outside the runtime: `o` runs on processor `p`, and the
+/// thread waits for it on a kernel futex. Nothing cancels such a thread;
+/// a deadline ends the operation as it does a task's.
+pub fn runElsewhere(p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ Timeout, SystemResources }!void {
+    var e: Elsewhere = .{ .op = o, .deadline = at };
+    p.send(&e.errand);
+    const system = Scheduler.system();
+    while (e.done.load(.acquire) == 0) system.futexWaitUncancelable(u32, &e.done.raw, 0);
+    if (e.failed) return error.SystemResources;
+    if (e.timed_out and canceledResult(o)) return error.Timeout;
+}
+
+/// An operation a thread outside the runtime has a processor run, and its
+/// deadline's timer; only that processor's thread touches it until `done`.
+const Elsewhere = struct {
+    errand: Scheduler.Errand = .{ .run = start },
+    op: *Loop.Op,
+    deadline: ?Io.Clock.Timestamp,
+    timer: Loop.Op = .{ .kind = .{ .timer = undefined } },
+    processor: *Processor = undefined,
+    /// Completions still to come: the operation's, and its timer's.
+    left: u8 = 1,
+    timed_out: bool = false,
+    failed: bool = false,
+    done: std.atomic.Value(u32) = .init(0),
+
+    fn start(errand: *Scheduler.Errand, p: *Processor) void {
+        const e: *Elsewhere = @alignCast(@fieldParentPtr("errand", errand)); // safe: the field belongs to this record
+        e.processor = p;
+        const o = e.op;
+        o.callback = finished;
+        o.user_data = @intFromPtr(e); // safe: read back by `finished` while the thread waits
+        const fd = descriptorOf(o.kind);
+        if (fd) |d| p.hold(d);
+        p.loop.submit(o) catch {
+            if (fd) |d| p.release(d);
+            e.failed = true;
+            return e.signal();
+        };
+        const at = e.deadline orelse return;
+        e.timer.kind = .{ .timer = at };
+        e.timer.callback = expired;
+        if (p.loop.submit(&e.timer)) |_| {
+            e.left += 1;
+        } else |_| {
+            // No room for the timer: end the operation now.
+            e.timed_out = true;
+            p.loop.cancel(o);
+        }
+    }
+
+    fn finished(l: *Loop, o: *Loop.Op) void {
+        const e: *Elsewhere = @ptrFromInt(o.user_data); // safe: `start` stored it
+        if (descriptorOf(o.kind)) |fd| e.processor.release(fd);
+        // The timer still armed: its cancel completes it, now or later.
+        if (e.left == 2) l.cancel(&e.timer);
+        e.settle();
+    }
+
+    fn expired(l: *Loop, t: *Loop.Op) void {
+        const e: *Elsewhere = @alignCast(@fieldParentPtr("timer", t)); // safe: the field belongs to this record
+        if (t.result.timer) |_| {
+            e.timed_out = true;
+            l.cancel(e.op);
+        } else |_| {}
+        e.settle();
+    }
+
+    fn settle(e: *Elsewhere) void {
+        e.left -= 1;
+        if (e.left == 0) e.signal();
+    }
+
+    fn signal(e: *Elsewhere) void {
+        e.done.store(1, .release);
+        Scheduler.system().futexWake(u32, &e.done.raw, 1);
+    }
+};

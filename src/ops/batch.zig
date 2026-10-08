@@ -12,6 +12,7 @@
 //! for each to come back first; one that completed meanwhile is moved to
 //! `completed` and the call succeeds; cancelled ones return to `submitted`,
 //! whole, so a second await submits them again.
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -125,6 +126,23 @@ pub fn awaitConcurrent(s: *Scheduler, borrowed: Io, batch: *Io.Batch, timeout: I
     return error.Timeout;
 }
 
+/// A thread outside the runtime whose calls cannot run as std's code
+/// (IOCP, where std's APC calls are refused on a bound socket): each
+/// submitted operation through `io`'s own `operate`, in order, each to its
+/// end. Nothing is left pending.
+pub fn awaitEach(io: Io, batch: *Io.Batch) Io.Cancelable!void {
+    var index = batch.submitted.head;
+    errdefer batch.submitted.head = index;
+    while (index != .none) {
+        const storage = &batch.storage[index.toIndex()];
+        const next = storage.submission.node.next;
+        const result = try io.vtable.operate(io.userdata, storage.submission.operation);
+        complete(batch, index, result);
+        index = next;
+    }
+    batch.submitted = .{ .head = .none, .tail = .none };
+}
+
 pub fn cancel(s: *Scheduler, borrowed: Io, batch: *Io.Batch) void {
     _ = Scheduler.current() orelse return borrowed.vtable.batchCancel(borrowed.userdata, batch);
     if (batch.pending.head != .none) drainAll(s, batch, .to_unused);
@@ -203,22 +221,29 @@ fn drain(s: *Scheduler, borrowed: Io, batch: *Io.Batch, concurrency: bool) (Io.C
         const storage = &batch.storage[i];
         const next = storage.submission.node.next;
         const operation = storage.submission.operation;
-        if (operation == .device_io_control) {
+        if (trivial(operation)) |result| {
+            complete(batch, index, result);
+        } else if (!loop_internal.canPend(&p.loop, operation)) {
+            // No evented form here (device control; on IOCP a handle opened
+            // for synchronous calls): std's own call, which may wait.
             if (concurrency) return error.ConcurrencyUnavailable;
             const result = try borrowed.vtable.operate(borrowed.userdata, operation);
-            complete(batch, index, result);
-        } else if (trivial(operation)) |result| {
             complete(batch, index, result);
         } else {
             toPending(batch, t, index, operation);
             const fd = perform.descriptorOf(.{ .io = operation }).?;
             p.hold(fd);
-            loop_internal.submitPending(&p.loop, .of(batch, i), operation) catch {
+            const now: ?pending.Outcome = loop_internal.submitPending(&p.loop, .of(batch, i), operation) catch .{ .result = failure(operation) };
+            // Finished at once (IOCP's skip on success), or refused.
+            if (now) |outcome| {
                 p.release(fd);
                 removePending(batch, index);
-                complete(batch, index, failure(operation));
+                complete(batch, index, switch (outcome) {
+                    .result => |result| result,
+                    .canceled => closedUnder(operation),
+                });
                 release(batch);
-            };
+            }
         }
         index = next;
     }
@@ -247,7 +272,7 @@ fn failure(operation: Io.Operation) Io.Operation.Result {
         .net_write => .{ .net_write = error.SystemResources },
         .net_receive => .{ .net_receive = .{ error.SystemResources, 0 } },
         .net_send => .{ .net_send = .{ error.SystemResources, 0 } },
-        .device_io_control => unreachable, // unreachable: never pending
+        .device_io_control => device("INSUFFICIENT_RESOURCES"),
     };
 }
 
@@ -261,8 +286,15 @@ fn closedUnder(tag: Io.Operation.Tag) Io.Operation.Result {
         .net_write => .{ .net_write = error.SocketUnconnected },
         .net_receive => .{ .net_receive = .{ error.SocketUnconnected, 0 } },
         .net_send => .{ .net_send = .{ error.SocketUnconnected, 0 } },
-        .device_io_control => unreachable, // unreachable: never pending
+        .device_io_control => device("CANCELLED"),
     };
+}
+
+/// Windows: device control's result, a status block. Elsewhere device
+/// control never waits in a batch.
+fn device(comptime status: []const u8) Io.Operation.Result {
+    if (builtin.os.tag == .windows) return .{ .device_io_control = .{ .u = .{ .Status = @field(std.os.windows.NTSTATUS, status) }, .Information = 0 } };
+    unreachable; // unreachable: device control waits in a batch only on Windows
 }
 
 // The batch's lists.

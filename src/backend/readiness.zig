@@ -324,6 +324,7 @@ pub fn Readiness(comptime Poller: type) type {
                     const fd, const direction: Direction = switch (what) {
                         .readable => |fd| .{ fd, .read },
                         .writable => |fd| .{ fd, .write },
+                        .object => unreachable, // unreachable: Windows objects never reach a POSIX backend
                     };
                     if (calls.ready(fd, direction)) {
                         o.result = .{ .wait = {} };

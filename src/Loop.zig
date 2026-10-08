@@ -37,6 +37,11 @@ pub const Options = struct {
     uring_off: UringFeatures = .{},
     /// The thread that will own the loop.
     owner: Owner = .caller,
+    /// Windows: the host's completion port, which the loop shares. The host
+    /// waits on it and hands the entries that carry `completionKey()` to
+    /// `complete`; `run` then waits on nothing, so the host calls
+    /// `run(.nowait)` for timers and work queued meanwhile.
+    port: if (builtin.os.tag == .windows) ?std.os.windows.HANDLE else void = if (builtin.os.tag == .windows) null else {},
 };
 
 pub const Owner = enum {
@@ -139,11 +144,11 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
                 error.BackendUnavailable => try initEpoll(gpa, options),
                 else => |e| return e,
             }
-        else if (has_kqueue) try initKqueue(gpa, options) else return error.BackendUnavailable,
+        else if (has_kqueue) try initKqueue(gpa, options) else if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
         .io_uring => try initUring(options),
         .epoll => try initEpoll(gpa, options),
         .kqueue => try initKqueue(gpa, options),
-        .iocp => return error.BackendUnavailable,
+        .iocp => if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
     };
     l.* = .{
         .backend = native,
@@ -185,6 +190,12 @@ fn initKqueue(gpa: Allocator, options: Options) InitError!backends.Backend {
     return .{ .kqueue = try .init(gpa, options.max_ops) };
 }
 
+fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
+    // Batch operations in flight, at most 65,536 (as io_uring's completion
+    // queue): beyond, a batch operation fails as out of resources.
+    return .{ .iocp = try backends.Iocp.init(gpa, .{ .port = options.port, .slots = @min(options.max_ops, 1 << 16) }) };
+}
+
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
@@ -192,14 +203,13 @@ pub fn adopt(l: *Loop) void {
     switch (l.backend) {
         .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
         // A poller serves whichever thread waits on it.
-        .epoll, .kqueue, .custom => {},
+        .epoll, .kqueue, .iocp, .custom => {},
     }
 }
 
 pub fn deinit(l: *Loop, gpa: Allocator) void {
-    _ = gpa;
     assert(l.in_flight == 0);
-    l.backend.deinit();
+    l.backend.deinit(gpa);
     l.* = undefined;
 }
 
@@ -292,7 +302,10 @@ pub fn cancel(l: *Loop, o: *Op) void {
         },
         .kernel => if (!o.state.canceled) {
             o.state.canceled = true;
-            l.backend.cancel(o);
+            if (l.backend.cancel(o)) {
+                o.state.phase = .done;
+                l.ready.push(o);
+            }
         },
     }
 }
@@ -360,6 +373,29 @@ pub fn nextTimeout(l: *const Loop) ?Io.Duration {
 pub fn wake(l: *Loop) void {
     l.woken.store(true, .release);
     l.backend.wake();
+}
+
+/// Windows: one entry a host took from its completion port (laid out as
+/// `OVERLAPPED_ENTRY`).
+pub const PortEntry = if (builtin.os.tag == .windows) backends.Iocp.Entry else void;
+
+/// Windows: the completion key of reactor's entries, on any port.
+pub fn completionKey() usize {
+    if (builtin.os.tag != .windows) @compileError("completion keys are Windows'");
+    return backends.Iocp.key();
+}
+
+/// Windows, with `Options.port`: delivers the completions in `entries`, the
+/// ones the host took from its port that carry `completionKey()`, as
+/// `run` would (callbacks run, or queued for `reap`). Returns how many.
+pub fn complete(l: *Loop, entries: []const PortEntry) u32 {
+    l.assertOwner();
+    var counted: Counted = .{ .loop = l };
+    switch (l.backend) {
+        .iocp => |*b| if (builtin.os.tag == .windows) b.complete(entries, &counted),
+        .io_uring, .epoll, .kqueue, .custom => {},
+    }
+    return counted.count + l.deliverReady();
 }
 
 // The loop's own.

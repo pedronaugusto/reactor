@@ -1,6 +1,7 @@
 //! What an operation is, what it returns, and what the loop and its
 //! backend keep in it while it is under way. `Loop.Op` is built from these;
 //! the backends see an operation through these fields only.
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const Wheel = @import("../Wheel.zig");
@@ -46,6 +47,9 @@ pub const Waitable = union(enum) {
     readable: Io.File.Handle,
     /// The descriptor has room, or an error.
     writable: Io.File.Handle,
+    /// Windows: any waitable object is signaled (a process, a thread, an
+    /// event, a timer).
+    object: if (builtin.os.tag == .windows) std.os.windows.HANDLE else noreturn,
 
     pub const Error = error{ Unsupported, Unexpected };
 };
