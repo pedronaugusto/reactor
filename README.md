@@ -1,8 +1,9 @@
 # reactor
 
 The combined LATER and R6 work on branch `later` is work in progress.
-Performance targets, full family-suite stack measurements and the injected
-executor contract remain open. This branch has not landed on main.
+The injected-executor contract and final correctness gates remain open;
+this branch has not landed on main. Speed and size misses stay open in the
+mission, and V11 suite measurements belong to each package's adoption.
 
 reactor is an evented `std.Io` for Zig: every slot of the interface on the
 kernel's own completion queue, with stackful tasks on a work-stealing

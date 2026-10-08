@@ -1,37 +1,38 @@
 # Executor refusal
 
-Owner decision db221e5 requires refusal errors for raw offloads, including
-void functions, with no inline fallback. `blocking` and `blockingHook` now
-implement that fallible surface. The remaining fixed std.Io signature and
-injected cancellation-capacity seam is explicitly under review.
+Owner decision db221e5 requires refusal errors for offloads, including void
+functions, with no inline fallback. `blocking` now adds `Canceled` and
+`ConcurrencyUnavailable` to every function result. `blockingHook.call` has
+the same fallible surface. A rejected submission returns before user code
+runs. Original user errors and successful results remain intact. A queued
+void call can be canceled without running; accepted calls retain their storage
+until all execution and cancellation owners let go. Hook adoption is a separate
+consumer batch.
 
-The current implementation returns an available resource error when a call's
-result can represent one. Refusal of a void/narrow call, or of a cancellation
-job, terminates. This is the existing behavior, not an accepted final contract.
+## Remaining std.Io seam
 
-The minimal alternative has two parts:
+Zig's fixed `std.Io` signatures cannot be widened by an implementation.
+In particular, `childKill` returns void and CPU-clock `sleep` returns only
+`Canceled`. These operations can still reach an injected executor. There is
+no caller error channel for its ordinary refusal. Termination is the existing
+behavior and is not accepted as the completed contract.
 
-1. Add a fallible raw-offload entry point. Its result adds `Canceled` and
-   `ConcurrencyUnavailable` to the function's own error set (or wraps its
-   ordinary result). A refused call returns before invoking user code. The
-   existing void blocking hook cannot carry this error; a fallible hook would
-   be a separate explicit surface, requiring a consumer adoption decision.
-2. Give injected executors a separate, guaranteed cancellation submission
-   capacity. Accepted calls retain their task/job storage until both execution
-   and cancellation groups relinquish it. Reservations cover live jobs and
-   retiring control groups; the ordinary lane cap alone is not a sufficient
-   bound because a finished call can hand its slot to the next one while its
-   cancellation still runs. Capacity is reserved at initialization, with no
-   inline fallback and no allocation after it.
+Cancellation uses another job to invoke the accepted call's executor-specific
+`Group.cancel`. That job must also be accepted. Returning early on refusal
+would abandon live frames or an acquired result, and running it inline would
+violate the offload requirement. The ordinary lane cap does not bound retiring
+cancellation groups: a finished call can hand its slot to the next one while
+its cancellation control job still runs.
 
-This does not widen std.Io's void/narrow vtable slots. An injected executor
-used for those slots must additionally guarantee their acceptance within the
-runtime's declared capacity, or the owner must explicitly retain termination
-for that configuration. A fallible extension alone cannot solve that seam.
+The minimal alternatives are a separate guaranteed executor/capacity for fixed
+void/narrow std.Io operations and cancellation, or routing refusing injected
+executors only through the fallible raw surface. Either requires an explicit
+injected-executor contract, reserved capacity covering live and retiring control
+jobs, and no allocation or inline fallback after initialization. The owner
+choice on this seam remains pending; this revision implements the fallible
+raw part only.
 
-Before implementing this alternative, the owner must choose the public raw
-call/hook surface, the injected acceptance contract and capacity accounting,
-or explicitly retain the current resource-error/termination behavior. Tests
-would force ordinary refusal, cancellation under a saturated executor, and
-completion/cancellation races while poisoning released contexts. Nothing here
-selects or implements a changed public contract.
+Verification for the chosen remainder must force saturation, refusal and
+completion/cancellation races while poisoning released contexts, on native
+backends and under the thread sanitizer. Existing LATER/R1 lifetime and fault
+regressions remain required.
