@@ -430,9 +430,9 @@ fn waits(r: Report, io: Io, c: Config) !void {
     if (builtin.os.tag == .windows) return;
     const rounds: u32 = if (c.smoke) 100 else 100_000;
     var p: PipeTurns = .{ .a = try Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true }), .b = try Io.Threaded.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true }), .rounds = rounds };
-    defer for (p.a ++ p.b) |fd| {
-        _ = std.posix.system.close(fd);
-    };
+    // These descriptors were registered by wait: announce their closes
+    // through the Io before later workloads can reuse their numbers.
+    defer for (p.a ++ p.b) |fd| (Io.File{ .handle = fd, .flags = .{ .nonblocking = true } }).close(io);
     const t0 = now(io);
     var second = try io.concurrent(PipeTurns.second, .{ &p, io });
     try p.first(io);

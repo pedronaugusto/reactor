@@ -15,6 +15,7 @@ const Receive = @import("../../backend/uring/Receive.zig");
 const Groups = @import("receiver/Groups.zig");
 const native = @import("../native.zig");
 const wait = @import("../wait.zig");
+const timed = @import("../../ops/timeout.zig");
 
 pool: *Pool,
 socket: Io.net.Socket.Handle,
@@ -176,7 +177,7 @@ fn giveBack(r: *Receiver) void {
 fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8, deadline: Io.Timeout) NextError!?usize {
     if (builtin.os.tag != .windows) return receive.now(socket, buffer);
     var data: [1][]u8 = .{buffer};
-    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return switch (err) {
+    const result = timed.operate(io, .{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return switch (err) {
         error.ConcurrencyUnavailable => error.SystemResources,
         else => |e| e,
     };

@@ -5,6 +5,7 @@ const Io = std.Io;
 const net = Io.net;
 const HostName = net.HostName;
 const order = @import("resolve/order.zig");
+const timed = @import("timeout.zig");
 
 pub const Error = error{ NameNotResolved, InvalidPacket } || Io.Cancelable;
 
@@ -226,13 +227,13 @@ fn exchangeOne(r: Request) Error!Answer {
         defer socket.close(r.io);
         const timeout: Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(r.config.timeout) } };
         const deadline = timeout.toDeadline(r.io);
-        socket.sendTimeout(r.io, &server, q, deadline) catch |err| {
+        sendQuery(r.io, socket, &server, q, deadline) catch |err| {
             if (err == error.Canceled) return error.Canceled;
             continue;
         };
         var reply: [1232]u8 = undefined;
         while (true) {
-            const message = socket.receiveTimeout(r.io, &reply, deadline) catch |err| {
+            const message = receiveReply(r.io, socket, &reply, deadline) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
                 break;
             };
@@ -242,6 +243,21 @@ fn exchangeOne(r: Request) Error!Answer {
         }
     };
     return error.NameNotResolved;
+}
+
+fn sendQuery(io: Io, socket: net.Socket, server: *const net.IpAddress, packet: []const u8, deadline: Io.Timeout) Error!void {
+    var message: net.OutgoingMessage = .{ .address = server, .data_ptr = packet.ptr, .data_len = packet.len };
+    const result = timed.operate(io, .{ .net_send = .{ .socket_handle = socket.handle, .messages = (&message)[0..1], .flags = .{} } }, deadline) catch |err|
+        return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
+    if (result.net_send[0] != null or result.net_send[1] != 1 or message.data_len != packet.len) return error.NameNotResolved;
+}
+
+fn receiveReply(io: Io, socket: net.Socket, buffer: []u8, deadline: Io.Timeout) Error!net.IncomingMessage {
+    var message: net.IncomingMessage = .init;
+    const result = timed.operate(io, .{ .net_receive = .{ .socket_handle = socket.handle, .message_buffer = (&message)[0..1], .data_buffer = buffer, .flags = .{} } }, deadline) catch |err|
+        return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
+    if (result.net_receive[0] != null or result.net_receive[1] != 1) return error.NameNotResolved;
+    return message;
 }
 
 fn tcp(r: Request, server: net.IpAddress, q: []const u8, deadline: Io.Timeout) Error!Answer {
@@ -287,7 +303,7 @@ fn readAll(io: Io, socket: net.Socket.Handle, bytes: []u8, deadline: Io.Timeout)
     var n: usize = 0;
     while (n < bytes.len) {
         var data = [_][]u8{bytes[n..]};
-        const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
+        const result = timed.operate(io, .{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
         const got = result.net_read catch return error.NameNotResolved;
         if (got.data_len == 0) return error.NameNotResolved;
         n += got.data_len;

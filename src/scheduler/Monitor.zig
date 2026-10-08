@@ -1,16 +1,16 @@
 //! The monitor: one thread that samples the processors. A worker that has
 //! sat in a blocking call (`Scheduler.enterBlocking`) for `handoff_after`
 //! loses its processor to a spare thread, so the tasks queued there and the
-//! loop's completions go on. A
-//! task that has held its processor for `report_after` without switching
+//! loop's completions go on. A task that has held its processor for
+//! `report_after` without switching
 //! out is recorded as a stall: where it was started, and for how long.
 //!
 //! The samples cost the processors two stores per task switch (`passes`,
 //! `site`) and nothing else: the monitor reads its own clock. It samples
 //! every 20 µs while a worker sits in a blocking call or one task holds a
 //! processor across samples, backing off to 10 ms while tasks come and go,
-//! and parks when every processor
-//! waits in its kernel. A blocking call that begins while it sleeps long
+//! and parks when every processor waits in its kernel. A blocking call
+//! that begins while it sleeps long
 //! wakes it.
 const Monitor = @This();
 

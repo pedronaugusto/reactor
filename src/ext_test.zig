@@ -279,8 +279,11 @@ test "Windows: a Wake and an event wait as objects, and a job with no process ha
     const io = testing.io;
     var wake = try reactor.Wake.init(io);
     defer wake.deinit(io);
+    const win32 = @import("sys/win32.zig");
+    const blocker = win32.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.SystemResources;
+    defer std.os.windows.CloseHandle(blocker);
     wake.signal();
-    try testing.expectEqual(@as(usize, 1), try reactor.waitAny(io, &.{ .{ .object = std.os.windows.GetCurrentThread() }, .{ .wake = &wake } }, ms(1000)));
+    try testing.expectEqual(@as(usize, 1), try reactor.waitAny(io, &.{ .{ .object = blocker }, .{ .wake = &wake } }, ms(1000)));
     const handle = CreateJobObjectW(null, null) orelse return error.SkipZigTest;
     defer std.os.windows.CloseHandle(handle);
     var job = try reactor.Job.attach(io, handle);

@@ -172,6 +172,38 @@ test "a family asked for is kept even where the resolver answers both" {
 
 // Deadlines
 
+test "a timed read over an Io without concurrent batches drains its fallback" {
+    const BatchesUnavailable = shakedown.Layer(u8, .{
+        .batchAwaitConcurrent = struct {
+            fn awaitBatch(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+                return error.ConcurrencyUnavailable;
+            }
+        }.awaitBatch,
+    });
+    const base = testing.io;
+    var layer: BatchesUnavailable = .init(base, 0);
+    const io = layer.io();
+    var listener = try (IpAddress{ .ip4 = .loopback(0) }).listen(base, .{});
+    defer listener.deinit(base);
+    const client = try listener.socket.address.connect(base, .{ .mode = .stream });
+    defer client.close(base);
+    const server = try listener.accept(base);
+    defer server.close(base);
+    var out = [_][]const u8{"bounded"};
+    _ = try (try base.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &out } })).net_write;
+    var buffer: [32]u8 = @splat(0xa5);
+    var data = [_][]u8{&buffer};
+    const read: Io.Operation = .{ .net_read = .{ .socket_handle = server.socket.handle, .data = &data } };
+    const timed = @import("ops/timeout.zig");
+    const received = try (try timed.operate(io, read, ms(5000))).net_read;
+    try testing.expectEqualStrings("bounded", buffer[0..received.data_len]);
+    try testing.expectError(error.Timeout, timed.operate(io, read, ms(10)));
+    // Every read ended before the borrowed buffer can be overwritten.
+    @memset(&buffer, 0xa5);
+    try base.sleep(.fromMilliseconds(20), .awake);
+    for (buffer) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
+}
+
 test "a deadline passed aborts the operation's socket, and one disarmed in time does not" {
     const io = testing.io;
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });

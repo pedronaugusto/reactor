@@ -72,6 +72,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ops/lane_call.zig",
         "src/ops/readiness.zig",
         "src/ops/resolve.zig",
+        "src/ops/timeout.zig",
         "src/ops/resolve/order.zig",
         "src/ops/lookup/windows.zig",
         "src/ops/Lookup.zig",
