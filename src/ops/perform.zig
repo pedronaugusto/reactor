@@ -157,6 +157,73 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (w.timed_out) return error.Timeout;
 }
 
+/// Runs an accept on its listener's one processor. Persistent accept queues
+/// cannot follow a task when it is stolen by another worker.
+pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
+    if (Scheduler.processor() == p) return run(s, o, .{});
+    const t = Scheduler.current().?;
+    const previous = t.operation;
+    t.operation = .accept;
+    defer t.operation = previous;
+    var request: RemoteAccept = .{ .task = t, .processor = p, .scheduler = s, .op = o };
+    try t.enterWait(&request.hook);
+    Scheduler.park(.{ .func = RemoteAccept.publish, .context = &request });
+    t.leaveWait();
+    if (request.failure) |err| {
+        if (err == error.Canceled) return t.acknowledge();
+        return err;
+    }
+    if (canceledResult(o) and request.requested) return t.acknowledge();
+}
+
+const RemoteAccept = struct {
+    errand: Scheduler.Errand = .{ .run = submit },
+    hook: Task.Hook = .{ .cancel = cancel },
+    task: *Task,
+    processor: *Processor,
+    scheduler: *Scheduler,
+    op: *Loop.Op,
+    submitted: bool = false,
+    requested: bool = false,
+    failure: ?Error = null,
+
+    fn publish(raw: *anyopaque, _: *Task) void {
+        const request: *RemoteAccept = @ptrCast(@alignCast(raw)); // safe: accept parks this request
+        request.processor.send(&request.errand);
+    }
+
+    fn submit(e: *Scheduler.Errand, p: *Processor) void {
+        const request: *RemoteAccept = @alignCast(@fieldParentPtr("errand", e)); // safe: embedded errand
+        if (request.requested) {
+            request.failure = error.Canceled;
+            return request.scheduler.ready(request.task, .completed);
+        }
+        const o = request.op;
+        o.callback = done;
+        o.user_data = @intFromPtr(request); // safe: retained until the completion callback
+        p.hold(o.kind.accept);
+        p.loop.submit(o) catch {
+            p.release(o.kind.accept);
+            request.failure = error.SystemResources;
+            return request.scheduler.ready(request.task, .completed);
+        };
+        request.submitted = true;
+    }
+
+    fn done(_: *Loop, o: *Loop.Op) void {
+        const request: *RemoteAccept = @ptrFromInt(o.user_data); // safe: submit retained the request
+        request.processor.release(o.kind.accept);
+        request.scheduler.ready(request.task, .completed);
+    }
+
+    fn cancel(h: *Task.Hook, t: *Task) void {
+        const request: *RemoteAccept = @alignCast(@fieldParentPtr("hook", h)); // safe: embedded hook
+        if (Scheduler.processor() != request.processor) return request.processor.pushCancel(t);
+        request.requested = true;
+        if (request.submitted) request.processor.loop.cancel(request.op);
+    }
+};
+
 /// The descriptor an operation waits on in the kernel, which a close
 /// elsewhere must end it on.
 pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {

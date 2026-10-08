@@ -13,6 +13,9 @@ const IpAddress = Io.net.IpAddress;
 const reactor = @import("reactor.zig");
 const Runtime = reactor.Runtime;
 const fiber = @import("fiber.zig");
+const Scheduler = @import("Scheduler.zig");
+const Task = @import("scheduler/Task.zig");
+const native = @import("ext/native.zig");
 const shakedown = @import("shakedown");
 
 fn runtime(r: *Runtime, workers: u16) !void {
@@ -174,7 +177,6 @@ test "native provided buffers survive a receive timeout and return after detach"
 
 test "closing a file removes an idle registration on another ring" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const Scheduler = @import("Scheduler.zig");
     const Cached = struct {
         const Self = @This();
         errand: Scheduler.Errand = .{ .run = run },
@@ -423,4 +425,44 @@ test "a socket close reports EOF while unrelated reads remain pending" {
     pair[1].close(io);
     client_open = false;
     try testing.expectEqual(@as(usize, 0), try peer.await(io));
+}
+
+fn acceptOnProcessor(io: Io, server: *Io.net.Server, owner: *Scheduler.Processor, done: *Io.Event) !void {
+    const Move = struct {
+        fn run(raw: *anyopaque, task: *Task) void {
+            const target: *Scheduler.Processor = @ptrCast(@alignCast(raw)); // safe: the target passed to park
+            task.processor = target;
+            target.pushRemote(task);
+        }
+    };
+    const task = Scheduler.current().?;
+    task.pins += 1;
+    defer task.pins -= 1;
+    if (Scheduler.processor() != owner) Scheduler.park(.{ .func = Move.run, .context = owner });
+    const stream = try server.accept(io);
+    stream.close(io);
+    done.set(io);
+}
+
+test "a listener's queued connection follows a consumer on another processor" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    var server = try (IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+    defer server.deinit(io);
+    const first_client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer first_client.close(io);
+    const first = try server.accept(io);
+    first.close(io);
+    const second_client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer second_client.close(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    var done: Io.Event = .unset;
+    const core = native.runtimeOf(io).?;
+    var accepting = try io.concurrent(acceptOnProcessor, .{ io, &server, &core.processors[1], &done });
+    defer _ = accepting.cancel(io) catch {};
+    try done.waitTimeout(io, ms(100));
+    try accepting.await(io);
 }
