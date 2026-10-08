@@ -1,9 +1,8 @@
 //! Running a call where it holds up no worker: on a lane, the task parked
-//! meanwhile; inline when the runtime has no lanes, the lane's queue is
-//! full, or the caller is a thread outside the runtime; on the worker inside
-//! a blocking bracket, which the monitor rescues by handing the processor
-//! on; or "borrowed": std's code run on the worker itself, for calls that
-//! never block.
+//! meanwhile; inline when the runtime has no lanes or the caller is a
+//! thread outside the runtime; on the worker inside a blocking bracket,
+//! which the monitor can rescue by handing on the processor; or "borrowed": std's code run on the worker
+//! itself, for calls that never block.
 const std = @import("std");
 const Io = std.Io;
 
@@ -35,6 +34,9 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     const R = ReturnOf(@TypeOf(func));
     const t = Scheduler.current() orelse return direct(lanes, lane, func, args);
     if (lanes.inlined()) return direct(lanes, lane, func, args);
+    const previous_lane = t.lane;
+    t.lane = lane;
+    defer t.lane = previous_lane;
     const Call = struct {
         const Self = @This();
 
@@ -45,7 +47,6 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
         task: *Task,
         scheduler: *Scheduler,
         lanes: *Lanes,
-        refused: bool = false,
         hook: Task.Hook = .{ .cancel = cancelHook },
 
         fn run(job: *Lanes.Job) void {
@@ -66,10 +67,9 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
 
         /// Off the task's stack: hand the call to the lane.
         fn submit(context: *anyopaque, task: *Task) void {
+            _ = task;
             const c: *Self = @ptrCast(@alignCast(context)); // safe: `call` passed its `Call`
-            if (c.lanes.submit(&c.job)) return;
-            c.refused = true;
-            c.scheduler.ready(task, .completed);
+            c.lanes.submit(&c.job);
         }
     };
     var c: Call = .{
@@ -83,7 +83,6 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     if (comptime cancelable(R)) t.enterWait(&c.hook) catch return error.Canceled;
     Scheduler.park(.{ .func = Call.submit, .context = &c });
     t.leaveWait();
-    if (c.refused) return direct(lanes, lane, func, args);
     // The executor lets go of the job's group just after the call returns.
     while (c.job.held()) Scheduler.yield();
     if (comptime cancelable(R)) {
@@ -104,8 +103,14 @@ fn direct(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnO
 /// on a disk but never call back into their own `Io`. Null when no bracket
 /// can be had here (no handoff, the home processor): nothing ran.
 pub fn onWorker(func: anytype, args: anytype) ?ReturnOf(@TypeOf(func)) {
+    const R = ReturnOf(@TypeOf(func));
+    // Once the bracket is published, a spare may own the processor. Read
+    // the task's cancel state first, then call std without touching it.
+    if (comptime cancelable(R)) {
+        if (Scheduler.current()) |t| if (t.takeCancel()) return @as(R, error.Canceled);
+    }
     var b = Scheduler.enterBlocking() orelse return null;
-    const result = borrow(func, args);
+    const result = @call(.auto, func, args);
     Scheduler.leaveBlocking(&b);
     return result;
 }

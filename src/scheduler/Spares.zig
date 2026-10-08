@@ -6,6 +6,7 @@
 //! with no allocator.
 const Spares = @This();
 
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -50,7 +51,7 @@ pub fn reserve(sp: *Spares, body: anytype, context: anytype) bool {
     defer sp.lock.unlock(system());
     if (sp.idle + sp.starting > sp.queued) return true;
     if (sp.started == sp.threads.len) return false;
-    const thread = std.Thread.spawn(.{ .stack_size = 512 << 10 }, body, .{ context, null }) catch return false;
+    const thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, body, .{ context, null }) catch return false;
     sp.threads[sp.started] = thread;
     sp.started += 1;
     sp.starting += 1;

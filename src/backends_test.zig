@@ -482,3 +482,27 @@ test "a descriptor closed outside the loop and announced with closing is waited 
         try l.reap(&out)[0].result.wait;
     }
 }
+
+test "a recycled Wake descriptor remains registered on readiness backends" {
+    const reactor = @import("reactor.zig");
+    for (readiness) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        const io = r.io();
+        for (0..32) |_| {
+            var wake = try reactor.Wake.init(io);
+            defer wake.deinit(io);
+            // Register an unready descriptor before another task signals it.
+            var sender = try io.concurrent(struct {
+                fn send(i: Io, w: *reactor.Wake) !void {
+                    try i.sleep(.fromMilliseconds(1), .awake);
+                    w.signal();
+                }
+            }.send, .{ io, &wake });
+            defer sender.cancel(io) catch {};
+            try reactor.wait(io, .{ .wake = &wake }, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } });
+            try sender.await(io);
+        }
+    }
+}

@@ -9,8 +9,10 @@
 //! A call is a `Job` in the waiting task's frame: started as a member of
 //! its own `Io.Group` on the lane, so cancelling it is std's
 //! `Group.cancel`, run as a second short job on the lane. A lane runs at
-//! most its cap of calls at once and queues the rest, oldest first.
-//! Closures come from a slot pool reserved at `init`.
+//! most its cap of calls at once and queues the rest, oldest first; the
+//! queue is the waiting tasks' own frames, so it needs no bound of its own
+//! (`max_tasks` is one), and a call never runs on a worker because its
+//! lane was busy. Closures come from a slot pool reserved at `init`.
 const Lanes = @This();
 
 const std = @import("std");
@@ -36,8 +38,8 @@ pub const Owned = struct {
     wait: u16 = 32,
     /// null: max(4, CPUs), at most 64.
     general: ?u16 = null,
-    /// Calls queued per lane before the lane refuses more.
-    queue: u32 = 1024,
+    /// Maximum allocation made by std inside one call; blocks are reserved at init.
+    scratch_bytes: u32 = 256 << 10,
 };
 
 /// What every Threaded instance needs from the runtime's options.
@@ -73,7 +75,6 @@ pub const Stats = struct { queued: u32, running: u32, threads: u16, @"inline": u
 
 const State = struct {
     cap: u16,
-    queue_limit: u32,
     running: u16 = 0,
     head: ?*Job = null,
     tail: ?*Job = null,
@@ -90,6 +91,7 @@ injected: Io = undefined,
 borrowed: Io.Threaded,
 states: [count]State,
 pool: SlotPool,
+scratch: SlotPool,
 /// Where cancels of calls run; never awaited until `deinit`.
 cancels: Io.Group = .init,
 
@@ -97,23 +99,32 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
     const caps = capsOf(config);
     var total: u32 = 0;
     for (caps) |c| total += c;
+    var pool = try SlotPool.init(gpa, 4 * total + 16);
+    errdefer pool.deinit(gpa);
+    const bytes = switch (config) {
+        .owned => |o| o.scratch_bytes,
+        else => 256 << 10,
+    };
+    const scratch = try SlotPool.initSized(gpa, total + 16, bytes);
     l.* = .{
         .mode = config,
         .borrowed = .init(.failing, .{ .async_limit = .nothing, .concurrent_limit = .nothing, .environ = env.environ, .argv0 = env.argv0 }),
         .states = undefined,
-        // Each running call and each cancel of one holds a closure.
-        .pool = try .init(gpa, 2 * total + 8),
+        // A closure for each running call, each cancel of one, and each
+        // call that has ended but whose thread has not yet let go of it.
+        .pool = pool,
+        .scratch = scratch,
     };
-    const queue_limit: u32 = switch (config) {
-        .owned => |o| o.queue,
-        else => std.math.maxInt(u32),
-    };
-    for (&l.states, caps) |*s, c| s.* = .{ .cap = c, .queue_limit = queue_limit };
+    l.borrowed.allocator = l.allocator();
+    for (&l.states, caps) |*s, c| s.* = .{ .cap = c };
     switch (config) {
-        .owned => for (&l.threaded, caps) |*t, c| {
-            t.* = .init(l.pool.allocator(), .{
+        // The lane's cap bounds its calls; std's own limit would also count
+        // a call that has ended while its thread is still leaving, and
+        // refuse the next call for it.
+        .owned => for (&l.threaded) |*t| {
+            t.* = .init(l.allocator(), .{
                 .async_limit = .nothing,
-                .concurrent_limit = .limited(2 * @as(usize, c) + 2),
+                .concurrent_limit = .unlimited,
                 .environ = env.environ,
                 .argv0 = env.argv0,
             });
@@ -135,6 +146,7 @@ pub fn deinit(l: *Lanes, gpa: Allocator) void {
     }
     l.borrowed.deinit();
     l.pool.deinit(gpa);
+    l.scratch.deinit(gpa);
     l.* = undefined;
 }
 
@@ -173,39 +185,46 @@ pub fn countInline(l: *Lanes, lane: Lane) void {
     _ = l.states[@backingInt(lane)].inlined.fetchAdd(1, .monotonic);
 }
 
-/// Starts `job` on its lane, or queues it behind the lane's cap. False
-/// when the lane's queue is full: the caller runs it inline.
-pub fn submit(l: *Lanes, job: *Job) bool {
+/// Starts `job` on its lane, or queues it behind the lane's cap.
+pub fn submit(l: *Lanes, job: *Job) void {
     const s = &l.states[@backingInt(job.lane)];
     s.lock.lockUncancelable(system());
     if (s.running < s.cap) {
         s.running += 1;
         s.lock.unlock(system());
-        l.start(job);
-        return true;
-    }
-    if (s.queued >= s.queue_limit) {
-        s.lock.unlock(system());
-        return false;
+        if (!l.start(job)) l.runHere(job);
+        return;
     }
     job.next = null;
     if (s.tail) |t| t.next = job else s.head = job;
     s.tail = job;
     s.queued += 1;
     s.lock.unlock(system());
+}
+
+/// `job` as a member of its own group on the lane's executor; false when
+/// the executor could take no more.
+fn start(l: *Lanes, job: *Job) bool {
+    const io = l.executor(job.lane);
+    const context: Context = .{ .lanes = l, .job = job };
+    io.vtable.groupConcurrent(io.userdata, &job.group, std.mem.asBytes(&context), .of(Context), runEntry) catch return false;
     return true;
 }
 
-fn start(l: *Lanes, job: *Job) void {
-    const io = l.executor(job.lane);
-    const context: Context = .{ .lanes = l, .job = job };
-    io.vtable.groupConcurrent(io.userdata, &job.group, std.mem.asBytes(&context), .of(Context), runEntry) catch {
-        // No thread could take it: run it here rather than fail the call.
-        l.countInline(job.lane);
+/// A call the executor could take no thread for, made on this thread
+/// rather than failed (counted), and after it the lane's queued calls, one
+/// after another, until one can be started on a thread of its own.
+fn runHere(l: *Lanes, first: *Job) void {
+    var job = first;
+    while (true) {
+        const lane = job.lane;
+        l.countInline(lane);
         job.run(job);
-        l.next(job.lane);
+        const following = l.next(lane);
         finish(job);
-    };
+        job = following orelse return;
+        if (l.start(job)) return;
+    }
 }
 
 const Context = struct { lanes: *Lanes, job: *Job };
@@ -216,24 +235,25 @@ fn runEntry(context: *const anyopaque) void {
     const job = c.job;
     const lane = job.lane;
     job.run(job);
-    l.next(lane);
+    const following = l.next(lane);
     finish(job);
+    if (following) |f| if (!l.start(f)) l.runHere(f);
 }
 
-/// A call on `lane` ended: start the oldest queued one, or free the slot.
-fn next(l: *Lanes, lane: Lane) void {
+/// A call on `lane` ended: the oldest queued one takes its slot, or the
+/// slot is freed.
+fn next(l: *Lanes, lane: Lane) ?*Job {
     const s = &l.states[@backingInt(lane)];
     s.lock.lockUncancelable(system());
-    const queued = s.head;
-    if (queued) |job| {
-        s.head = job.next;
-        if (s.head == null) s.tail = null;
-        s.queued -= 1;
-    } else {
+    defer s.lock.unlock(system());
+    const job = s.head orelse {
         s.running -= 1;
-    }
-    s.lock.unlock(system());
-    if (queued) |job| l.start(job);
+        return null;
+    };
+    s.head = job.next;
+    if (s.head == null) s.tail = null;
+    s.queued -= 1;
+    return job;
 }
 
 fn finish(job: *Job) void {
@@ -292,4 +312,24 @@ pub fn stats(l: *Lanes, lane: Lane) Stats {
 
 fn system() Io {
     return Io.Threaded.global_single_threaded.io();
+}
+
+/// Both allocation classes remain fixed after init: closures use small slots;
+/// std's temporary arenas use larger blocks, freed when the call returns.
+fn allocator(l: *Lanes) Allocator {
+    return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
+}
+
+fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    const a = if (len <= SlotPool.slot_len) l.pool.allocator() else l.scratch.allocator();
+    return a.rawAlloc(len, alignment, ret_addr);
+}
+
+fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    const address = @intFromPtr(memory.ptr); // safe: only compares the address with the reserved pools
+    const first = @intFromPtr(l.pool.buffer.ptr); // safe: only compares the pool's address
+    const a = if (address >= first and address < first + l.pool.buffer.len) l.pool.allocator() else l.scratch.allocator();
+    a.rawFree(memory, alignment, ret_addr);
 }

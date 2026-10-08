@@ -11,10 +11,14 @@
 //! handles' bindings.
 const builtin = @import("builtin");
 const std = @import("std");
+const getaddrinfo = @import("../sys/getaddrinfo.zig");
+const stub = @import("../ops/resolve.zig");
+const lookup_windows = @import("../ops/lookup/windows.zig");
 const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
 
+const child_ops = @import("child.zig");
 const Core = @import("Core.zig");
 const Lanes = @import("../Lanes.zig");
 const Loop = @import("../Loop.zig");
@@ -93,8 +97,8 @@ pub fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.
         // goes through the port; else std's call, which completes at once
         // or waits on the handle.
         .device_io_control => |d| if (!(iocp(r) and deviceOverlapped(d))) return borrowed(r, "operate", .{operation}),
-        .file_read_streaming => |f| if (fileOnLane(r, f.file)) return onLane(r, .general, "operate", .{operation}),
-        .file_write_streaming => |f| if (fileOnLane(r, f.file)) return onLane(r, .general, "operate", .{operation}),
+        .file_read_streaming => |f| if (fileOnLane(r, f.file)) return perFiles(r, "operate", .{operation}),
+        .file_write_streaming => |f| if (fileOnLane(r, f.file)) return perFiles(r, "operate", .{operation}),
         else => {},
     }
     var o: Loop.Op = .{ .kind = .{ .io = operation } };
@@ -115,7 +119,7 @@ fn deviceOverlapped(d: Io.Operation.DeviceIoControl) bool {
 /// `files = .pool`; on IOCP, those on a handle opened for synchronous
 /// calls, which no port can finish.
 fn fileOnLane(r: *Core, file: Io.File) bool {
-    return r.options.files == .pool or (iocp(r) and !file.flags.nonblocking);
+    return !native(r) or r.options.files == .pool or (iocp(r) and !file.flags.nonblocking);
 }
 
 /// The result of an operation the kernel's queue had no room for.
@@ -235,6 +239,7 @@ pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
         for (files) |f| closeBound(f.handle);
         return;
     }
+    if (native(r)) for (files) |f| abortElsewhere(r, f.handle);
     if (!native(r) or Scheduler.processor() == null) {
         for (files) |f| Loop.closing(f.handle);
         return borrowed(r, "fileClose", .{files});
@@ -265,13 +270,14 @@ pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
         for (sockets) |s| closeBound(s.handle);
         return;
     }
+    if (native(r)) for (sockets) |s| abortElsewhere(r, s.handle);
     if (!native(r) or Scheduler.processor() == null) {
         for (sockets) |s| Loop.closing(s.handle);
         return borrowed(r, "netClose", .{sockets});
     }
     for (sockets) |s| {
         abortElsewhere(r, s.handle);
-        closeOnRing(r, s.handle);
+        if (Scheduler.processor() != null) closeOnRing(r, s.handle) else borrowed(r, "netClose", .{&[_]net.Socket{s}});
     }
 }
 
@@ -280,12 +286,20 @@ pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
 /// its operations on `fd` first, and the close waits until it has, so the
 /// number cannot be reused under a cancel still on its way.
 fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
-    const me = Scheduler.processor().?;
-    const t = me.current.?;
+    const me = Scheduler.processor();
+    const t = Scheduler.current();
     for (r.processors) |*other| {
         if (other == me or !r.scheduler.holds(other.index, fd)) continue;
         var a: Abort = .{ .op = .{ .kind = .{ .abort = fd } }, .task = t, .scheduler = &r.scheduler, .target = other };
-        Scheduler.park(.{ .func = Abort.send, .context = &a });
+        if (t != null) {
+            Scheduler.park(.{ .func = Abort.send, .context = &a });
+        } else {
+            other.send(&a.errand);
+            const system = Scheduler.system();
+            while (a.finished.load(.acquire) != 2) {
+                if (a.finished.load(.acquire) == 0) system.futexWaitUncancelable(u32, &a.finished.raw, 0) else std.atomic.spinLoopHint();
+            }
+        }
     }
 }
 
@@ -293,7 +307,8 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
 const Abort = struct {
     errand: Scheduler.Errand = .{ .run = start },
     op: Loop.Op,
-    task: *Task,
+    task: ?*Task,
+    finished: std.atomic.Value(u32) = .init(0),
     scheduler: *Scheduler,
     target: *Processor = undefined,
 
@@ -308,13 +323,20 @@ const Abort = struct {
         const a: *Abort = @alignCast(@fieldParentPtr("errand", e)); // safe: the field belongs to this record
         a.op.callback = done;
         a.op.user_data = @intFromPtr(a); // safe: read back by `done` while the closing task waits
-        p.loop.submit(&a.op) catch a.scheduler.ready(a.task, .completed);
+        p.loop.submit(&a.op) catch a.finish();
     }
 
     fn done(l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const a: *Abort = @ptrFromInt(o.user_data); // safe: `start` stored it
-        a.scheduler.ready(a.task, .completed);
+        const a: *Abort = @ptrFromInt(o.user_data); // safe: `run` stored it
+        a.finish();
+    }
+
+    fn finish(a: *Abort) void {
+        if (a.task) |task| return a.scheduler.ready(task, .completed);
+        a.finished.store(1, .release);
+        Scheduler.system().futexWake(u32, &a.finished.raw, 1);
+        a.finished.store(2, .release);
     }
 };
 
@@ -325,7 +347,7 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
     // a stream socket there, and its connections are opened as stream
     // sockets of the peer's family.
     var o: Loop.Op = .{ .kind = .{ .accept = server } };
-    run(r, &o, .{}) catch |err| return switch (err) {
+    runAccept(r, &o) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
@@ -393,6 +415,7 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
 
 pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
     const r = Core.of(userdata);
+    if (builtin.os.tag == .linux) return child_ops.childWait(userdata, child);
     if (!iocp(r)) return onLane(r, .wait, "childWait", .{child});
     if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
     var o: Loop.Op = .{ .kind = .{ .wait = .{ .object = child.id.? } } };
@@ -437,27 +460,24 @@ const Kept = struct {
 /// On the lookup lane: std's lookup into a private queue, drained here by
 /// a second call, keeping at most `max_kept` addresses.
 fn lookupOnLane(lane_io: Io, host_name: net.HostName, options: net.HostName.LookupOptions, kept: *Kept) net.HostName.LookupError!void {
-    var buffer: [16]net.HostName.LookupResult = undefined;
-    var queue: Io.Queue(net.HostName.LookupResult) = .init(&buffer);
-    var future = lane_io.concurrent(net.HostName.lookup, .{ host_name, lane_io, &queue, options }) catch {
-        // No second thread: a queue big enough for what std promises.
-        var big: [256]net.HostName.LookupResult = undefined;
-        var q: Io.Queue(net.HostName.LookupResult) = .init(&big);
-        try net.HostName.lookup(host_name, lane_io, &q, options);
-        while (q.getOneUncancelable(lane_io)) |item| keep(kept, item) else |_| {}
-        return;
+    var addresses: [max_kept]net.IpAddress = undefined;
+    var canonical: stub.Name = .{};
+    const n = if (builtin.os.tag == .windows) windows: {
+        const result = lookup_windows.resolve(lane_io, host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch |err| return if (err == error.Canceled) error.Canceled else error.UnknownHostName;
+        kept.canonical = result.canonical;
+        break :windows result.count;
+    } else if (getaddrinfo.available)
+        (getaddrinfo.lookup(host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch return error.UnknownHostName).addresses.len
+    else
+        stub.lookupNamed(lane_io, host_name, options.port, options.family, &addresses, &canonical) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.UnknownHostName,
+        };
+    if (canonical.len != 0) if (options.canonical_name_buffer) |buffer| {
+        @memcpy(buffer[0..canonical.len], canonical.bytes[0..canonical.len]);
+        kept.canonical = net.HostName.init(buffer[0..canonical.len]) catch return error.UnknownHostName;
     };
-    while (queue.getOne(lane_io)) |item| keep(kept, item) else |err| switch (err) {
-        error.Closed => {},
-        error.Canceled => {
-            // The lookup's own outcome no longer matters: the caller left.
-            future.cancel(lane_io) catch |outcome| switch (outcome) {
-                else => {},
-            };
-            return error.Canceled;
-        },
-    }
-    return future.await(lane_io);
+    for (addresses[0..n]) |address| keep(kept, .{ .address = address });
 }
 
 fn keep(kept: *Kept, item: net.HostName.LookupResult) void {
@@ -475,7 +495,14 @@ pub fn netLookup(userdata: ?*anyopaque, host_name: net.HostName, resolved: *Io.Q
     const io = r.io();
     defer resolved.close(io);
     var kept: Kept = .{};
-    try lane_call.call(&r.scheduler, &r.lanes, .lookup, &lookupOnLane, .{ r.lanes.executor(.lookup), host_name, options, &kept });
+    if (builtin.os.tag == .windows or !getaddrinfo.available) {
+        try lookupOnLane(io, host_name, options, &kept);
+    } else {
+        var addresses: [max_kept]net.IpAddress = undefined;
+        const result = try r.lookup.resolve(&r.scheduler, &r.lanes, getaddrinfo.lookup, host_name, options, &addresses);
+        kept.canonical = result.canonical;
+        for (addresses[0..result.count]) |address| keep(&kept, .{ .address = address });
+    }
     // Room for the addresses but one, and the canonical name: never more
     // than the queue holds, so a caller that drains it later loses nothing
     // it had room for, and one that never drains it never waits.
@@ -490,4 +517,12 @@ pub fn netLookup(userdata: ?*anyopaque, host_name: net.HostName, resolved: *Io.Q
         error.Closed => unreachable, // unreachable: only this call closes it
         error.Canceled => return error.Canceled,
     };
+}
+
+fn runAccept(r: *Core, o: *Loop.Op) perform.Error!void {
+    if (Scheduler.processor()) |p| {
+        const owner = r.scheduler.listenerOwner(o.kind.accept, p);
+        return perform.accept(&r.scheduler, owner, o);
+    }
+    return run(r, o, .{});
 }

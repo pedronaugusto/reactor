@@ -52,7 +52,7 @@ pub const Owner = enum {
 };
 
 pub const UringFeatures = packed struct {
-    multishot_accept: bool = false,
+    accept_ahead: bool = false,
     fixed_files: bool = false,
     defer_taskrun: bool = false,
     msg_ring: bool = false,
@@ -140,12 +140,12 @@ const List = struct {
 pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
     const native: backends.Backend = switch (options.backend) {
         .auto => if (builtin.os.tag == .linux)
-            initUring(options) catch |err| switch (err) {
+            initUring(gpa, options) catch |err| switch (err) {
                 error.BackendUnavailable => try initEpoll(gpa, options),
                 else => |e| return e,
             }
         else if (has_kqueue) try initKqueue(gpa, options) else if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
-        .io_uring => try initUring(options),
+        .io_uring => try initUring(gpa, options),
         .epoll => try initEpoll(gpa, options),
         .kqueue => try initKqueue(gpa, options),
         .iocp => if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
@@ -161,11 +161,11 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
 
 const has_kqueue = backends.Kqueue != void;
 
-fn initUring(options: Options) InitError!backends.Backend {
+fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
     if (builtin.os.tag != .linux) return error.BackendUnavailable;
     const entries = options.submission_entries orelse ringEntries(options.max_ops);
     return .{
-        .io_uring = backends.Uring.init(.{
+        .io_uring = backends.Uring.init(gpa, .{
             .entries = entries,
             // The kernel takes at most 65,536; operations beyond the
             // queue's size wait in the kernel (no completion is dropped).
@@ -176,6 +176,7 @@ fn initUring(options: Options) InitError!backends.Backend {
             error.BackendUnavailable => error.BackendUnavailable,
             error.SystemResources => error.SystemResources,
             error.Unexpected => error.Unexpected,
+            error.OutOfMemory => error.OutOfMemory,
         },
     };
 }
@@ -386,7 +387,8 @@ pub fn completionKey() usize {
 }
 
 /// Windows, with `Options.port`: delivers the completions in `entries`, the
-/// ones the host took from its port that carry `completionKey()`, as
+/// including Job notifications. Pass every entry from the shared port;
+/// entries belonging to the host are ignored. Delivers them as
 /// `run` would (callbacks run, or queued for `reap`). Returns how many.
 pub fn complete(l: *Loop, entries: []const PortEntry) u32 {
     l.assertOwner();
@@ -484,6 +486,10 @@ fn deliver(l: *Loop, o: *Op) void {
 const Counted = struct {
     loop: *Loop,
     count: u32 = 0,
+
+    pub fn notified(c: *Counted) void {
+        c.count += 1;
+    }
 
     pub fn complete(c: *Counted, o: *Op) void {
         c.count += 1;

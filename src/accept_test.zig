@@ -1,0 +1,179 @@
+//! Listener lifetime and bounded accept-ahead requests on a real ring.
+const builtin = @import("builtin");
+const std = @import("std");
+const testing = std.testing;
+const Io = std.Io;
+const Runtime = @import("Runtime.zig");
+const Accept = @import("backend/uring/Accept.zig");
+const Loop = @import("Loop.zig");
+
+const Harness = struct {
+    sqe: std.os.linux.io_uring_sqe = undefined,
+    submissions: usize = 0,
+    completed: usize = 0,
+    pub fn entry(h: *Harness) *std.os.linux.io_uring_sqe {
+        h.submissions += 1;
+        return &h.sqe;
+    }
+    pub fn submitSingleAccept(h: *Harness, _: *Loop.Op) void {
+        h.submissions += 1;
+    }
+    pub fn complete(h: *Harness, _: *Loop.Op) void {
+        h.completed += 1;
+    }
+};
+
+test "accept-ahead listener cancellation releases its task before the listener record" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    var h: Harness = .{};
+    var a: Loop.Op = .{ .kind = .{ .accept = 17 } };
+    var b: Loop.Op = .{ .kind = .{ .accept = 17 } };
+    try testing.expect(table.submit(&h, &a));
+    try testing.expect(table.submit(&h, &b));
+    try testing.expectEqual(@as(usize, 1), h.submissions);
+    try testing.expect(table.cancel(&a));
+    try testing.expect(table.deliver(&h));
+    try testing.expectEqual(@as(usize, 1), h.completed);
+    try testing.expectError(error.Canceled, a.result.accept);
+    table.close(&h, 17);
+    const record = &table.records[1];
+    try testing.expect(record.closing);
+    const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
+    for (&record.slots) |*slot| if (slot.active) table.complete(&h, slot, cqe, &h);
+    try testing.expectEqual(@as(usize, 2), h.completed);
+    try testing.expectError(error.SocketNotListening, b.result.accept);
+    try testing.expectEqual(@as(i32, -1), record.fd);
+}
+
+fn accept(io: Io, server: *Io.net.Server) !Io.net.Stream {
+    return server.accept(io);
+}
+
+test "closing one listener keeps a colliding listener reachable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    var h: Harness = .{};
+    var a: Loop.Op = .{ .kind = .{ .accept = 17 } };
+    var b: Loop.Op = .{ .kind = .{ .accept = 19 } };
+    try testing.expect(table.submit(&h, &a));
+    try testing.expect(table.submit(&h, &b));
+    table.close(&h, 17);
+    const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
+    table.complete(&h, &table.records[1].slots[0], cqe, &h);
+    try testing.expect(table.contains(19));
+    try testing.expect(table.cancel(&b));
+    _ = table.deliver(&h);
+    try testing.expectError(error.Canceled, b.result.accept);
+    table.close(&h, 19);
+    table.complete(&h, &table.records[0].slots[0], cqe, &h);
+}
+
+test "a ring keeps at most eight accepted sockets between accepts" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    const io = runtime.io();
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var first = try io.concurrent(accept, .{ io, &server });
+    var first_live = true;
+    defer if (first_live) {
+        if (first.cancel(io)) |stream| stream.close(io) else |_| {}
+    };
+    try io.sleep(.fromMilliseconds(1), .awake);
+    var clients: [9]Io.net.Stream = undefined;
+    var made: usize = 0;
+    defer for (clients[0..made]) |stream| stream.close(io);
+    for (&clients) |*stream| {
+        stream.* = try server.socket.address.connect(io, .{ .mode = .stream });
+        made += 1;
+    }
+    const outcome = first.await(io);
+    first_live = false;
+    const taken = try outcome;
+    defer taken.close(io);
+    try io.sleep(.fromMilliseconds(1), .awake);
+    const table = &runtime.core.processors[0].loop.backend.io_uring.accepts;
+    try testing.expect(table.enabled);
+    const listener = for (table.records) |*record| {
+        if (record.fd == server.socket.handle) break record;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, Accept.bound), listener.count);
+    for (0..8) |_| {
+        const stream = try server.accept(io);
+        stream.close(io);
+    }
+}
+
+test "accepting a burst keeps every connected peer" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const perform = @import("ops/perform.zig");
+    const Scheduler = @import("Scheduler.zig");
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    const io = runtime.io();
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var first = try io.concurrent(accept, .{ io, &server });
+    defer if (first.cancel(io)) |stream| stream.close(io) else |_| {};
+    runtime.run(.nowait);
+    var clients: [32]Io.net.Stream = undefined;
+    var made: usize = 0;
+    defer for (clients[0..made]) |stream| stream.close(testing.io);
+    // Queue the entire burst before this ring is driven again.
+    for (&clients) |*stream| {
+        stream.* = try server.socket.address.connect(testing.io, .{ .mode = .stream });
+        made += 1;
+    }
+    const accepted = try first.await(io);
+    accepted.close(io);
+    for (1..clients.len) |_| {
+        var op: Loop.Op = .{ .kind = .{ .accept = server.socket.handle } };
+        try perform.run(&runtime.core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }) });
+        const socket = try op.result.accept;
+        socket.close(io);
+    }
+}
+
+test "a reserved listener slot survives an earlier slot being released" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    table.records[0].fd = 4;
+    table.descriptors[0].store(4, .release);
+    try testing.expect(table.reserve(6));
+    table.reset(&table.records[0]);
+    var h: Harness = .{};
+    var o: Loop.Op = .{ .kind = .{ .accept = 6 } };
+    try testing.expect(table.submit(&h, &o));
+    try testing.expectEqual(@as(i32, 6), table.records[1].fd);
+    try testing.expect(table.cancel(&o));
+    _ = table.deliver(&h);
+    table.close(&h, 6);
+    const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
+    table.complete(&h, &table.records[1].slots[0], cqe, &h);
+}
+
+test "closing a listener before its first submit releases its reservation" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    var h: Harness = .{};
+    try testing.expect(table.reserve(17));
+    try testing.expect(table.contains(17));
+    table.close(&h, 17);
+    try testing.expect(!table.contains(17));
+    try testing.expect(table.reserve(19));
+    try testing.expect(table.reserve(21));
+}

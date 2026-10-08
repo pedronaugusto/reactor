@@ -3,6 +3,7 @@
 //! its public face; the vtable's slots reach it through `of`.
 const Core = @This();
 
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -14,10 +15,13 @@ const Stacks = @import("../fiber/Stacks.zig");
 const memory = @import("../sys/memory.zig");
 const clock = @import("../clock.zig");
 const Lanes = @import("../Lanes.zig");
+const Lookup = @import("../ops/Lookup.zig");
 const Loop = @import("../Loop.zig");
 const loop_internal = @import("../loop/internal.zig");
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
+const Records = @import("../scheduler/Records.zig");
+const Notifications = @import("../backend/iocp/Notifications.zig");
 const Processor = Scheduler.Processor;
 const futexes = @import("../ops/futex.zig");
 const batch = @import("../ops/batch.zig");
@@ -36,6 +40,8 @@ processors: []Processor,
 root: Task,
 futex: futexes.Table = .{},
 lanes: Lanes,
+lookup: Lookup,
+jobs: if (builtin.os.tag == .windows) Notifications else void,
 /// The home processor's scheduler runs here while the root waits.
 home_stack: []align(memory.page_size_min) u8,
 started: bool = false,
@@ -86,6 +92,8 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .processors = try gpa.alloc(Processor, count),
         .root = .{ .kind = .root, .home = true },
         .lanes = undefined,
+        .lookup = undefined,
+        .jobs = undefined,
         .home_stack = undefined,
         .csprngs = undefined,
     };
@@ -101,10 +109,13 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         error.SystemResources => error.SystemResources,
     };
     errdefer stacks.deinit(gpa);
+    var records = try Records.init(gpa, options.max_tasks);
+    errdefer records.deinit(gpa);
     c.scheduler = .{
         .processors = c.processors,
         .root = &c.root,
         .stacks = stacks,
+        .records = records,
         .scheduling = if (workers == 0) .per_core else options.scheduling,
         .budget_ops = options.budget_ops,
         .budget_ns = @intCast(@max(options.budget_time.nanoseconds, 0)),
@@ -112,10 +123,15 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     };
 
     var made: usize = 0;
-    errdefer for (c.processors[0..made]) |*p| p.loop.backend.deinit(c.gpa);
+    if (builtin.os.tag == .windows) c.jobs = try Notifications.init(gpa, options.max_jobs);
+    errdefer if (builtin.os.tag == .windows) c.jobs.deinit(gpa);
+    errdefer for (c.processors[0..made]) |*p| p.loop.backend.deinit(gpa);
     for (c.processors, 0..) |*p, i| {
         p.* = .{ .scheduler = &c.scheduler, .index = @intCast(i), .loop = undefined };
         try c.buildLoop(p, how);
+        if (comptime builtin.os.tag == .windows and fiber.supported) if (p.loop.backend == .iocp) {
+            p.loop.backend.iocp.notifications = &c.jobs;
+        };
         loop_internal.setBatchSink(&p.loop, .{ .context = c, .complete = batch.completed });
         made += 1;
     }
@@ -125,6 +141,8 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
 
     try c.initMonitor(workers);
     errdefer c.deinitMonitor();
+    c.lookup = try Lookup.init(gpa, options.max_lookups);
+    errdefer c.lookup.deinit(gpa, &c.lanes);
 
     c.home_stack = memory.reserve(home_stack_size) catch return error.SystemResources;
     errdefer memory.release(c.home_stack);
@@ -190,11 +208,12 @@ fn schedulerEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) no
 
 pub fn start(c: *Core) StartError!void {
     assert(!c.started);
+    // TSan’s thread-local storage needs more than the small normal OS stack.
     for (c.processors[1..]) |*p| {
-        p.thread = std.Thread.spawn(.{ .stack_size = 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
+        p.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
     }
     if (c.scheduler.monitor) |*m| {
-        m.thread = std.Thread.spawn(.{ .stack_size = 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
+        m.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
     }
     c.started = true;
 }
@@ -210,11 +229,18 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     };
     var m = mode;
     Scheduler.park(.{ .func = Serve.after, .context = &m });
+    // Back to the host, which may now wait on the loop's handle: work
+    // handed to the home processor from here on wakes the loop, and work
+    // handed to it before this was set makes the handle ready now.
+    const home = c.root.processor.?;
+    const p: *Processor = @ptrCast(@alignCast(home)); // safe: the root's processor is the home one
+    p.away.store(true, .seq_cst);
+    if (p.hasWork()) p.loop.wake();
 }
 
 pub fn stop(c: *Core) void {
     if (!c.started) return;
-    assert(c.scheduler.live.load(.acquire) == 0);
+    assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
     if (c.scheduler.monitor) |*m| {
@@ -228,13 +254,17 @@ pub fn stop(c: *Core) void {
 
 pub fn deinit(c: *Core) void {
     c.stop();
-    assert(c.scheduler.live.load(.acquire) == 0);
+    assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
     Scheduler.leave();
     c.deinitMonitor();
+    c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
+    fiber.deinit(&c.processors[0].sched_context);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
     memory.release(c.home_stack);
     c.scheduler.stacks.deinit(c.gpa);
+    c.scheduler.records.deinit(c.gpa);
+    if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);
     c.gpa.free(c.csprngs);
     c.gpa.free(c.processors);
     c.* = undefined;

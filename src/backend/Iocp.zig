@@ -38,6 +38,7 @@ const Threaded = Io.Threaded;
 
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
+const Notifications = @import("iocp/Notifications.zig");
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
 const afd = @import("../sys/afd.zig");
@@ -156,6 +157,7 @@ const SlotRequest = union {
 };
 
 port: Handle,
+notifications: ?*Notifications = null,
 /// The port is the host's: never waited on, never closed here.
 hosted: bool,
 /// The precise timer a wait with a deadline arms, and its packet.
@@ -225,6 +227,14 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
     const s = &o.state.scratch.iocp;
     const context: ?*anyopaque = @ptrFromInt(contextOf(@intFromPtr(o), .op)); // safe: read back as the `Op` in `dispatch`
     switch (o.kind) {
+        .raw => |raw| switch (raw) {
+            .uring => unreachable, // unreachable: kernel.submit requires io_uring
+            .windows => |request| {
+                if (!b.bindHandle(request.handle)) return b.refuse(o);
+                s.target = request.handle;
+                return b.settle(o, request.start(request.context, &s.iosb, context.?));
+            },
+        },
         .io => |*operation| return b.submitIo(o, operation, context),
         .accept => |listener| {
             if (!b.bindHandle(listener)) return b.refuse(o);
@@ -713,6 +723,10 @@ fn armTimer(b: *Iocp, ns: u64) bool {
 }
 
 fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
+    if (b.notifications) |table| if (table.dispatch(e.key, e.context, e.iosb.Information)) {
+        sink.notified();
+        return;
+    };
     if (e.key != key()) return;
     const address = e.context & ~@as(usize, 7);
     switch (@as(Tag, @fromBackingInt(@as(u3, @truncate(e.context))))) {

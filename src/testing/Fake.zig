@@ -225,6 +225,7 @@ fn canceledResult(o: *const Loop.Op) Loop.Op.Result {
         .abort => .{ .abort = 0 },
         .timer => .{ .timer = error.Canceled },
         .wait => .{ .wait = error.Canceled },
+        .raw => .{ .raw = error.Canceled },
     };
 }
 
@@ -254,6 +255,7 @@ pub fn defaultScript(context: ?*anyopaque, o: *Loop.Op, random: std.Random) ?Loo
         .abort => .{ .abort = 0 },
         .timer => .{ .timer = {} },
         .wait => .{ .wait = {} },
+        .raw => .{ .raw = .{ .uring = 0 } },
     };
 }
 

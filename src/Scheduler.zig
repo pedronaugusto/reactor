@@ -6,6 +6,7 @@
 const Scheduler = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -14,6 +15,7 @@ const fiber = @import("fiber.zig");
 const Stacks = @import("fiber/Stacks.zig");
 const Loop = @import("Loop.zig");
 const Task = @import("scheduler/Task.zig");
+const Records = @import("scheduler/Records.zig");
 const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
@@ -47,6 +49,9 @@ fn processorBit(index: u16) u64 {
 
 /// Whether processor `index`'s kernel queue may hold an operation on `fd`.
 pub fn holds(s: *const Scheduler, index: u16, fd: Io.File.Handle) bool {
+    if (comptime builtin.os.tag == .linux) if (s.processors[index].loop.backend == .io_uring) {
+        if (s.processors[index].loop.backend.io_uring.contains(fd)) return true;
+    };
     return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
 }
 
@@ -91,6 +96,11 @@ pub const Processor = struct {
     /// Set while the processor may be waiting in the kernel: a producer that
     /// sees it wakes the loop.
     sleeping: std.atomic.Value(bool) = .init(false),
+    /// Set from the root's return to its host (`Runtime.run`) until the
+    /// root parks again: the scheduler is not looking and the host may be
+    /// waiting on the loop's handle, so a producer wakes the loop as for
+    /// `sleeping`.
+    away: std.atomic.Value(bool) = .init(false),
     /// The root's `run(mode)` the home processor is serving.
     serving: ?Serving = null,
     thread: ?std.Thread = null,
@@ -179,6 +189,7 @@ pub const Processor = struct {
 
     /// Makes `t` runnable on this processor; the owner's thread only.
     pub fn pushLocal(p: *Processor, t: *Task, how: How) void {
+        p.scheduler.records.publish(t, p.index, .ready);
         t.processor = p;
         if (t.home or t.pins > 0) {
             p.pinned.push(t);
@@ -210,14 +221,28 @@ pub const Processor = struct {
 
     /// From any thread: `t` runs on this processor next time it looks.
     pub fn pushRemote(p: *Processor, t: *Task) void {
+        p.scheduler.records.publish(t, p.index, .ready);
         _ = p.inbox.push(t);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
     }
 
     /// From any thread: `e` runs on this processor's thread.
     pub fn send(p: *Processor, e: *Errand) void {
         _ = p.errands.push(e);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
+    }
+
+    /// After a push from another thread: a processor waiting in the kernel,
+    /// or whose root is back in its host, is woken through its loop.
+    fn wakeIfIdle(p: *Processor) void {
+        if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) p.loop.wake();
+    }
+
+    /// Whether this processor has a task to run or a message to serve: a
+    /// host driving the home processor calls `run` again at once.
+    pub fn hasWork(p: *const Processor) bool {
+        return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or
+            !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty();
     }
 
     /// The owner's: this processor's kernel queue now holds one more
@@ -238,7 +263,7 @@ pub const Processor = struct {
     /// From any thread: this processor checks `t`'s wait for a cancel.
     pub fn pushCancel(p: *Processor, t: *Task) void {
         _ = p.cancels.push(t);
-        if (p.sleeping.load(.seq_cst)) p.loop.wake();
+        p.wakeIfIdle();
     }
 
     /// The scheduler, on this processor's thread, until the runtime stops
@@ -322,6 +347,7 @@ pub const Processor = struct {
             p.pushLocal(t, .completed);
             return p.giveBack();
         }
+        p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
@@ -341,8 +367,11 @@ pub const Processor = struct {
     /// is still now, so `t` may be published to whoever will resume it.
     pub fn afterSwitch(p: *Processor, t: *Task, back: *const fiber.Switch) void {
         p.current = null;
+        // The root is back in the scheduler's hands.
+        if (t.kind == .root) p.away.store(false, .monotonic);
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
+        if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
             .park => |after| if (after) |a| a.func(a.context, t),
@@ -486,6 +515,7 @@ stacks: Stacks,
 monitor: ?Monitor = null,
 /// Threads waiting for a processor (handoff only).
 spares: Spares = undefined,
+records: Records,
 scheduling: Scheduling,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
@@ -497,12 +527,11 @@ inject_len: std.atomic.Value(u32) = .init(0),
 idle_count: std.atomic.Value(u32) = .init(0),
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
+listener_lock: std.atomic.Value(bool) = .init(false),
 holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
 /// Processors spinning for work before they wait.
 searching: std.atomic.Value(u32) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),
-/// Tasks alive, the root excluded.
-live: std.atomic.Value(u32) = .init(0),
 /// Round robin for tasks started outside a processor under `per_core`.
 placement: std.atomic.Value(u32) = .init(0),
 steals: std.atomic.Value(u64) = .init(0),
@@ -516,9 +545,20 @@ pub fn system() Io {
 
 threadlocal var held: ?*Processor = null;
 
+/// The processor the calling thread holds, read afresh at every call.
+///
+/// A task moves between threads at a switch, which the compiler cannot
+/// see: within one function it computes a thread-local's address once and
+/// reuses it, so after a park inlined into the same function a task would
+/// read the thread it left. Never inlined, so each call computes the
+/// address on the thread that makes it.
+noinline fn heldNow() ?*Processor {
+    return held;
+}
+
 /// The calling thread now holds `p`.
 pub fn enter(p: *Processor) void {
-    assert(held == null);
+    assert(heldNow() == null);
     held = p;
 }
 
@@ -528,14 +568,29 @@ pub fn leave() void {
 
 /// The processor the calling thread holds, if any.
 pub fn processor() ?*Processor {
-    return held;
+    return heldNow();
 }
 
 /// The task running on the calling thread, if it is one of this
 /// scheduler's.
 pub fn current() ?*Task {
-    const p = held orelse return null;
+    const p = heldNow() orelse return null;
     return p.current;
+}
+
+/// Persistent listener queues stay on the first processor that accepts.
+/// Claims are serialized, but the descriptor tables are atomically readable
+/// by close routing. No ring or owner-only record is touched here.
+pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Processor {
+    if (comptime builtin.os.tag != .linux) return caller;
+    if (caller.loop.backend != .io_uring) return caller;
+    while (s.listener_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    defer s.listener_lock.store(false, .release);
+    for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.contains(fd)) return p;
+    if (caller.loop.backend.io_uring.accepts.reserve(fd)) return caller;
+    for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.reserve(fd)) return p;
+    // No accept-ahead slot: an ordinary, task-owned accept on this ring.
+    return caller;
 }
 
 // Parking and waking.
@@ -544,18 +599,19 @@ pub fn current() ?*Task {
 /// task's stack is still: there it publishes the task to whoever will
 /// wake it (a futex bucket, a lane, an awaited future).
 pub fn park(after: ?Processor.After) void {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
         .action = .{ .park = after },
     };
+    if (t.stack != null) p.scheduler.records.parked(t, p.index, t.stack_top - @intFromPtr(&message)); // safe: message is a frame below this task's stack top
     _ = fiber.switchTo(&message.switch_);
 }
 
 /// To the back of the queue.
 pub fn yield() void {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
@@ -566,7 +622,7 @@ pub fn yield() void {
 
 /// Ends the running task: `after` runs once it is off its stack.
 pub fn exit(after: Processor.After) noreturn {
-    const p = held.?;
+    const p = heldNow().?;
     const t = p.current.?;
     var message: Processor.Message = .{
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
@@ -581,7 +637,7 @@ pub fn exit(after: Processor.After) noreturn {
 /// The clock is read at the first such point of a run and every eighth
 /// after, so a task that waits soon never reads it.
 pub fn spend(s: *Scheduler) void {
-    const p = held orelse return;
+    const p = heldNow() orelse return;
     const t = p.current orelse return;
     if (t.budget > 0) {
         t.budget -= 1;
@@ -603,7 +659,7 @@ pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
         @ptrCast(@alignCast(t.processor)) // safe: only processors are stored there
     else
         null;
-    if (held) |p| {
+    if (heldNow()) |p| {
         if (target == null or target == p) return p.pushLocal(t, how);
         return target.?.pushRemote(t);
     }
@@ -629,6 +685,12 @@ pub fn injectMany(s: *Scheduler, tasks: []const *Task) void {
 }
 
 fn injectChain(s: *Scheduler, first: *Task, last: *Task, count: u32) void {
+    var task = first;
+    while (true) {
+        s.records.publish(task, std.math.maxInt(u16), .ready);
+        if (task == last) break;
+        task = task.next.?;
+    }
     last.next = null;
     s.inject_lock.lockUncancelable(system());
     if (s.inject_tail) |tail| tail.next = first else s.inject_head = first;
@@ -780,6 +842,7 @@ pub fn serveThread(s: *Scheduler, first: ?*Processor) void {
         p.schedule();
         // Still held: the runtime stops.
         if (held == p) {
+            if (comptime builtin.os.tag == .linux) if (p.loop.backend == .io_uring) p.loop.backend.io_uring.drainListeners();
             leave();
             return;
         }
@@ -828,9 +891,8 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
         return null;
     }
     const t: *Task = @ptrFromInt(record_at);
-    t.* = .{ .kind = kind, .stack = index, .home = s.scheduling == .per_core };
+    t.* = .{ .kind = kind, .stack = index, .stack_top = top, .home = s.scheduling == .per_core };
     t.context = fiber.initial(s.stacks.stack(index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
-    _ = s.live.fetchAdd(1, .monotonic);
     return .{ t, @ptrFromInt(extra_at) };
 }
 
@@ -838,15 +900,17 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
     s.stacks.ended(index, fiber.committedLimit(&t.context));
+    s.records.release(t);
+    fiber.deinit(&t.context);
     t.* = undefined;
     s.stacks.give(index);
-    _ = s.live.fetchSub(1, .release);
 }
 
 /// Where a newly made task runs first: the creator's processor, or,
 /// outside any, the next by round robin under `per_core`.
 pub fn place(s: *Scheduler, t: *Task) void {
-    if (held) |p| {
+    s.records.created(t);
+    if (heldNow()) |p| {
         t.processor = p;
         return p.pushLocal(t, .spawned);
     }

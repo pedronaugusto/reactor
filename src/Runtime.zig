@@ -53,9 +53,12 @@ pub fn backendHandle(r: *Runtime) error{ Unsupported, SystemResources, Unexpecte
     return r.core.processors[0].loop.backendHandle();
 }
 
-/// The longest the host may wait before calling `run(.nowait)`.
+/// The longest the host may wait before calling `run(.nowait)`: zero
+/// while the home processor has a task ready or a message to serve.
 pub fn nextTimeout(r: *const Runtime) ?Io.Duration {
-    return r.core.processors[0].loop.nextTimeout();
+    const home = &r.core.processors[0];
+    if (home.hasWork()) return .zero;
+    return home.loop.nextTimeout();
 }
 
 /// From the home thread, after every task has ended: joins every thread.
@@ -104,7 +107,7 @@ pub fn stats(r: *Runtime) Stats {
     for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
     return .{
         .workers = @intCast(r.core.processors.len - 1),
-        .tasks = r.core.scheduler.live.load(.monotonic),
+        .tasks = r.core.scheduler.stacks.in_use.load(.monotonic),
         .max_tasks = r.core.options.max_tasks,
         .steals = r.core.scheduler.steals.load(.monotonic),
         .forced_yields = r.core.scheduler.forced_yields.load(.monotonic),
@@ -112,4 +115,14 @@ pub fn stats(r: *Runtime) Stats {
         .handoffs = if (r.core.scheduler.monitor) |*m| m.handoffs.load(.monotonic) else 0,
         .stalls = if (r.core.scheduler.monitor) |*m| m.stalls.load(.monotonic) else 0,
     };
+}
+
+/// Stream counters and live task summaries without allocating or stopping workers.
+pub fn dump(r: *Runtime, writer: *Io.Writer) Io.Writer.Error!void {
+    const snapshot = r.stats();
+    try writer.print("workers={d} tasks={d}/{d} steals={d} forced_yields={d}\n", .{ snapshot.workers, snapshot.tasks, snapshot.max_tasks, snapshot.steals, snapshot.forced_yields });
+    for (std.enums.values(Lane), snapshot.lanes) |lane, status| {
+        try writer.print("lane={s} running={d} queued={d} threads={d} inline={d}\n", .{ @tagName(lane), status.running, status.queued, status.threads, status.@"inline" });
+    }
+    try r.core.scheduler.records.dump(writer);
 }

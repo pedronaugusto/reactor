@@ -183,8 +183,9 @@ pub fn ended(s: *Stacks, index: u32, limit: usize) void {
 
 /// Returns a stack no task runs on any more.
 pub fn give(s: *Stacks, index: u32) void {
-    _ = s.in_use.fetchSub(1, .monotonic);
     s.push(index);
+    // Zero publishes the last release after it stopped touching this pool.
+    _ = s.in_use.fetchSub(1, .release);
 }
 
 fn push(s: *Stacks, index: u32) void {

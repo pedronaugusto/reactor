@@ -19,7 +19,6 @@ const Io = std.Io;
 
 const backend = @import("../backend.zig");
 const pending = backend.pending;
-const Loop = @import("../Loop.zig");
 const loop_internal = @import("../loop/internal.zig");
 const Task = @import("../scheduler/Task.zig");
 const Processor = @import("../Scheduler.zig").Processor;
@@ -73,8 +72,7 @@ const Waiter = struct {
     until: Until,
     woken: bool = false,
     outcome: enum { completed, canceled, timed_out } = .completed,
-    timer: Loop.Op = .{ .kind = .{ .timer = undefined } },
-    timed: bool = false,
+    deadline: perform.Deadline = .{ .fire = timedOut },
 
     fn wake(w: *Waiter, outcome: @FieldType(Waiter, "outcome")) void {
         if (w.woken) return;
@@ -90,10 +88,9 @@ const Waiter = struct {
         w.processor.pushCancel(t);
     }
 
-    fn timedOut(l: *Loop, o: *Loop.Op) void {
-        _ = l;
-        const w: *Waiter = @alignCast(@fieldParentPtr("timer", o)); // safe: the field belongs to this record
-        if (o.result.timer) |_| w.wake(.timed_out) else |_| {}
+    fn timedOut(d: *perform.Deadline) void {
+        const w: *Waiter = @alignCast(@fieldParentPtr("deadline", d)); // safe: the field belongs to this record
+        w.wake(.timed_out);
     }
 };
 
@@ -184,12 +181,15 @@ fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Times
     owner.address = Owner.at(@intFromPtr(&w)); // safe: read back by the processor's completions while this frame waits
     owner.store(batch);
     if (deadline) |d| {
-        w.timer.kind = .{ .timer = d };
-        w.timer.callback = Waiter.timedOut;
-        if (p.loop.submit(&w.timer)) |_| w.timed = true else |_| w.wake(.timed_out);
+        // No room for the timer: timed out now (the task is running, so
+        // there is no one to wake).
+        if (!w.deadline.arm(s, d)) {
+            w.woken = true;
+            w.outcome = .timed_out;
+        }
     }
     if (!w.woken) Scheduler.park(null);
-    if (w.timed) p.loop.cancel(&w.timer);
+    w.deadline.disarm();
     t.leaveWait();
     // The task owns the batch again, unless nothing is pending any more
     // (the completions have let go of the task already).

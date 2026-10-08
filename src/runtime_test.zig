@@ -1,7 +1,9 @@
 //! The runtime's tasks, timers, futexes, groups and cancellation, on the
 //! seeded fake (`Driver`, virtual time) and on real worker threads over the
 //! idle fake (`Threads`, real time); shakedown's conformance suite on both.
+const builtin = @import("builtin");
 const std = @import("std");
+const getaddrinfo = @import("sys/getaddrinfo.zig");
 const testing = std.testing;
 const Io = std.Io;
 const shakedown = @import("shakedown");
@@ -15,6 +17,7 @@ fn skipWithoutFibers() !void {
 }
 
 const Runtime = @import("Runtime.zig");
+const blocking = @import("ext/blocking.zig").blocking;
 
 const small: Runtime.Options = .{ .max_tasks = 256, .stack_size = 256 << 10, .offload = .none };
 
@@ -91,6 +94,24 @@ test "shakedown's conformance suite passes on the driver" {
             return error.Nonconforming;
         };
     }
+}
+
+test "a fake loop leaves streaming file reads to the file lane" {
+    try skipWithoutFibers();
+    var d: Driver = undefined;
+    try d.init(testing.allocator, 17, small);
+    defer d.deinit();
+    const io = d.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "stream", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcd", 0);
+    try io.vtable.fileSeekTo(io.userdata, file, 1);
+    var bytes: [2]u8 = @splat(0);
+    const result = try io.operate(.{ .file_read_streaming = .{ .file = file, .data = &.{&bytes} } });
+    try testing.expectEqual(@as(usize, 2), try result.file_read_streaming);
+    try testing.expectEqualStrings("bc", &bytes);
 }
 
 test "shakedown's conformance suite passes on real worker threads" {
@@ -230,4 +251,170 @@ test "a futex wake from a thread outside the runtime reaches a waiting task" {
     const thread = try std.Thread.spawn(.{}, wakeFromThread, .{ io, &word });
     defer thread.join();
     while (word.load(.acquire) == 0) try io.futexWait(u32, &word.raw, 0);
+}
+
+fn connectBriefly(io: Io, rounds: usize, failures: *std.atomic.Value(u32)) Io.Cancelable!void {
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(9) };
+    for (0..rounds) |_| {
+        if (address.connect(io, .{ .mode = .stream, .timeout = .{ .duration = .{ .raw = .fromMicroseconds(200), .clock = .awake } } })) |stream| {
+            stream.close(io);
+        } else |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            error.Timeout => {},
+            else => _ = failures.fetchAdd(1, .monotonic),
+        }
+    }
+}
+
+test "a deadline's timer is disarmed on the processor that armed it, wherever its task was woken" {
+    try skipWithoutFibers();
+    // The runtime makes its own sockets only where it has a backend.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 128, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var failures: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    // The idle fake never completes a connect: every one ends at its
+    // deadline, and other processors are free to steal the woken task.
+    for (0..32) |_| try group.concurrent(io, connectBriefly, .{ io, 20, &failures });
+    try group.await(io);
+    try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+}
+
+fn waitOnLane(gate: *std.atomic.Value(u32)) void {
+    const sys = Io.Threaded.global_single_threaded.io();
+    while (gate.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &gate.raw, 0);
+}
+
+fn laneCall(io: Io, gate: *std.atomic.Value(u32)) void {
+    blocking(io, .general, waitOnLane, .{gate});
+}
+
+test "calls beyond a lane's cap wait their turn, never inline on a worker" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 1100, .stack_size = 64 << 10, .offload = .{ .owned = .{ .general = 1 } } });
+    defer t.deinit();
+    const io = t.io();
+    var gate: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    // More calls than the lane's queue once held: the first holds the lane
+    // until all have been made.
+    for (0..1050) |_| try group.concurrent(io, laneCall, .{ io, &gate });
+    while (t.runtime.stats().lanes[@backingInt(Runtime.Lane.general)].queued < 1049) try io.sleep(.fromMilliseconds(1), .awake);
+    gate.store(1, .release);
+    Io.Threaded.global_single_threaded.io().futexWake(u32, &gate.raw, std.math.maxInt(u32));
+    try group.await(io);
+    try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(Runtime.Lane.general)].@"inline");
+}
+
+/// An executor that counts the calls handed to it.
+const Counting = shakedown.Layer(std.atomic.Value(u32), .{ .groupConcurrent = struct {
+    fn groupConcurrent(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+        const layer = Counting.of(userdata);
+        _ = layer.state.fetchAdd(1, .monotonic);
+        return layer.base.vtable.groupConcurrent(layer.base.userdata, group, context, alignment, start);
+    }
+}.groupConcurrent });
+
+test "an injected executor carries every lane call" {
+    try skipWithoutFibers();
+    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var counting: Counting = .init(threaded.io(), .init(0));
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = counting.io() } });
+    defer t.deinit();
+    const io = t.io();
+    for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));
+    try testing.expectEqual(@as(u32, 5), counting.state.load(.monotonic));
+}
+
+fn manyCalls(io: Io, rounds: usize) !void {
+    for (0..rounds) |_| if (blocking(io, .general, addOne, .{0}) != 1) return error.WrongResult;
+}
+
+test "lane calls one after another from a task and from the root keep their frames" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 64, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    // A value the caller keeps in a register across every switch.
+    const me = std.Thread.getCurrentId();
+    var task = try io.concurrent(manyCalls, .{ io, 5000 });
+    try task.await(io);
+    try manyCalls(io, 5000);
+    try testing.expectEqual(me, std.Thread.getCurrentId());
+}
+
+test "process spawn on a lane has space for std's temporary arena" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var child = try std.process.spawn(io, .{ .argv = if (builtin.os.tag == .windows) &.{ "C:\\Windows\\System32\\cmd.exe", "/c", @as([4096]u8, @splat(' ')) ++ "exit 0" } else &.{ "/bin/sh", "-c", @as([4096]u8, @splat(' ')) ++ "exit 0" } });
+    errdefer child.kill(io);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+}
+
+test "a canceled libc lookup detaches while its bounded storage stays alive" {
+    try skipWithoutFibers();
+    const Slow = struct {
+        var runtime_io: Io = undefined;
+        var started: Io.Event = .unset;
+        var release: Io.Event = .unset;
+        var finished: std.atomic.Value(bool) = .init(false);
+        fn lookup(_: []const u8, port: u16, _: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress, _: ?*[254]u8) getaddrinfo.Error!getaddrinfo.Result {
+            started.set(runtime_io);
+            release.waitUncancelable(testing.io);
+            out[0] = .{ .ip4 = .loopback(port) };
+            finished.store(true, .release);
+            return .{ .addresses = out[0..1] };
+        }
+        fn run(t: *Threads) !usize {
+            var out: [2]Io.net.IpAddress = undefined;
+            return (try t.runtime.core.lookup.resolve(&t.runtime.core.scheduler, &t.runtime.core.lanes, lookup, try .init("slow.example"), .{ .port = 80 }, &out)).count;
+        }
+    };
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .max_lookups = 1, .stack_size = 256 << 10 });
+    defer t.deinit();
+    Slow.runtime_io = t.io();
+    var task = try t.io().concurrent(Slow.run, .{&t});
+    defer Slow.release.set(testing.io);
+    try Slow.started.wait(t.io());
+    try testing.expectError(error.Canceled, task.cancel(t.io()));
+    try testing.expect(!Slow.finished.load(.acquire));
+    var second = try t.io().concurrent(Slow.run, .{&t});
+    try testing.expectError(error.SystemResources, second.await(t.io()));
+    Slow.release.set(testing.io);
+}
+
+fn parkForDump(io: Io, event: *Io.Event) Io.Cancelable!void {
+    try event.wait(io);
+}
+
+test "dump streams a parked task without visiting its live stack" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = 256 << 10, .offload = .none });
+    defer t.deinit();
+    const io = t.io();
+    var event: Io.Event = .unset;
+    var task = try io.concurrent(parkForDump, .{ io, &event });
+    defer task.cancel(io) catch {};
+    t.runtime.run(.nowait);
+    var buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try t.runtime.dump(&writer);
+    const text = writer.buffered();
+    try testing.expect(std.mem.find(u8, text, "state=waiting") != null);
+    try testing.expect(std.mem.find(u8, text, "kind=future") != null);
+    try testing.expect(t.runtime.core.scheduler.records.items[0].highWater() > 0);
+    event.set(io);
+    try task.await(io);
 }

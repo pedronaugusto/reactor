@@ -40,6 +40,7 @@ pub fn of(o: anytype, status: Status, information: usize) op.Result {
     const canceled = ended(status);
     const ours = canceled and o.state.canceled;
     return switch (o.kind) {
+        .raw => .{ .raw = if (ours) error.Canceled else .{ .windows = .{ .u = .{ .Status = status }, .Information = information } } },
         .io => |operation| .{ .io = if (ours) error.Canceled else io(o, operation, status, information) },
         // A connection taken is the backend's to report: only failures come here.
         .accept => .{ .accept = if (ours) error.Canceled else if (canceled) error.SocketNotListening else accept(status) },

@@ -69,7 +69,7 @@ pub const Backend = union(enum) {
 
     pub fn deinit(b: *Backend, gpa: Allocator) void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.deinit(),
+            .io_uring => |*u| if (has_uring) u.deinit(gpa),
             .epoll => |*e| if (has_epoll) e.deinit(),
             .kqueue => |*k| if (has_kqueue) k.deinit(),
             .iocp => |*w| if (has_iocp) w.deinit(gpa),
@@ -166,7 +166,7 @@ pub const Backend = union(enum) {
         return switch (b.*) {
             .epoll => |*e| if (has_epoll) e.hasCompletions() else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.hasCompletions() else unreachable, // unreachable: no such backend here
-            .io_uring, .custom => false,
+            .io_uring, .iocp, .custom => false,
         };
     }
 

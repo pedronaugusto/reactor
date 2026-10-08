@@ -129,6 +129,8 @@ fn Acts(comptime OpPtr: type) type {
                 .attempt, .attempt_unwaitable => {
                     const may_wait = action == .attempt;
                     switch (o.kind) {
+                        .raw => unreachable, // unreachable: raw requests require io_uring or IOCP
+
                         .io => |operation| {
                             const result = calls.make(operation) orelse if (may_wait) return .wait else failure(operation);
                             o.result = .{ .io = result };
@@ -236,6 +238,7 @@ pub fn Readiness(comptime Poller: type) type {
             });
             const w = waiterOf(o);
             switch (o.kind) {
+                .raw => unreachable, // unreachable: raw requests require io_uring or IOCP
                 .io => |operation| {
                     const fd, const direction = calls.subject(operation);
                     const how = calls.howOf(operation);
@@ -717,6 +720,8 @@ fn directions(d: Direction) Directions {
 /// The result of an operation cancelled before it completed.
 fn canceled(o: anytype) op.Result {
     return switch (o.kind) {
+        .raw => unreachable, // unreachable: raw requests never enter a readiness backend
+
         .io => .{ .io = error.Canceled },
         .accept => .{ .accept = error.Canceled },
         .connect => .{ .connect = error.Canceled },
@@ -734,6 +739,8 @@ fn canceled(o: anytype) op.Result {
 /// under it, as io_uring reports a cancel nobody here asked for.
 fn closedUnder(o: anytype) op.Result {
     return switch (o.kind) {
+        .raw => unreachable, // unreachable: raw requests never enter a readiness backend
+
         .io => |operation| .{
             .io = switch (operation) {
                 .file_read_streaming => .{ .file_read_streaming = error.SocketUnconnected },

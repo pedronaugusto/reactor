@@ -347,7 +347,6 @@ test "the loop alone on IOCP: a timer, a real-clock timer, a wake" {
 
 test "a host's own port: the loop's entries handed back through complete" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    const sys = @import("sys/windows.zig");
     const port = try sys.createPort();
     defer sys.close(port);
     var l: Loop = undefined;
@@ -547,4 +546,96 @@ test "a connect timeout ends the attempt in the kernel" {
         error.NetworkUnreachable, error.HostUnreachable => return error.SkipZigTest,
         else => |e| return e,
     }
+}
+
+const reactor = @import("reactor.zig");
+const win32 = @import("sys/win32.zig");
+const sys = @import("sys/windows.zig");
+extern "kernel32" fn CreateJobObjectW(?*std.os.windows.SECURITY_ATTRIBUTES, ?[*:0]const u16) callconv(.winapi) ?std.os.windows.HANDLE;
+extern "kernel32" fn AssignProcessToJobObject(std.os.windows.HANDLE, std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+
+fn timeoutMs(n: i64) Io.Timeout {
+    return .{ .duration = .{ .raw = .fromMilliseconds(n), .clock = .awake } };
+}
+
+test "native Job messages arrive through IOCP and a detached record can be reused" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const handle = CreateJobObjectW(null, null) orelse return error.SystemResources;
+    defer std.os.windows.CloseHandle(handle);
+    var job = try reactor.Job.attach(io, handle);
+    defer job.detach(io);
+    // Retired keys in the same port cannot become messages of the next attachment.
+    const retired = job.record.?.key();
+    job.detach(io);
+    job = try reactor.Job.attach(io, handle);
+    try sys.post(job.port, retired, 42, .SUCCESS, win32.job_msg.new_process);
+    try testing.expectError(error.Timeout, job.next(io, timeoutMs(20)));
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ "cmd.exe", "/c", "ping -n 3 127.0.0.1 >nul" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(testing.io);
+    try testing.expect(AssignProcessToJobObject(handle, child.id.?) != .FALSE);
+    var joined = false;
+    while (true) switch (try job.next(io, timeoutMs(5000))) {
+        .new_process => joined = true,
+        .active_process_zero => break,
+        else => {},
+    };
+    try testing.expect(joined);
+    _ = try child.wait(testing.io);
+}
+
+fn rawRead(io: Io, socket: net.Socket.Handle, buffer: []u8) reactor.kernel.Error!std.os.windows.IO_STATUS_BLOCK {
+    const Request = struct {
+        handle: net.Socket.Handle,
+        buffer: []u8,
+        buffers: [1]std.os.windows.AFD.WSABUF(.@"var") = undefined,
+        info: std.os.windows.AFD.RECV_INFO = undefined,
+        const Self = @This();
+        fn start(q: *Self, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: *anyopaque) std.os.windows.NTSTATUS {
+            q.buffers[0] = .{ .len = @intCast(q.buffer.len), .buf = q.buffer.ptr };
+            q.info = .{ .BufferArray = &q.buffers, .BufferCount = 1, .AfdFlags = .{ .OVERLAPPED = true }, .TdiFlags = .{ .NORMAL = true } };
+            return std.os.windows.ntdll.NtDeviceIoControlFile(q.handle, null, null, completion, iosb, std.os.windows.IOCTL.AFD.RECEIVE, &q.info, @sizeOf(std.os.windows.AFD.RECV_INFO), null, 0);
+        }
+    };
+    var request: Request = .{ .handle = socket, .buffer = buffer };
+    return reactor.kernel.overlapped(io, Request.start, socket, &request, timeoutMs(10));
+}
+
+test "a timed out native overlapped request drains before its frame is overwritten" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try tcpPair(io);
+    defer pair[0].close(io);
+    defer pair[1].close(io);
+    var buffer: [32]u8 = @splat(0);
+    try testing.expectError(error.Timeout, rawRead(io, pair[0].socket.handle, &buffer));
+    @memset(&buffer, 0xa5);
+    try writeAll(io, pair[1].socket.handle, "after");
+    var received: [5]u8 = undefined;
+    try testing.expectEqual(@as(usize, 5), try readOne(io, pair[0].socket.handle, &received));
+    try testing.expectEqualStrings("after", &received);
+    try testing.expectEqualSlices(u8, &@as([32]u8, @splat(0xa5)), &buffer);
+}
+
+test "waitAny consumes one auto-reset object on a native runtime" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const first = win32.CreateEventW(null, .FALSE, .FALSE, null) orelse return error.SystemResources;
+    defer std.os.windows.CloseHandle(first);
+    const second = win32.CreateEventW(null, .FALSE, .FALSE, null) orelse return error.SystemResources;
+    defer std.os.windows.CloseHandle(second);
+    _ = win32.SetEvent(first);
+    _ = win32.SetEvent(second);
+    try testing.expectEqual(@as(usize, 0), try reactor.waitAny(io, &.{ .{ .object = first }, .{ .object = second } }, timeoutMs(100)));
+    try testing.expectEqual(win32.wait_object_0, win32.WaitForSingleObject(second, 0));
+    try testing.expect(win32.WaitForSingleObject(first, 0) != win32.wait_object_0);
 }

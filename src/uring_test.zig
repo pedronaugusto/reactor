@@ -190,3 +190,35 @@ test "closing a socket another task is reading ends that read, on whichever proc
         try testing.expectError(error.SocketUnconnected, outcome);
     }
 }
+
+fn wakeSoon(io: Io, word: *std.atomic.Value(u32)) Io.Cancelable!void {
+    try io.sleep(.fromMilliseconds(1), .awake);
+    word.store(1, .release);
+    io.futexWake(u32, &word.raw, 1);
+}
+
+/// Overwrites the stack below the caller, where a returned wait's frame was.
+noinline fn clobberStack() void {
+    var junk: [32 << 10]u8 = undefined;
+    @memset(&junk, 0xaa);
+    std.mem.doNotOptimizeAway(&junk);
+}
+
+test "a wait with a deadline on the real clock leaves nothing in the kernel once it returns" {
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    for (0..20) |_| {
+        var word: std.atomic.Value(u32) = .init(0);
+        var waker = try io.concurrent(wakeSoon, .{ io, &word });
+        // A real-clock deadline is a timer the kernel holds, not the wheel.
+        const deadline: Io.Clock.Timestamp = .{ .clock = .real, .raw = Io.Clock.real.now(io).addDuration(.fromSeconds(30)) };
+        while (word.load(.acquire) == 0) try io.futexWaitTimeout(u32, &word.raw, 0, .{ .deadline = deadline });
+        // The timer's cancel must have come back before the wait returned:
+        // nothing may complete into the frame now gone.
+        clobberStack();
+        try waker.await(io);
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}

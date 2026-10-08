@@ -16,12 +16,20 @@ const Free = packed struct(u64) { index_plus_one: u32, tag: u32 };
 
 buffer: []align(slot_alignment.toByteUnits()) u8,
 links: []u32,
+size: usize,
 head: std.atomic.Value(u64) = .init(0),
 
 pub fn init(gpa: Allocator, count: u32) Allocator.Error!SlotPool {
-    const buffer = try gpa.alignedAlloc(u8, slot_alignment, @as(usize, count) * slot_len);
+    return initSized(gpa, count, slot_len);
+}
+
+/// A pool with a caller-chosen fixed block size, for std calls with scratch arenas.
+pub fn initSized(gpa: Allocator, count: u32, size: usize) Allocator.Error!SlotPool {
+    std.debug.assert(size >= slot_len);
+    std.debug.assert(size % slot_alignment.toByteUnits() == 0);
+    const buffer = try gpa.alignedAlloc(u8, slot_alignment, @as(usize, count) * size);
     errdefer gpa.free(buffer);
-    var p: SlotPool = .{ .buffer = buffer, .links = try gpa.alloc(u32, count) };
+    var p: SlotPool = .{ .buffer = buffer, .links = try gpa.alloc(u32, count), .size = size };
     var i = count;
     while (i > 0) {
         i -= 1;
@@ -43,9 +51,9 @@ pub fn allocator(p: *SlotPool) Allocator {
 fn alloc(context: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
     _ = ret_addr;
     const p: *SlotPool = @ptrCast(@alignCast(context)); // safe: `allocator` passed the pool
-    if (len > slot_len or alignment.compare(.gt, slot_alignment)) return null;
+    if (len > p.size or alignment.compare(.gt, slot_alignment)) return null;
     const index = p.pop() orelse return null;
-    return p.buffer.ptr + @as(usize, index) * slot_len;
+    return p.buffer.ptr + @as(usize, index) * p.size;
 }
 
 fn free(context: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
@@ -53,7 +61,7 @@ fn free(context: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize
     _ = ret_addr;
     const p: *SlotPool = @ptrCast(@alignCast(context)); // safe: `allocator` passed the pool
     const offset = @intFromPtr(memory.ptr) - @intFromPtr(p.buffer.ptr); // safe: addresses inside the pool's buffer
-    p.push(@intCast(offset / slot_len));
+    p.push(@intCast(offset / p.size));
 }
 
 fn pop(p: *SlotPool) ?u32 {
