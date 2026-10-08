@@ -6,7 +6,7 @@ const v11 = @import("v11");
 const testing = std.testing;
 pub const fuzz = @import("preflight_default_test_runner").fuzz;
 pub const std_options: std.Options = .{ .logFn = log };
-var log_errors: usize = 0;
+var log_errors: std.atomic.Value(usize) = .init(0);
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var passed: usize = 0;
@@ -19,11 +19,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var output = std.Io.File.stdout().writer(log_io, &buffer);
     for (builtin.test_functions) |test_fn| {
         testing.allocator_instance = .init(std.heap.page_allocator, .{ .canary = 0xc3a701ba, .check_write_after_free = true });
+        var allocator_alive = true;
+        defer if (allocator_alive) {
+            _ = testing.allocator_instance.deinit();
+        };
         testing.io_instance = .init(testing.allocator, .{ .argv0 = .init(init.args), .environ = init.environ });
+        var testing_io_alive = true;
+        defer if (testing_io_alive) testing.io_instance.deinit();
         testing.environ = init.environ;
         testing.random_seed = 0x726536;
         testing.log_level = .warn;
-        log_errors = 0;
+        log_errors.store(0, .monotonic);
         var runtime: v11.reactor.Runtime = undefined;
         try runtime.init(std.heap.page_allocator, .{ .workers = 0, .measure_stacks = true, .environ = init.environ, .argv0 = .init(init.args) });
         var runtime_alive = true;
@@ -34,20 +40,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try output.interface.flush();
         var watchdog: Watchdog = .{ .runtime = &runtime };
         const watcher = try std.Thread.spawn(.{}, Watchdog.watch, .{&watchdog});
-        defer {
-            watchdog.done.store(1, .release);
-            log_io.futexWake(u32, &watchdog.done.raw, 1);
-            watcher.join();
-        }
+        var watcher_alive = true;
+        defer if (watcher_alive) watchdog.stop(log_io, watcher);
         var task = try v11.io.concurrent(runTest, .{test_fn.func});
         const result = task.await(v11.io);
+        watchdog.stop(log_io, watcher);
+        watcher_alive = false;
         const stats = runtime.stats();
         parked = @max(parked, stats.parked_high_water);
         overall = @max(overall, stats.stack_high_water.?);
         runtime.deinit();
         runtime_alive = false;
         testing.io_instance.deinit();
+        testing_io_alive = false;
         const leaks = testing.allocator_instance.deinit();
+        allocator_alive = false;
         const status: []const u8 = if (result) |_| status: {
             passed += 1;
             break :status "pass";
@@ -60,7 +67,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try output.interface.print("{{\"event\":\"failure\",\"test\":{f},\"error\":\"{t}\"}}\n", .{ std.json.fmt(test_fn.name, .{}), err });
             break :status "fail";
         };
-        if (leaks != 0 or log_errors != 0) failed += 1;
+        if (leaks != 0 or log_errors.load(.monotonic) != 0) failed += 1;
         try output.interface.print("{{\"event\":\"result\",\"test\":{f},\"status\":\"{s}\",\"parked_high_water\":{d},\"stack_high_water\":{d},\"leaks\":{d}}}\n", .{ std.json.fmt(test_fn.name, .{}), status, stats.parked_high_water, stats.stack_high_water.?, leaks });
         try output.interface.flush();
     }
@@ -74,7 +81,7 @@ fn runTest(function: *const fn () anyerror!void) anyerror!void {
 }
 
 fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
-    if (level == .err) log_errors +|= 1;
+    if (level == .err) _ = log_errors.fetchAdd(1, .monotonic);
     if (@backingInt(level) <= @backingInt(testing.log_level)) std.log.defaultLog(level, scope, format, args);
 }
 
@@ -82,12 +89,24 @@ const Watchdog = struct {
     runtime: *v11.reactor.Runtime,
     done: std.atomic.Value(u32) = .init(0),
 
+    fn stop(w: *Watchdog, io: std.Io, thread: std.Thread) void {
+        w.done.store(1, .release);
+        io.futexWake(u32, &w.done.raw, 1);
+        thread.join();
+    }
+
     fn watch(w: *Watchdog) void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        io.futexWait(u32, &w.done.raw, 0, .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } }) catch {};
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+        while (w.done.load(.acquire) == 0) {
+            if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline.raw.nanoseconds) break;
+            io.futexWaitTimeout(u32, &w.done.raw, 0, .{ .deadline = deadline }) catch {};
+        }
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
-        var output = std.Io.File.stderr().writer(io, &buffer);
+        const file = std.Io.Dir.cwd().createFile(io, "v11-watchdog.log", .{}) catch std.Io.File.stderr();
+        defer file.close(io);
+        var output = file.writer(io, &buffer);
         output.interface.writeAll("V11 test watchdog: actual suite did not complete in 30 seconds\n") catch {};
         w.runtime.dump(&output.interface) catch {};
         output.interface.flush() catch {};

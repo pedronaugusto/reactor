@@ -415,7 +415,11 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
 
 pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
     const r = Core.of(userdata);
-    if (builtin.os.tag != .windows) return child_ops.childWait(userdata, child);
+    if (builtin.os.tag != .windows) {
+        const pipes = takePipes(child);
+        defer closePipes(r, pipes);
+        return child_ops.childWait(userdata, child);
+    }
     if (!iocp(r)) return onLane(r, .wait, "childWait", .{child});
     if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
     var o: Loop.Op = .{ .kind = .{ .wait = .{ .object = child.id.? } } };
@@ -435,8 +439,29 @@ pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.C
 
 pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
     const r = Core.of(userdata);
+    if (builtin.os.tag != .windows) {
+        const pipes = takePipes(child);
+        defer closePipes(r, pipes);
+        return onLane(r, .wait, "childKill", .{child});
+    }
     if (iocp(r)) forgetPipes(child);
     onLane(r, .wait, "childKill", .{child});
+}
+
+/// Transfer pipe cleanup from std's direct close to the runtime's close path.
+/// The wait/kill owns the child exclusively; each detached pipe stays live
+/// until std has finished with the child, then native pending work is drained
+/// and readiness registrations are invalidated before its number is reusable.
+fn takePipes(child: *std.process.Child) [3]?Io.File {
+    const pipes = .{ child.stdin, child.stdout, child.stderr };
+    child.stdin = null;
+    child.stdout = null;
+    child.stderr = null;
+    return pipes;
+}
+
+fn closePipes(r: *Core, pipes: [3]?Io.File) void {
+    for (pipes) |pipe| if (pipe) |file| file.close(r.io());
 }
 
 fn forgetPipes(child: *const std.process.Child) void {

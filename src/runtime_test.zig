@@ -446,18 +446,21 @@ test "global lane completions wake a host driving the home loop" {
 }
 
 fn capturedChild(io: Io) !void {
-    const result = try std.process.run(testing.allocator, io, .{
-        .argv = if (builtin.os.tag == .windows) &.{ "cmd.exe", "/c", "echo output & echo error 1>&2" } else &.{ "/bin/sh", "-c", "printf output; printf error >&2" },
-        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
-    });
-    defer testing.allocator.free(result.stdout);
-    defer testing.allocator.free(result.stderr);
-    try testing.expectEqual(@as(u8, 0), result.term.exited);
-    try testing.expect(std.mem.startsWith(u8, result.stdout, "output"));
-    try testing.expect(std.mem.startsWith(u8, result.stderr, "error"));
+    for (0..4) |mask| {
+        const commands = if (builtin.os.tag == .windows) [_][]const u8{ "exit 0", "echo output", "echo error 1>&2", "echo output & echo error 1>&2" } else [_][]const u8{ "exit 0", "printf output", "printf error >&2", "printf output; printf error >&2" };
+        const result = try std.process.run(testing.allocator, io, .{
+            .argv = if (builtin.os.tag == .windows) &.{ "cmd.exe", "/c", commands[mask] } else &.{ "/bin/sh", "-c", commands[mask] },
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+        });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        try testing.expectEqual(@as(u8, 0), result.term.exited);
+        try testing.expect(if (mask & 1 != 0) std.mem.startsWith(u8, result.stdout, "output") else result.stdout.len == 0);
+        try testing.expect(if (mask & 2 != 0) std.mem.startsWith(u8, result.stderr, "error") else result.stderr.len == 0);
+    }
 }
 
-test "r6: a native child drains stdout and stderr before its wait completes" {
+test "r6: a native child drains empty and nonempty stdout and stderr before waiting" {
     if (!fiber.supported) return error.SkipZigTest;
     var runtime: Runtime = undefined;
     try runtime.init(testing.allocator, .{ .workers = 0, .max_tasks = 16 });

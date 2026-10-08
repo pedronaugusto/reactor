@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Native Linux OPENAT, STATX, WAITID and linked deadlines, ring-message wakes, and BSD process-watch waits.
 - Shrinkable test-driver choices, submission fault injection, native lifetime regressions and portable guard-page death tests.
 
+### Fixed
+
+- Child wait and kill close their POSIX pipes through the runtime, invalidating cached readiness registrations before descriptor reuse.
+
 ### Changed
 
 - README follows the family shape and describes the combined LATER/R6 work as pending until its gates pass.
