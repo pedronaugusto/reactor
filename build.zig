@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
             .tests = test_step,
             .portable_tests = true,
             .bench = .{
-                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false } },
+                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "v11-prepare", .source = "bench/v11/prepare.zig", .timed = false } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,

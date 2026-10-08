@@ -6,19 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove the unreleased scheduler-only `Loop.wakeFrom` surface; standalone and foreign loops use `Loop.wake`.
+
 ### Added
 
+- Isolated V11 suite instrumentation and parked/overall stack measurement reports.
 - Init-reserved per-task stack classes and `concurrentWith` options for stack size and latency priority. CPU and lane queues give normal work a turn after eight latency jobs.
 - Optional sparse registered buffer pools for fixed file reads/writes; io_uring SEND_ZC for contiguous sends and explicit SQPOLL configuration.
 - Native Linux OPENAT, STATX, WAITID and linked deadlines, ring-message wakes, and BSD process-watch waits.
 - Shrinkable test-driver choices, submission fault injection, native lifetime regressions and portable guard-page death tests.
 
-### Breaking
-
-- Remove the unreleased scheduler-only `Loop.wakeFrom` surface; standalone and foreign loops use `Loop.wake`.
-
 ### Changed
 
+- README follows the family shape and describes the combined LATER/R6 work as pending until its gates pass.
 - Opt-in overall touched-stack profiling and retained parked high-water statistics; diagnostic painting is disabled when timing.
 - Lane executor rejection no longer runs blocking work on the submitting scheduler worker. Disabled lanes reject rather than queue forever.
 - Deep ended or shallow parked stacks discard unused pages on systems that support it.

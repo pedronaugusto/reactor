@@ -1,7 +1,8 @@
 # reactor
 
-The LATER batch on branch `later` is work in progress. Native hosted evidence,
-performance tuning and the R6 architecture and rival pass are pending.
+The combined LATER and R6 work on branch `later` is work in progress.
+Performance targets, full family-suite stack measurements and the injected
+executor contract remain open. This branch has not landed on main.
 
 reactor is an evented `std.Io` for Zig: every slot of the interface on the
 kernel's own completion queue, with stackful tasks on a work-stealing
@@ -42,7 +43,14 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 ```
 <!-- END GENERATED -->
 
-## LATER options
+## Design
+
+`Loop` owns one completion engine and its timers. `Runtime` owns the scheduler,
+stacks and offload lanes. Extensions take a plain `std.Io`, leaving protocol
+and application policy with the caller. The checked production layers and
+state owners are documented in [the design](docs/design.md).
+
+### Task and kernel options
 
 Reserve stack classes in `Runtime.Options.stack_classes`, whose counts come
 out of `max_tasks`. `concurrentWith(io, options, f, args)` chooses a reserved
@@ -65,7 +73,9 @@ The required family-suite V11 measurements are still pending.
 
 Detailed implementation and evidence: [LATER evidence](bench/later-evidence.md).
 
-## What it does
+## API
+
+### Runtime and loop
 
 - **Every `std.Io` slot.** Sockets, files, timers, futexes, batches and
   cancellation run on io_uring, epoll, kqueue or IOCP over AFD; calls that can block
@@ -93,7 +103,7 @@ Detailed implementation and evidence: [LATER evidence](bench/later-evidence.md).
   thread from elsewhere (a lane call ending, a wake from a worker) makes the
   handle readable.
 
-## Beyond `std.Io`
+### Extensions
 
 These take any `Io`. On a runtime's task they are native; on any other `Io`
 (`Io.Threaded`, a wrapping layer) they take the best path its slots allow,
@@ -120,4 +130,34 @@ Linux (io_uring 5.19+, epoll where io_uring is older, missing or refused),
 macOS and the BSDs (kqueue), and Windows 8+ (IOCP). On other systems `init` returns
 `BackendUnavailable`. A descriptor a readiness backend has waited on must be
 closed through the `Io` (or announced with `Loop.closing`).
-The extensions also work over any `Io`.
+The extensions also work over any `Io`. HTTP, TLS, durability policy, process
+spawning policy and file-watch semantics belong to their libraries.
+
+## Platforms
+
+Native correctness evidence covers Linux, macOS and Windows. BSD targets are
+cross-compiled; that does not establish native BSD correctness. Every task
+stack has its own guard. On Apple silicon, touched stack storage is rounded
+to 16 KiB pages; reserved address space is separate from resident memory.
+
+## Built with
+
+Production code depends only on Zig std. Repository checks use preflight;
+properties, faults, virtual time and conformance use shakedown as a lazy
+test-only dependency.
+
+## Testing
+
+Use `zig build test -Dtest-filter=<name>` for a focused test, `zig build lint`
+for source and architecture checks, and `zig build check` to compile tests,
+examples and the own benchmarks. `zig build bench` runs manual timings; CI
+compiles them without timing. The [LATER evidence](bench/later-evidence.md)
+retains native ownership and failing-before regression receipts.
+
+V11 suite measurements use immutable published source snapshots and isolated
+adapted copies under this clone, as described in [the V11 harness](bench/v11/README.md).
+No consumer checkout or adoption is involved.
+
+## Licence
+
+[MIT](LICENSE).
