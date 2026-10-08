@@ -172,6 +172,7 @@ const CrossRuntime = struct {
                 r.run(.nowait);
                 c.published.set(testing.io);
                 c.observed = future.await(c.io);
+                c.release.waitUncancelable(testing.io);
             },
             .spawn => {
                 c.published.set(testing.io);
@@ -210,10 +211,11 @@ const CrossRuntime = struct {
         }
         var source: Runtime = undefined;
         try init(&source);
-        defer source.deinit();
         var sender_future = try source.io().concurrent(sender, .{c});
         const ordinary_wake = try sender_future.await(source.io());
         source.run(.nowait);
+        // Keep destination storage alive while the before source drains too.
+        source.deinit();
         c.release.set(testing.io);
         thread.join();
         try testing.expectEqual(c.expected, c.observed);
