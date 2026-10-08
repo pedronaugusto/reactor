@@ -25,9 +25,12 @@ fn checked(gpa: std.mem.Allocator, io: Io, argv: []const []const u8, cwd: []cons
     gpa.free(result.stderr);
 }
 fn measure(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, round: usize, variant: []const u8, directory: []const u8, args: []const []const u8) !void {
+    return measureProgram(gpa, io, writer, round, variant, directory, &.{ ".zig-cache/later-bench", "--workers", "0", "--json" }, args);
+}
+fn measureProgram(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, round: usize, variant: []const u8, directory: []const u8, prefix: []const []const u8, args: []const []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ ".zig-cache/later-bench", "--workers", "0", "--json" });
+    try argv.appendSlice(gpa, prefix);
     try argv.appendSlice(gpa, args);
     const result = try command(gpa, io, argv.items, directory);
     defer gpa.free(result.stdout);
@@ -59,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
         try before(gpa, io, w, zig);
         return;
     }
+    if (args.len == 3 and std.mem.eql(u8, args[2], "--costs")) return costs(gpa, io, w, zig);
     const compile = &.{ zig, "build-exe", "-OReleaseFast", "--dep", "reactor", "-Mroot=bench/main.zig", "-OReleaseFast", "-Mreactor=src/reactor.zig", "-femit-bin=.zig-cache/later-bench" };
     try Io.Dir.cwd().createDirPath(io, base_dir ++ "/.zig-cache");
     try checked(gpa, io, compile, base_dir);
@@ -103,6 +107,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    try costs(gpa, io, w, zig);
     if (builtin.os.tag != .linux) return;
     try measure(gpa, io, w, 0, "native-capabilities", ".", &.{ "--only", "info" });
     for ([_]struct { name: []const u8, workload: []const u8, off: []const u8 }{
@@ -233,4 +238,26 @@ fn focusTests(gpa: std.mem.Allocator, io: Io) !void {
     const focused = try std.mem.replaceOwned(u8, gpa, original, declaration, declaration ++ "\n    b.step(\"later-before\", \"Run only the selected before regression\").dependOn(&b.addRunArtifact(tests).step);");
     defer gpa.free(focused);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = focused });
+}
+
+fn costs(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !void {
+    const directory = Io.Dir.cwd();
+    const source = try directory.readFileAlloc(io, "bench/costs.zig", gpa, .unlimited);
+    defer gpa.free(source);
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/bench/costs.zig", .data = source });
+    try directory.createDirPath(io, base_dir ++ "/.zig-cache");
+    const compile = &.{ zig, "build-exe", "-OReleaseFast", "--dep", "reactor", "-Mroot=bench/costs.zig", "-OReleaseFast", "-Mreactor=src/reactor.zig", "-femit-bin=.zig-cache/later-costs" };
+    try checked(gpa, io, compile, base_dir);
+    try checked(gpa, io, compile, ".");
+    for ([_][]const u8{ "process", "stacks" }) |workload| for (0..5) |round| {
+        const prefix = &.{".zig-cache/later-costs"};
+        const rows = &.{workload};
+        if (round % 2 == 0) {
+            try measureProgram(gpa, io, writer, round, "main-costs", base_dir, prefix, rows);
+            try measureProgram(gpa, io, writer, round, "later-costs", ".", prefix, rows);
+        } else {
+            try measureProgram(gpa, io, writer, round, "later-costs", ".", prefix, rows);
+            try measureProgram(gpa, io, writer, round, "main-costs", base_dir, prefix, rows);
+        }
+    };
 }

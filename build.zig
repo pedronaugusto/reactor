@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
             .tests = test_step,
             .portable_tests = true,
             .bench = .{
-                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false } },
+                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
@@ -76,6 +76,11 @@ pub fn build(b: *std.Build) !void {
     regressions.setCwd(b.path("."));
     regressions.has_side_effects = true;
     b.step("later-regressions", "Verify regressions fail against exact public before revisions").dependOn(&regressions.step);
+    const costs = b.addRunArtifact(compare);
+    costs.addArgs(&.{ b.graph.zig_exe, "--costs" });
+    costs.setCwd(b.path("."));
+    costs.has_side_effects = true;
+    b.step("later-costs", "Run interleaved native process and deep-stack cost evidence").dependOn(&costs.step);
     return needed;
 }
 
