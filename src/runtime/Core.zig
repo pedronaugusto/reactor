@@ -249,7 +249,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 
 pub fn stop(c: *Core) void {
     if (!c.started.load(.acquire)) return;
-    assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
+    assert(c.scheduler.stacks.inUse(.acquire) == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
     if (c.scheduler.monitor) |m| {
@@ -263,7 +263,7 @@ pub fn stop(c: *Core) void {
 
 pub fn deinit(c: *Core) void {
     c.stop();
-    assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
+    assert(c.scheduler.stacks.inUse(.acquire) == 0);
     Scheduler.leave();
     c.deinitMonitor();
     c.lookup.deinit(c.gpa, &c.lanes);

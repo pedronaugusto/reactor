@@ -71,6 +71,11 @@ pub fn build(b: *std.Build) !void {
     evidence.setCwd(b.path("."));
     evidence.has_side_effects = true;
     b.step("later-evidence", "Run interleaved ReleaseFast A/B evidence without a performance gate").dependOn(&evidence.step);
+    const regressions = b.addRunArtifact(compare);
+    regressions.addArgs(&.{ b.graph.zig_exe, "--regressions" });
+    regressions.setCwd(b.path("."));
+    regressions.has_side_effects = true;
+    b.step("later-regressions", "Verify regressions fail against exact public before revisions").dependOn(&regressions.step);
     return needed;
 }
 

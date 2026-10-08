@@ -68,3 +68,29 @@ test "R1 ended deep stacks discard unused pages before recycling" {
     const byte: *volatile u8 = @ptrFromInt(address); // safe: reserved anonymous mapping, now free in the owned stack pool
     try testing.expectEqual(@as(u8, 0), byte.*);
 }
+
+fn idleStopGuard(done: *std.atomic.Value(bool)) void {
+    for (0..2000) |_| {
+        if (done.load(.acquire)) return;
+        testing.io.sleep(.fromMilliseconds(1), .awake) catch return;
+    }
+    std.process.exit(97);
+}
+test "R1 stopping idle ring workers needs no subsequent source poll" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 2, .backend = .io_uring, .max_tasks = 16 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    var done = std.atomic.Value(bool).init(false);
+    const guard = try std.Thread.spawn(.{}, idleStopGuard, .{&done});
+    defer {
+        done.store(true, .release);
+        guard.join();
+    }
+    try r.start();
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    r.stop();
+}

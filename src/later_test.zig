@@ -676,22 +676,3 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
         @memset(pool.memory, 0xdd);
     }
 }
-
-test "later: stopping idle ring workers needs no subsequent source-ring poll" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .workers = 2, .backend = .io_uring, .max_tasks = 16 }) catch |err| switch (err) {
-        error.BackendUnavailable => return error.SkipZigTest,
-        else => return err,
-    };
-    defer r.deinit();
-    var done = std.atomic.Value(bool).init(false);
-    const guard = try std.Thread.spawn(.{}, ringGuard, .{&done});
-    defer {
-        done.store(true, .release);
-        guard.join();
-    }
-    try r.start();
-    try testing.io.sleep(.fromMilliseconds(10), .awake);
-    r.stop();
-}

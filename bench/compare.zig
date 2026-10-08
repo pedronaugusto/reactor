@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(gpa);
     defer gpa.free(args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--smoke")) return;
-    if (args.len != 2) return error.ExpectedZigPath;
+    if (args.len < 2 or args.len > 3) return error.ExpectedZigPath;
     const zig = args[1];
     var buffer: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &buffer);
@@ -55,6 +55,10 @@ pub fn main(init: std.process.Init) !void {
         try checked(gpa, io, &.{ "git", "clone", "--no-checkout", ".", base_dir }, ".");
     };
     try checked(gpa, io, &.{ "git", "checkout", "--detach", baseline }, base_dir);
+    if (args.len == 3 and std.mem.eql(u8, args[2], "--regressions")) {
+        try before(gpa, io, w, zig);
+        return;
+    }
     const compile = &.{ zig, "build-exe", "-OReleaseFast", "--dep", "reactor", "-Mroot=bench/main.zig", "-OReleaseFast", "-Mreactor=src/reactor.zig", "-femit-bin=.zig-cache/later-bench" };
     try Io.Dir.cwd().createDirPath(io, base_dir ++ "/.zig-cache");
     try checked(gpa, io, compile, base_dir);
@@ -124,5 +128,52 @@ pub fn main(init: std.process.Init) !void {
             try measure(gpa, io, w, round, "sqpoll", ".", b);
             try measure(gpa, io, w, round, "ordinary-ring", ".", a);
         }
+    }
+}
+
+fn installTests(gpa: std.mem.Allocator, io: Io) !void {
+    const directory = Io.Dir.cwd();
+    const regression = try directory.readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
+    defer gpa.free(regression);
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
+    const lanes = try directory.readFileAlloc(io, "src/lanes_test.zig", gpa, .unlimited);
+    defer gpa.free(lanes);
+    const stop = std.mem.indexOf(u8, lanes, "const Ordered = struct").?;
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/lanes_test.zig", .data = lanes[0..stop] });
+    const roots = try directory.readFileAlloc(io, base_dir ++ "/src/tests.zig", gpa, .unlimited);
+    defer gpa.free(roots);
+    const with_regressions = try std.mem.concat(gpa, u8, &.{ roots, "\ntest { _ = @import(\"r1_regression_test.zig\"); _ = @import(\"lanes_test.zig\"); }\n" });
+    defer gpa.free(with_regressions);
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/tests.zig", .data = with_regressions });
+}
+fn expectBefore(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8, filter: []const u8, marker: []const u8) !void {
+    const arg = try std.fmt.allocPrint(gpa, "-Dtest-filter={s}", .{filter});
+    defer gpa.free(arg);
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ zig, "build", "test", "-Dci-lint=false", arg }, .cwd = .{ .path = base_dir }, .timeout = .{ .duration = .{ .raw = .fromSeconds(180), .clock = .awake } } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try writer.print("BEFORE {s}\n{s}\n{s}\n", .{ filter, result.stdout, result.stderr });
+    try writer.flush();
+    if (result.term == .exited and result.term.exited == 0) return error.RegressionDidNotFailBefore;
+    if (std.mem.indexOf(u8, result.stderr, marker) == null) return error.WrongBaselineFailure;
+}
+fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !void {
+    try installTests(gpa, io);
+    try checked(gpa, io, &.{ zig, "build", "--list-steps" }, base_dir);
+    try expectBefore(gpa, io, writer, zig, "executor rejection", "executor rejection finishes without running a lane call inline");
+    try expectBefore(gpa, io, writer, zig, "disabled owned lane", "a disabled owned lane refuses instead of queueing forever");
+    if (builtin.os.tag == .linux) {
+        try expectBefore(gpa, io, writer, zig, "R1 native open", "R1 native open and stat use no inline file lane");
+        try expectBefore(gpa, io, writer, zig, "R1 ended deep", "R1 ended deep stacks discard unused pages before recycling");
+        // The shutdown bug was introduced in the first pushed LATER
+        // checkpoint, whose exact public source is retained in history.
+        try checked(gpa, io, &.{ "git", "reset", "--hard", "f110c7943327868ef21172e80320f34355e0498c" }, base_dir);
+        // That checkpoint already imported these two test files.
+        const regression = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
+        defer gpa.free(regression);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
+        try expectBefore(gpa, io, writer, zig, "R1 stopping idle", "exited with code 97");
+    } else if (builtin.os.tag == .macos) {
+        try expectBefore(gpa, io, writer, zig, "R1 native child", "R1 native child wait uses no inline wait lane");
     }
 }
