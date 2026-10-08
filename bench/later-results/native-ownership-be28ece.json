@@ -1,0 +1,31 @@
+{
+  "tier": "fast",
+  "implementation_sha": "be28ece2d9e49ffbb50d0aa67917a946e0446a42",
+  "runtime_sha": "f30531dc72f08845a00cd1b2b71d211ea8f25f10",
+  "native_snapshot_sha": "cdb954dd58a6a2fbc3d318b5f5805b883637c8b5",
+  "native_run_id": 37830187911,
+  "run_conclusion": "success",
+  "snapshot_difference": [
+    ".github/workflows/ci.yml"
+  ],
+  "ownership_baseline_sha": "7e7e851534d971da778956e4b587c14cb7f194ae",
+  "canonical_run_id": 37830049798,
+  "jobs": [
+    {
+      "name": "Linux failing-before regressions",
+      "job_id": 113493222762,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37830187911/job/113493222762"
+    },
+    {
+      "name": "Linux ownership ReleaseFast A-B",
+      "job_id": 113493223395,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37830187911/job/113493223395"
+    }
+  ],
+  "a_b_artifact": "linux-ownership-be28ece.jsonl",
+  "group_before_limitation": "This checkpoint accepted the independent shutdown watchdog as a group failure. 18d0575 adds a test-only stop waker and requires the exact release assertion. Prior 342c93d and local f110c794 runs retain specific release-assertion proof; this run is not that proof.",
+  "intentionally_unlanded": true,
+  "merge_dispatched": false
+}

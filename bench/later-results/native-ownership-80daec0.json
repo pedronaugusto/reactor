@@ -1,0 +1,73 @@
+{
+  "tier": "fast",
+  "implementation_sha": "80daec05594b667505242816a80c2ec9924cf8bc",
+  "runtime_sha": "f30531dc72f08845a00cd1b2b71d211ea8f25f10",
+  "native_snapshot_sha": "9def4d5cecde4190bdb48d6239eb82249972b1c9",
+  "native_run_id": 37829111880,
+  "run_conclusion": "failure",
+  "snapshot_difference": [
+    ".github/workflows/ci.yml"
+  ],
+  "baseline_sha": "46f6da8cba6b20ac3bc8e4cd6cba1d35861f19e4",
+  "preflight_sha": "b28046cc22055fcd32640117fc0e6965283a8ae5",
+  "shakedown_sha": "9357a9ab398ac25fa8a408a71e77a124bc51d311",
+  "jobs": [
+    {
+      "name": "Linux R1 native regressions",
+      "job_id": 113489535722,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489535722"
+    },
+    {
+      "name": "macOS R1 native regressions",
+      "job_id": 113489535982,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489535982"
+    },
+    {
+      "name": "macOS conformance",
+      "job_id": 113489536054,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536054"
+    },
+    {
+      "name": "Linux ownership ReleaseFast A-B",
+      "job_id": 113489536075,
+      "conclusion": "failure",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536075"
+    },
+    {
+      "name": "Linux native ownership",
+      "job_id": 113489536132,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536132"
+    },
+    {
+      "name": "Linux R1 thread sanitizer",
+      "job_id": 113489536218,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536218"
+    },
+    {
+      "name": "Windows conformance",
+      "job_id": 113489536219,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536219"
+    },
+    {
+      "name": "Linux failing-before regressions",
+      "job_id": 113489536298,
+      "conclusion": "failure",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536298"
+    },
+    {
+      "name": "Windows R1 native regressions",
+      "job_id": 113489536421,
+      "conclusion": "success",
+      "url": "https://github.com/pedronaugusto/reactor/actions/runs/37829111880/job/113489536421"
+    }
+  ],
+  "failure": "Two evidence jobs lacked non-ancestral public checkpoint 7e7e851 in the owned fixture. Tooling fix be28ece fetches that immutable SHA explicitly; all seven native runtime/test jobs passed.",
+  "intentionally_unlanded": true,
+  "merge_dispatched": false
+}

@@ -159,7 +159,7 @@ sweeps with NoResize, group-release stress and native macOS child waits;
 Linux/Windows cross-checks and lint passed. Hosted runners supply native Linux
 and Windows evidence; no shared Lima VM was used.
 
-Final pin audit: reactor main remains the requested `46f6da8`; preflight remains
+Historical checkpoint pin audit: reactor main remained the requested `46f6da8`; preflight was
 newest green main `9af905ed85cab6dbb19d9431c65ee3f41fbaa74d`; shakedown advanced
 to `9357a9ab398ac25fa8a408a71e77a124bc51d311` and is pinned here as a lazy
 test-only dependency. Its intervening changes add the benchmark measuring
@@ -181,8 +181,9 @@ The [retained run manifest](later-results/native-fast-342c93d.json) records
 source and baseline SHAs, job IDs and all conclusions. The native scratch
 snapshot differs from the public implementation checkpoint only in its
 FAST-only workflow; that temporary remote branch is deleted after collecting
-its evidence. Documentation/manifest commits after the checkpoint do not
-change production, test or benchmark code.
+its evidence. The following documentation/manifest checkpoint `7e7e851` changed no
+production, test or benchmark code. The ownership follow-up below appends
+production fixes, tests, and focused A/B.
 
 ## Latest measured costs and feature A/B
 
@@ -190,8 +191,8 @@ Raw Linux five-round interleaved measurements:
 [production checkpoint a55c5ec](later-results/linux-a55c5ec.jsonl),
 [additional cost rows](later-results/linux-costs-f374615.jsonl).
 Raw macOS [additional cost rows](later-results/macos-costs-e149af0.jsonl).
-The earlier macOS production rows above are still applicable: subsequent
-production changes only concern the Linux ring.
+The earlier macOS rows measure production through `7e7e851`; the subsequent
+scheduler ownership change is measured separately in the follow-up below.
 
 | Linux row | Before/off → after/on, best of five | Assessment |
 | --- | --- | --- |
@@ -316,4 +317,78 @@ Preflight main advanced during this follow-up. Its new green pin is
 [37823307574](https://github.com/pedronaugusto/preflight/actions/runs/37823307574).
 The caller is regenerated with `zig build plan -- --workflow` rather than
 hand-edited matrices. Shakedown remains at `9357a9a`. Local cross-runtime
-regressions, Linux cross compilation and lint pass; hosted checks are pending.
+regressions, Linux cross compilation and lint pass. Canonical FAST
+[37830049798](https://github.com/pedronaugusto/reactor/actions/runs/37830049798)
+passed for `be28ece`.
+
+
+Native FAST [37829111880](https://github.com/pedronaugusto/reactor/actions/runs/37829111880)
+passed seven runtime/test jobs: Linux ownership, three-OS R1, macOS/Windows
+conformance and Linux R1 TSan. Only the two evidence jobs failed: the scratch
+snapshot did not contain non-ancestral checkpoint `7e7e851` in its local
+fixture. `be28ece` explicitly fetches that immutable public SHA. Retry FAST
+[37830187911](https://github.com/pedronaugusto/reactor/actions/runs/37830187911)
+passed both the before harness and Linux A/B. [Seven-job manifest](later-results/native-ownership-80daec0.json)
+and [retry manifest](later-results/native-ownership-be28ece.json) retain exact
+source, snapshot and job conclusions; the failed whole run is not presented
+as green. Production code is identical across these checkpoints.
+
+The retry's group selection reproduced the separate shutdown watchdog rather
+than the release assertion. It is not specific group-release evidence.
+`18d0575` isolates teardown with a test-only ordinary wake after stopping is
+published and requires the exact release diagnostic. Local macOS on `f110c794`
+now fails `expected 0, found 1` with seed 3405864409 and exits normally after
+reporting it; the fixed implementation passes. No before production source
+is patched. The earlier specific group-release assertion proof remains valid.
+
+[Raw Linux ownership rounds](later-results/linux-ownership-be28ece.jsonl),
+best of five against `7e7e851`, from job
+[113493223395](https://github.com/pedronaugusto/reactor/actions/runs/37830187911/job/113493223395):
+
+| Row | Before → after | Change |
+| --- | --- | --- |
+| Empty spawn, workers=0 | 134.556 → 135.935 ns | +1.0% |
+| Group spawn, workers=0 | 371.379 → 373.180 ns | +0.5% |
+| Wake, workers=0 | 83.059 → 81.781 ns | −1.5% |
+| Empty spawn, workers=1 | 209.452 → 233.071 ns | +11.3%; raised |
+| Group spawn, workers=1 | 360.609 → 497.200 ns | +37.9%; raised |
+| Wake, workers=1 | 120.235 → 122.741 ns | +2.1%; raised |
+
+The one-worker scheduling miss is raised to nav/R6 together with the earlier
+spawn/deadline and immediate-trimming costs. These are measurements on this
+runner, not a cross-host guarantee or an accepted target waiver. Final R6
+review and its private rival pass remain ahead of any completion claim.
+
+
+## Final implementation validation and handoff
+
+Implementation/test/tooling checkpoint:
+`18d0575eaef105e00a18132463a567edca7b36ee`. Production runtime code remains
+`f30531d`; later corrections affect evidence acquisition and test isolation.
+Canonical FAST [37831548880](https://github.com/pedronaugusto/reactor/actions/runs/37831548880)
+passed. Native FAST [37831632411](https://github.com/pedronaugusto/reactor/actions/runs/37831632411)
+passed all five strengthened jobs: Linux/macOS/Windows R1, Linux R1 TSan,
+and Linux failing-before. The group before log now contains the specific
+`expected 0, found 1` assertion on `f110c794`, with no shutdown watchdog masking
+it. Cross-runtime ownership fails on exact main; pinned wake leaves a source
+SQE on `7e7e851`. All current after checks pass. The unchanged earlier native
+conformance/ownership/V3/V6/V7/death proofs and focused A/B remain retained in
+the linked manifests. [Final native manifest](later-results/native-final-18d0575.json)
+records every job and source pin.
+
+Final read-only pin audit: main is still exact `46f6da8`; preflight main is
+`b28046cc22055fcd32640117fc0e6965283a8ae5`; shakedown main is
+`9357a9ab398ac25fa8a408a71e77a124bc51d311`. The standalone `later` clone is the
+only implementation checkout this batch writes. Native Linux used an owned
+FAST-only scratch branch; its source snapshots differ only in the workflow.
+No merge tier, main write, other-package write, shared Lima mutation, tag,
+release, issue or R6 deployment was performed. The scratch remote branch is
+removed after retaining these results. Earlier superseded canonical runs
+37828620932 and 37829061032 concluded canceled, not green; 37830049798 and
+37831548880 are passing canonical evidence.
+
+R6 must continue on `later`, resolve V11's five real suites, settle the explicit
+narrow/void offload refusal and cancellation capacity contract, address the
+reported performance misses, perform its private rival trials and final
+architecture/README review, and land the combined work under its authorization.
+This branch is intentionally unlanded, with those completion gates still open.
