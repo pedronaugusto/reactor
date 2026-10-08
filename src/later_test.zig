@@ -354,6 +354,9 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     target.wakeFrom(&source);
     const ring = &source.backend.io_uring.ring;
     try testing.expectEqual(linux.IORING_OP.MSG_RING, ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].opcode);
+    const tail = ring.sq.sqe_tail;
+    for (0..1024) |_| target.wakeFrom(&source);
+    try testing.expectEqual(tail, ring.sq.sqe_tail);
     _ = try source.run(.nowait);
     // A DEFER_TASKRUN target must enter before remote task work is
     // published as a CQE. Its CQ head proves the message was consumed.
@@ -380,10 +383,15 @@ fn ringGuard(done: *std.atomic.Value(bool)) void {
     }
     std.process.exit(97);
 }
+fn pressureLoop() !Loop {
+    var loop: Loop = undefined;
+    try loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 128, .submission_entries = 2 });
+    return loop;
+}
 test "later: full SQ and CQ drain ownership without invoking callbacks during submit" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var loop: Loop = undefined;
-    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 128, .submission_entries = 2 }) catch |err| switch (err) {
+    // A host may return an initialized empty loop by value before entry.
+    var loop = pressureLoop() catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -715,7 +723,7 @@ test "later: fixed-buffer registrations survive worker adoption and owner teardo
     };
     defer runtime.deinit();
     const io = runtime.io();
-    var pool = reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 4, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
     };
@@ -792,4 +800,70 @@ test "later: trimming a shallow park preserves every live byte after a deep park
     var task = try driver.io().concurrent(shallowAfterDeep, .{driver.io()});
     try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
     try testing.expect(driver.runtime.stats().stack_trims > 0);
+}
+
+fn drainCanceledPayload(socket: Io.net.Socket) !void {
+    var bytes: [4096]u8 = undefined;
+    while (true) {
+        var data: [1][]u8 = .{&bytes};
+        const n = (try (try testing.io.operate(.{ .net_read = .{ .socket_handle = socket.handle, .data = &data } })).net_read).data_len;
+        if (n == 0) return;
+        for (bytes[0..n]) |byte| try testing.expectEqual(@as(u8, 0x61), byte);
+    }
+}
+test "later: canceling native zero-copy sends drains ownership before poisoning payloads" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var loop: Loop = undefined;
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = 1 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer loop.deinit(testing.allocator);
+    if (!loop.backend.io_uring.features.zero_copy) return error.SkipZigTest;
+    for (0..32) |round| {
+        var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
+        defer server.deinit(testing.io);
+        const stream = try server.socket.address.connect(testing.io, .{ .mode = .stream });
+        defer stream.close(testing.io);
+        const peer = try server.accept(testing.io);
+        defer peer.close(testing.io);
+        var reader = try testing.io.concurrent(drainCanceledPayload, .{peer.socket});
+        defer _ = reader.cancel(testing.io) catch {};
+        var bytes: [64 << 10]u8 = @splat(0x61);
+        var op: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{&bytes} } } } };
+        try loop.submit(&op);
+        if (round % 2 == 0) _ = try loop.run(.nowait);
+        loop.cancel(&op);
+        var out: [1]*Loop.Op = undefined;
+        while (loop.reap(&out).len == 0) _ = try loop.run(.once);
+        if (op.result.io) |result| {
+            _ = try result.net_write;
+        } else |err| try testing.expectEqual(error.Canceled, err);
+        try testing.expect(op.state.uring.ready());
+        @memset(&bytes, 0xdd);
+        try stream.shutdown(testing.io, .send);
+        try reader.await(testing.io);
+        try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
+    }
+}
+
+fn loopAllocationFailures(gpa: std.mem.Allocator) !void {
+    var loop: Loop = undefined;
+    try loop.init(gpa, .{ .max_ops = 8 });
+    defer loop.deinit(gpa);
+    var op: Loop.Op = .{ .kind = .{ .timer = .now(testing.io, .awake) } };
+    try loop.submit(&op);
+    var out: [1]*Loop.Op = undefined;
+    while (loop.reap(&out).len == 0) _ = try loop.run(.once);
+    try testing.expectEqual(@as(u32, 0), loop.in_flight);
+}
+test "later: native engine initialization releases every failed allocation" {
+    var probe: Loop = undefined;
+    probe.init(testing.allocator, .{ .max_ops = 8 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    probe.deinit(testing.allocator);
+    var allocator = shakedown.alloc.NoResize.init(testing.allocator);
+    try testing.checkAllAllocationFailures(allocator.allocator(), loopAllocationFailures, .{});
 }

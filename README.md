@@ -42,6 +42,29 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 ```
 <!-- END GENERATED -->
 
+## LATER options
+
+Reserve stack classes in `Runtime.Options.stack_classes`, whose counts come
+out of `max_tasks`. `concurrentWith(io, options, f, args)` chooses a reserved
+`stack_size` and a `priority` (`normal` or `latency`). Latency work receives
+up to eight turns before queued normal work, on CPU and blocking lanes.
+
+`net.Receiver.Pool.Options.registered` registers the pool on each native
+ring for fixed file reads and writes. Keep the pool alive until its operations
+finish; `deinit` unregisters it on the ring owners before freeing memory.
+`zero_copy_min` explicitly enables SEND_ZC above a contiguous-send size.
+The default disables it: the hosted loopback measurements found it slower
+at every tested size. `sqpoll` explicitly requests a kernel polling thread;
+an unsupported request returns an error. Both options are Linux-specific.
+
+`measure_stacks` enables diagnostic painting for overall touched depth.
+`stats().parked_high_water` is retained across task release;
+`stack_high_water` is available with painting enabled. Profiling commits and
+scans stack memory, so leave it off when timing production workloads.
+The required family-suite V11 measurements are still pending.
+
+Detailed implementation and evidence: [LATER evidence](bench/later-evidence.md).
+
 ## What it does
 
 - **Every `std.Io` slot.** Sockets, files, timers, futexes, batches and

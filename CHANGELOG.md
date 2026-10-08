@@ -19,6 +19,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Lane executor rejection no longer runs blocking work on the submitting scheduler worker. Disabled lanes reject rather than queue forever.
 - Deep ended or shallow parked stacks discard unused pages on systems that support it.
 - SQ/CQ pressure releases kernel ownership while keeping user callbacks and batch list mutations queued for `run`; SQPOLL file close waits for published file references before unregistering.
+- Native engines keep stable owned storage allocated at loop initialization; dispatch does not copy concurrently changing wake state.
+- Group completion releases every member stack before publishing an empty group.
+- Linux interface binding uses the interface index directly. SEND_ZC is opt-in after hosted measurements found no throughput crossover.
 
 
 - Buffer-pool registration follows the ring owner as soon as runtime startup begins, avoiding a race with worker adoption.

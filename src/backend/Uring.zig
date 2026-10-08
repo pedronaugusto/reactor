@@ -120,6 +120,8 @@ wake_buffer: u64 = 0,
 /// Set by `wake` until the ring has read the eventfd: later wakes skip
 /// the write.
 wake_pending: std.atomic.Value(bool) = .init(false),
+/// One queued ring message is enough until its target consumes it.
+message_pending: std.atomic.Value(bool) = .init(false),
 notify_fd: ?linux.fd_t = null,
 enabled: bool,
 /// The kernel flags the ring when completions wait to be run.
@@ -662,7 +664,10 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         },
         .auxiliary => {
             const address = ud & ~@as(u64, 7);
-            if (address == 0) return sink.notified();
+            if (address == 0) {
+                u.message_pending.store(false, .release);
+                return sink.notified();
+            }
             const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
             const o: *Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
             o.state.uring.timeout_pending = false;
@@ -701,6 +706,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         },
         .ignore => if (cqe.res < 0 and ud & ~@as(u64, 7) != 0) {
             const target: *Uring = @ptrFromInt(ud & ~@as(u64, 7)); // safe: runtimes retain every ring until workers stop
+            target.message_pending.store(false, .release);
             target.wake();
         },
     }
@@ -854,6 +860,7 @@ fn timespecOf(ns: i96) linux.kernel_timespec {
 /// CQE is reaped; neither ring's mutable queues are touched cross-thread.
 pub fn messageWake(source: *Uring, target: *Uring) bool {
     if (!source.features.msg_ring) return false;
+    if (target.message_pending.swap(true, .acq_rel)) return true;
     const sqe = source.entry();
     sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = userData(0, .auxiliary), .len = 0, .user_data = userData(@intFromPtr(target), .ignore) }); // safe: target outlives source polling and worker shutdown
     return true;

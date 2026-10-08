@@ -231,6 +231,7 @@ fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
+    l.installPressure();
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
         .io_uring => |u| if (builtin.os.tag == .linux) u.enable(),
@@ -270,6 +271,7 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
 /// this returns true, `o.result` is set, and nothing is delivered for it.
 /// A host that runs its own tasks saves a trip through its scheduler.
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
+    l.installPressure();
     l.assertOwner();
     assert(o.state.phase == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
@@ -350,6 +352,7 @@ fn cancelKernel(l: *Loop, o: *Op) void {
 /// Delivers completions (callbacks run, or queued for `reap`) as `mode`
 /// allows and returns how many.
 pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
+    l.installPressure();
     l.assertOwner();
     var delivered: u32 = 0;
     const deadline: ?u64 = switch (mode) {
@@ -573,7 +576,8 @@ pub fn wakeFrom(l: *Loop, source: *Loop) void {
 /// user callbacks remain owned by run's ready queue.
 fn installPressure(l: *Loop) void {
     if (comptime builtin.os.tag == .linux) if (l.backend == .io_uring) {
-        l.backend.io_uring.pressure = .{ .context = l, .complete = Pressure.dispatch };
+        const engine = l.backend.io_uring;
+        if (engine.pressure == null or engine.pressure.?.context != l) engine.pressure = .{ .context = l, .complete = Pressure.dispatch };
     };
 }
 const Pressure = struct {

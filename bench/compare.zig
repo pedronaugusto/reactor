@@ -89,15 +89,17 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     for ([_][]const u8{ "65536", "262144", "1048576" }) |bytes| {
+        const label = try std.fmt.allocPrint(gpa, "default-stack-{s}", .{bytes});
+        defer gpa.free(label);
         for (0..5) |round| {
             const a = &.{ "--only", "spawn-options" };
             const b = &.{ "--only", "spawn-options", "--task-size", bytes };
             if (round % 2 == 0) {
-                try measure(gpa, io, w, round, "default-stack", ".", a);
+                try measure(gpa, io, w, round, label, ".", a);
                 try measure(gpa, io, w, round, bytes, ".", b);
             } else {
                 try measure(gpa, io, w, round, bytes, ".", b);
-                try measure(gpa, io, w, round, "default-stack", ".", a);
+                try measure(gpa, io, w, round, label, ".", a);
             }
         }
     }

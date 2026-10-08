@@ -1,0 +1,311 @@
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 75.027, "unit": "ns/task"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 185.658, "unit": "ns/task"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 90.603, "unit": "ns/task"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 200.422, "unit": "ns/task"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 88.796, "unit": "ns/task"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 200.961, "unit": "ns/task"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 74.501, "unit": "ns/task"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 179.737, "unit": "ns/task"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 76.402, "unit": "ns/task"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 183.747, "unit": "ns/task"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 89.729, "unit": "ns/task"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 201.09, "unit": "ns/task"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 87.999, "unit": "ns/task"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 198.931, "unit": "ns/task"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 74.998, "unit": "ns/task"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 185.407, "unit": "ns/task"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 78.068, "unit": "ns/task"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 182.804, "unit": "ns/task"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "concurrent + await, empty", "value": 89.331, "unit": "ns/task"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "spawn", "name": "group of 10k, concurrent + await", "value": 195.176, "unit": "ns/task"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 51.701, "unit": "ns/wake"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 52.952, "unit": "ns/wake"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 52.68, "unit": "ns/wake"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 48.213, "unit": "ns/wake"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 46.874, "unit": "ns/wake"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 52.604, "unit": "ns/wake"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 52.294, "unit": "ns/wake"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 47.252, "unit": "ns/wake"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 47.652, "unit": "ns/wake"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 55.508, "unit": "ns/wake"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 11.61, "unit": "ns/run"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 13.75, "unit": "ns/run"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 12.794, "unit": "ns/run"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 13.33, "unit": "ns/run"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 12.942, "unit": "ns/run"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 12.725, "unit": "ns/run"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 13.328, "unit": "ns/run"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 11.867, "unit": "ns/run"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 12.828, "unit": "ns/run"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "loop", "name": "run(.nowait) with nothing ready", "value": 13.055, "unit": "ns/run"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 554.421, "unit": "ns/read"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 553.065, "unit": "ns/read"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 551.341, "unit": "ns/read"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 563.421, "unit": "ns/read"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 551.808, "unit": "ns/read"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 574.693, "unit": "ns/read"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 577.604, "unit": "ns/read"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 594.453, "unit": "ns/read"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 610.263, "unit": "ns/read"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 608.671, "unit": "ns/read"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 18079.443, "unit": "ns/call"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 18346.616, "unit": "ns/call"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 17448.007, "unit": "ns/call"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 17630.462, "unit": "ns/call"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 17501.944, "unit": "ns/call"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 16451.387, "unit": "ns/call"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 17951.843, "unit": "ns/call"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 18136.364, "unit": "ns/call"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 18701.482, "unit": "ns/call"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "lanes", "name": "blocking, empty call on general", "value": 19121.178, "unit": "ns/call"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 72358.953, "unit": "msg/s"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 80644.446, "unit": "msg/s"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 71013.375, "unit": "msg/s"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 79803.505, "unit": "msg/s"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 69532.16, "unit": "msg/s"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 77429.192, "unit": "msg/s"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 74302.375, "unit": "msg/s"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 82396.332, "unit": "msg/s"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 72815.491, "unit": "msg/s"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 81747.733, "unit": "msg/s"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 73045.012, "unit": "msg/s"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 80324.084, "unit": "msg/s"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 72152.076, "unit": "msg/s"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 79763.678, "unit": "msg/s"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 71697.82, "unit": "msg/s"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 80903.709, "unit": "msg/s"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 72835.603, "unit": "msg/s"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 81858.249, "unit": "msg/s"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 1 connection", "value": 72914.837, "unit": "msg/s"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "echo", "name": "64 B round trips, 32 connections", "value": 79594.511, "unit": "msg/s"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 70991.374, "unit": "msg/s"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 67281.017, "unit": "msg/s"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 68905.099, "unit": "msg/s"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 72747.644, "unit": "msg/s"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 72707.69, "unit": "msg/s"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 67406.451, "unit": "msg/s"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 69133.228, "unit": "msg/s"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 73667.743, "unit": "msg/s"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 73117.428, "unit": "msg/s"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 71173.161, "unit": "msg/s"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3033.903, "unit": "ns/round"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2577.236, "unit": "ns/round"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3121.482, "unit": "ns/round"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2728.598, "unit": "ns/round"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3156.871, "unit": "ns/round"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2794.673, "unit": "ns/round"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3261.229, "unit": "ns/round"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2589.705, "unit": "ns/round"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3146.159, "unit": "ns/round"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2715.731, "unit": "ns/round"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3148.458, "unit": "ns/round"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2687.744, "unit": "ns/round"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3271.171, "unit": "ns/round"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2785.699, "unit": "ns/round"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3094.651, "unit": "ns/round"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2751.796, "unit": "ns/round"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3130.904, "unit": "ns/round"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2740.197, "unit": "ns/round"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "wait on pipes, round trip", "value": 3169.963, "unit": "ns/round"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "waits", "name": "Wake signal and wait, round trip", "value": 2799.803, "unit": "ns/round"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 49.827, "unit": "ns/timer"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.29, "unit": "ns/timer"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 10.021, "unit": "us"}}
+{"round": 0, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 12.695, "unit": "us"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 53.658, "unit": "ns/timer"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.831, "unit": "ns/timer"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.981, "unit": "us"}}
+{"round": 0, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 12.244, "unit": "us"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 57.669, "unit": "ns/timer"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 18.54, "unit": "ns/timer"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.981, "unit": "us"}}
+{"round": 1, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 13.917, "unit": "us"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 48.706, "unit": "ns/timer"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 16.834, "unit": "ns/timer"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.86, "unit": "us"}}
+{"round": 1, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 10.922, "unit": "us"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 46.819, "unit": "ns/timer"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.706, "unit": "ns/timer"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.971, "unit": "us"}}
+{"round": 2, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 11.434, "unit": "us"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 50.613, "unit": "ns/timer"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.56, "unit": "ns/timer"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.78, "unit": "us"}}
+{"round": 2, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 11.383, "unit": "us"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 49.392, "unit": "ns/timer"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.751, "unit": "ns/timer"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.8, "unit": "us"}}
+{"round": 3, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 11.573, "unit": "us"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 47.736, "unit": "ns/timer"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.345, "unit": "ns/timer"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.61, "unit": "us"}}
+{"round": 3, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 187.238, "unit": "us"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 47.534, "unit": "ns/timer"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.007, "unit": "ns/timer"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.761, "unit": "us"}}
+{"round": 4, "variant": "main", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 15.79, "unit": "us"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, arm", "value": 51.96, "unit": "ns/timer"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "timer, cancel", "value": 17.339, "unit": "ns/timer"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p50", "value": 9.731, "unit": "us"}}
+{"round": 4, "variant": "later", "measurement": {"io": "reactor", "workload": "timers", "name": "1 ms sleep overshoot p99", "value": 24.182, "unit": "us"}}
+{"round": 0, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 94.589, "unit": "ns/task"}}
+{"round": 0, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 87.276, "unit": "ns/task"}}
+{"round": 1, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 87.22, "unit": "ns/task"}}
+{"round": 1, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 86.82, "unit": "ns/task"}}
+{"round": 2, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 92.084, "unit": "ns/task"}}
+{"round": 2, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.504, "unit": "ns/task"}}
+{"round": 3, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 86.366, "unit": "ns/task"}}
+{"round": 3, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.797, "unit": "ns/task"}}
+{"round": 4, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 86.869, "unit": "ns/task"}}
+{"round": 4, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 87.75, "unit": "ns/task"}}
+{"round": 0, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 16375.945, "unit": "ns/call"}}
+{"round": 0, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 16709.185, "unit": "ns/call"}}
+{"round": 1, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 16150.395, "unit": "ns/call"}}
+{"round": 1, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 19628.839, "unit": "ns/call"}}
+{"round": 2, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 16156.659, "unit": "ns/call"}}
+{"round": 2, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 15614.413, "unit": "ns/call"}}
+{"round": 3, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 14532.018, "unit": "ns/call"}}
+{"round": 3, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 17721.269, "unit": "ns/call"}}
+{"round": 4, "variant": "normal-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 16153.344, "unit": "ns/call"}}
+{"round": 4, "variant": "latency-priority", "measurement": {"io": "reactor", "workload": "priority-lanes", "name": "task + owned lane + await", "value": 17278.008, "unit": "ns/call"}}
+{"round": 0, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 98.436, "unit": "ns/task"}}
+{"round": 0, "variant": "65536", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 93.445, "unit": "ns/task"}}
+{"round": 1, "variant": "65536", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 94.037, "unit": "ns/task"}}
+{"round": 1, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 96.446, "unit": "ns/task"}}
+{"round": 2, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 89.502, "unit": "ns/task"}}
+{"round": 2, "variant": "65536", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 92.711, "unit": "ns/task"}}
+{"round": 3, "variant": "65536", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 103.352, "unit": "ns/task"}}
+{"round": 3, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 88.058, "unit": "ns/task"}}
+{"round": 4, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 86.691, "unit": "ns/task"}}
+{"round": 4, "variant": "65536", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 95.356, "unit": "ns/task"}}
+{"round": 0, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.17, "unit": "ns/task"}}
+{"round": 0, "variant": "262144", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 104.631, "unit": "ns/task"}}
+{"round": 1, "variant": "262144", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 92.461, "unit": "ns/task"}}
+{"round": 1, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.477, "unit": "ns/task"}}
+{"round": 2, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.518, "unit": "ns/task"}}
+{"round": 2, "variant": "262144", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 101.051, "unit": "ns/task"}}
+{"round": 3, "variant": "262144", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 98.307, "unit": "ns/task"}}
+{"round": 3, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 94.399, "unit": "ns/task"}}
+{"round": 4, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 91.094, "unit": "ns/task"}}
+{"round": 4, "variant": "262144", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 96.843, "unit": "ns/task"}}
+{"round": 0, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 87.34, "unit": "ns/task"}}
+{"round": 0, "variant": "1048576", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 100.636, "unit": "ns/task"}}
+{"round": 1, "variant": "1048576", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 99.511, "unit": "ns/task"}}
+{"round": 1, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 95.149, "unit": "ns/task"}}
+{"round": 2, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 88.608, "unit": "ns/task"}}
+{"round": 2, "variant": "1048576", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 90.935, "unit": "ns/task"}}
+{"round": 3, "variant": "1048576", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 93.1, "unit": "ns/task"}}
+{"round": 3, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 84.239, "unit": "ns/task"}}
+{"round": 4, "variant": "default-stack", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 84.469, "unit": "ns/task"}}
+{"round": 4, "variant": "1048576", "measurement": {"io": "reactor", "workload": "spawn-options", "name": "concurrentWith + await, empty", "value": 94.489, "unit": "ns/task"}}
+{"round": 0, "variant": "native-capabilities", "measurement": {"backend": "io_uring", "features": {"fixed_files": true, "msg_ring": true, "linked_timeout": true, "waitid": true, "send_zc": true, "registered_buffers": true}, "flags": 12936}}
+{"round": 0, "variant": "--fixed-files-off", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 558.749, "unit": "ns/read"}}
+{"round": 0, "variant": "fixed-files", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 549.596, "unit": "ns/read"}}
+{"round": 1, "variant": "fixed-files", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 542.285, "unit": "ns/read"}}
+{"round": 1, "variant": "--fixed-files-off", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 569.186, "unit": "ns/read"}}
+{"round": 2, "variant": "--fixed-files-off", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 568.733, "unit": "ns/read"}}
+{"round": 2, "variant": "fixed-files", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 563.127, "unit": "ns/read"}}
+{"round": 3, "variant": "fixed-files", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 566.72, "unit": "ns/read"}}
+{"round": 3, "variant": "--fixed-files-off", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 571.151, "unit": "ns/read"}}
+{"round": 4, "variant": "--fixed-files-off", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 566.329, "unit": "ns/read"}}
+{"round": 4, "variant": "fixed-files", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 570.527, "unit": "ns/read"}}
+{"round": 0, "variant": "--linked-timeout-off", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 73045.799, "unit": "msg/s"}}
+{"round": 0, "variant": "linked-timeout", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 68930.948, "unit": "msg/s"}}
+{"round": 1, "variant": "linked-timeout", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 69621.634, "unit": "msg/s"}}
+{"round": 1, "variant": "--linked-timeout-off", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 74130.352, "unit": "msg/s"}}
+{"round": 2, "variant": "--linked-timeout-off", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 73526.348, "unit": "msg/s"}}
+{"round": 2, "variant": "linked-timeout", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 70236.805, "unit": "msg/s"}}
+{"round": 3, "variant": "linked-timeout", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 64508.748, "unit": "msg/s"}}
+{"round": 3, "variant": "--linked-timeout-off", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 72446.313, "unit": "msg/s"}}
+{"round": 4, "variant": "--linked-timeout-off", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 72978.795, "unit": "msg/s"}}
+{"round": 4, "variant": "linked-timeout", "measurement": {"io": "reactor", "workload": "deadlines", "name": "64 B round trips, reads under a deadline", "value": 68609.095, "unit": "msg/s"}}
+{"round": 0, "variant": "--files-pool", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 40501.67, "unit": "ns/call"}}
+{"round": 0, "variant": "native-open-stat", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 21786.675, "unit": "ns/call"}}
+{"round": 1, "variant": "native-open-stat", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 21261.482, "unit": "ns/call"}}
+{"round": 1, "variant": "--files-pool", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 39351.082, "unit": "ns/call"}}
+{"round": 2, "variant": "--files-pool", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 38661.224, "unit": "ns/call"}}
+{"round": 2, "variant": "native-open-stat", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 21346.463, "unit": "ns/call"}}
+{"round": 3, "variant": "native-open-stat", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 21547.311, "unit": "ns/call"}}
+{"round": 3, "variant": "--files-pool", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 39901.614, "unit": "ns/call"}}
+{"round": 4, "variant": "--files-pool", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 40424.419, "unit": "ns/call"}}
+{"round": 4, "variant": "native-open-stat", "measurement": {"io": "reactor", "workload": "open-stat", "name": "open, stat, close", "value": 20741.602, "unit": "ns/call"}}
+{"round": 0, "variant": "eventfd-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 66.1, "unit": "ns/wake"}}
+{"round": 0, "variant": "msg-ring-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 88.203, "unit": "ns/wake"}}
+{"round": 1, "variant": "msg-ring-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 91.433, "unit": "ns/wake"}}
+{"round": 1, "variant": "eventfd-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 66.457, "unit": "ns/wake"}}
+{"round": 2, "variant": "eventfd-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 66.089, "unit": "ns/wake"}}
+{"round": 2, "variant": "msg-ring-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 87.119, "unit": "ns/wake"}}
+{"round": 3, "variant": "msg-ring-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 85.546, "unit": "ns/wake"}}
+{"round": 3, "variant": "eventfd-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 69.949, "unit": "ns/wake"}}
+{"round": 4, "variant": "eventfd-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 66.108, "unit": "ns/wake"}}
+{"round": 4, "variant": "msg-ring-wake", "measurement": {"io": "reactor", "workload": "wake", "name": "ping-pong between two tasks", "value": 89.685, "unit": "ns/wake"}}
+{"round": 0, "variant": "ordinary-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 548.895, "unit": "ns/read"}}
+{"round": 0, "variant": "registered-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 541.322, "unit": "ns/read"}}
+{"round": 1, "variant": "registered-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 543.521, "unit": "ns/read"}}
+{"round": 1, "variant": "ordinary-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 566.665, "unit": "ns/read"}}
+{"round": 2, "variant": "ordinary-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 610.758, "unit": "ns/read"}}
+{"round": 2, "variant": "registered-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 578.316, "unit": "ns/read"}}
+{"round": 3, "variant": "registered-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 541.389, "unit": "ns/read"}}
+{"round": 3, "variant": "ordinary-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 567.997, "unit": "ns/read"}}
+{"round": 4, "variant": "ordinary-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 575.036, "unit": "ns/read"}}
+{"round": 4, "variant": "registered-buffer", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 584.904, "unit": "ns/read"}}
+{"round": 0, "variant": "512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 55.31, "unit": "MiB/s"}}
+{"round": 0, "variant": "zero-copy-512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 46.158, "unit": "MiB/s"}}
+{"round": 1, "variant": "zero-copy-512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 46.884, "unit": "MiB/s"}}
+{"round": 1, "variant": "512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 56.303, "unit": "MiB/s"}}
+{"round": 2, "variant": "512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 56.818, "unit": "MiB/s"}}
+{"round": 2, "variant": "zero-copy-512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 46.419, "unit": "MiB/s"}}
+{"round": 3, "variant": "zero-copy-512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 47.146, "unit": "MiB/s"}}
+{"round": 3, "variant": "512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 57.637, "unit": "MiB/s"}}
+{"round": 4, "variant": "512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 55.813, "unit": "MiB/s"}}
+{"round": 4, "variant": "zero-copy-512", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 46.818, "unit": "MiB/s"}}
+{"round": 0, "variant": "4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 420.654, "unit": "MiB/s"}}
+{"round": 0, "variant": "zero-copy-4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 367.559, "unit": "MiB/s"}}
+{"round": 1, "variant": "zero-copy-4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 361.715, "unit": "MiB/s"}}
+{"round": 1, "variant": "4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 416.479, "unit": "MiB/s"}}
+{"round": 2, "variant": "4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 430.904, "unit": "MiB/s"}}
+{"round": 2, "variant": "zero-copy-4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 372.565, "unit": "MiB/s"}}
+{"round": 3, "variant": "zero-copy-4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 375.878, "unit": "MiB/s"}}
+{"round": 3, "variant": "4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 416.691, "unit": "MiB/s"}}
+{"round": 4, "variant": "4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 432.174, "unit": "MiB/s"}}
+{"round": 4, "variant": "zero-copy-4096", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 367.621, "unit": "MiB/s"}}
+{"round": 0, "variant": "16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1671.542, "unit": "MiB/s"}}
+{"round": 0, "variant": "zero-copy-16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1280.256, "unit": "MiB/s"}}
+{"round": 1, "variant": "zero-copy-16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1274.004, "unit": "MiB/s"}}
+{"round": 1, "variant": "16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1708.141, "unit": "MiB/s"}}
+{"round": 2, "variant": "16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1422.915, "unit": "MiB/s"}}
+{"round": 2, "variant": "zero-copy-16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1191.399, "unit": "MiB/s"}}
+{"round": 3, "variant": "zero-copy-16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1290.676, "unit": "MiB/s"}}
+{"round": 3, "variant": "16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1685.396, "unit": "MiB/s"}}
+{"round": 4, "variant": "16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1678.521, "unit": "MiB/s"}}
+{"round": 4, "variant": "zero-copy-16384", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 1280.311, "unit": "MiB/s"}}
+{"round": 0, "variant": "65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3197.836, "unit": "MiB/s"}}
+{"round": 0, "variant": "zero-copy-65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2305.517, "unit": "MiB/s"}}
+{"round": 1, "variant": "zero-copy-65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2358.849, "unit": "MiB/s"}}
+{"round": 1, "variant": "65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3213.699, "unit": "MiB/s"}}
+{"round": 2, "variant": "65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3159.099, "unit": "MiB/s"}}
+{"round": 2, "variant": "zero-copy-65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2394.495, "unit": "MiB/s"}}
+{"round": 3, "variant": "zero-copy-65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2403.472, "unit": "MiB/s"}}
+{"round": 3, "variant": "65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3343.934, "unit": "MiB/s"}}
+{"round": 4, "variant": "65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3427.03, "unit": "MiB/s"}}
+{"round": 4, "variant": "zero-copy-65536", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2334.35, "unit": "MiB/s"}}
+{"round": 0, "variant": "1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 4080.306, "unit": "MiB/s"}}
+{"round": 0, "variant": "zero-copy-1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2658.638, "unit": "MiB/s"}}
+{"round": 1, "variant": "zero-copy-1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2562.217, "unit": "MiB/s"}}
+{"round": 1, "variant": "1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3964.538, "unit": "MiB/s"}}
+{"round": 2, "variant": "1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 4101.455, "unit": "MiB/s"}}
+{"round": 2, "variant": "zero-copy-1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2612.685, "unit": "MiB/s"}}
+{"round": 3, "variant": "zero-copy-1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2543.772, "unit": "MiB/s"}}
+{"round": 3, "variant": "1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3994.664, "unit": "MiB/s"}}
+{"round": 4, "variant": "1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 3945.124, "unit": "MiB/s"}}
+{"round": 4, "variant": "zero-copy-1048576", "measurement": {"io": "reactor", "workload": "bulk", "name": "contiguous loopback send", "value": 2894.651, "unit": "MiB/s"}}
+{"round": 0, "variant": "ordinary-ring", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 562.152, "unit": "ns/read"}}
+{"round": 0, "variant": "sqpoll", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 585.634, "unit": "ns/read"}}
+{"round": 1, "variant": "sqpoll", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 600.735, "unit": "ns/read"}}
+{"round": 1, "variant": "ordinary-ring", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 561.126, "unit": "ns/read"}}
+{"round": 2, "variant": "ordinary-ring", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 566.416, "unit": "ns/read"}}
+{"round": 2, "variant": "sqpoll", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 573.171, "unit": "ns/read"}}
+{"round": 3, "variant": "sqpoll", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 601.271, "unit": "ns/read"}}
+{"round": 3, "variant": "ordinary-ring", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 556.389, "unit": "ns/read"}}
+{"round": 4, "variant": "ordinary-ring", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 553.374, "unit": "ns/read"}}
+{"round": 4, "variant": "sqpoll", "measurement": {"io": "reactor", "workload": "files", "name": "cached 4 KiB positional read", "value": 581.206, "unit": "ns/read"}}
