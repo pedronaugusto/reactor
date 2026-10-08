@@ -252,7 +252,7 @@ fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !
         const regression = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
         defer gpa.free(regression);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
-        try expectBefore(gpa, io, writer, zig, "R1 group await", "R1 group await observes all member stacks released");
+        try expectBefore(gpa, io, writer, zig, "R1 group await", "expected 0, found 1");
         try expectBefore(gpa, io, writer, zig, "R1 stopping idle", "exited with code 97");
     } else if (builtin.os.tag == .macos) {
         try expectBefore(gpa, io, writer, zig, "R1 native child", "R1 native child wait uses no inline wait lane");

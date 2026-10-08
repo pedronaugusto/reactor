@@ -114,14 +114,28 @@ fn groupDeep(io: Io) void {
     var address: usize = 0;
     _ = deepPark(io, &address) catch @panic("group member sleep failed");
 }
+fn wakeStoppingWorkers(r: *Runtime) void {
+    // The deliberately broken before revision queues its shutdown message
+    // without submitting it. Keep that independent bug out of group release.
+    while (!r.core.scheduler.stopping.load(.acquire)) std.atomic.spinLoopHint();
+    for (r.core.processors[1..]) |*p| p.loop.wake();
+}
 test "R1 group await observes all member stacks released" {
     var runtime: Runtime = undefined;
     runtime.init(testing.allocator, .{ .workers = 2, .max_tasks = 32, .stack_size = 512 << 10 }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer runtime.deinit();
+    var stop_waker: ?std.Thread = null;
+    defer {
+        if (stop_waker) |waker| {
+            runtime.stop();
+            waker.join();
+        }
+        runtime.deinit();
+    }
     try runtime.start();
+    stop_waker = try std.Thread.spawn(.{}, wakeStoppingWorkers, .{&runtime});
     const io = runtime.io();
     for (0..200) |_| {
         var group: Io.Group = .init;
