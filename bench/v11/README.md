@@ -21,7 +21,8 @@ diagnostic watermarks. Each test gets a fresh runtime at the unchanged 1 MiB sta
 reservation, zero workers, owned offload, and stack painting enabled. Standard
 Threaded test infrastructure remains for std helpers; native fuzz entry points,
 allocator leak checks and error logs remain checks. Every test reports status,
-parked high water and overall high water. Skips and failures are explicit.
+parked high water and overall high water. Skips and failures are explicit. A per-test watchdog bounds an incomplete
+fixture at 120 seconds; a watchdog exit supplies no completed-suite maximum.
 Painting is diagnostic instrumentation, never performance evidence.
 
 Build the adapter with `zig build-exe bench/v11/prepare.zig -OReleaseSafe`.

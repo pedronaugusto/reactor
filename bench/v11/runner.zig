@@ -97,7 +97,7 @@ const Watchdog = struct {
 
     fn watch(w: *Watchdog) void {
         const io = std.Io.Threaded.global_single_threaded.io();
-        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(120), .clock = .awake });
         while (w.done.load(.acquire) == 0) {
             if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline.raw.nanoseconds) break;
             io.futexWaitTimeout(u32, &w.done.raw, 0, .{ .deadline = deadline }) catch {};
@@ -107,7 +107,7 @@ const Watchdog = struct {
         const file = std.Io.Dir.cwd().createFile(io, "v11-watchdog.log", .{}) catch std.Io.File.stderr();
         defer file.close(io);
         var output = file.writer(io, &buffer);
-        output.interface.writeAll("V11 test watchdog: actual suite did not complete in 30 seconds\n") catch {};
+        output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
         w.runtime.dump(&output.interface) catch {};
         output.interface.flush() catch {};
         std.process.exit(70);

@@ -362,7 +362,12 @@ pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, option
     // at its creation, and is put back once connected.
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
     const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol, start) catch |err| return narrow(net.IpAddress.ConnectError, err);
-    errdefer socket.close(fd);
+    errdefer {
+        // The unpublished socket may already have a readiness registration.
+        // Its failed operation is drained; invalidate caches before reuse.
+        Loop.closing(fd);
+        socket.close(fd);
+    }
     var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } };
     run(r, &o, .{ .deadline = deadlineOf(r, options.timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
@@ -396,7 +401,12 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
         error.ProtocolUnsupportedByAddressFamily, error.ProtocolUnsupportedBySystem => error.AddressFamilyUnsupported,
         else => |e| narrow(net.UnixAddress.ConnectError, e),
     };
-    errdefer socket.close(fd);
+    errdefer {
+        // The unpublished socket may already have a readiness registration.
+        // Its failed operation is drained; invalidate caches before reuse.
+        Loop.closing(fd);
+        socket.close(fd);
+    }
     var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } };
     run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
