@@ -111,22 +111,31 @@ fn find(a: *Accept, fd: linux.fd_t) ?*Record {
     return null;
 }
 
+fn acquire(a: *Accept, fd: linux.fd_t) ?*Record {
+    const first = @as(u32, @bitCast(fd)) % a.records.len;
+    // Honor a runtime reservation before looking for another free slot.
+    for (0..2) |pass| for (0..@min(8, a.records.len)) |offset| {
+        const i = (first + offset) % a.records.len;
+        const r = &a.records[i];
+        if (r.fd != -1) continue;
+        const descriptor = &a.descriptors[i];
+        const reserved = descriptor.load(.acquire);
+        if (pass == 0) {
+            if (reserved != fd) continue;
+        } else {
+            if (reserved >= 0) continue;
+            if (descriptor.cmpxchgStrong(reserved, fd, .acq_rel, .acquire) != null) continue;
+        }
+        r.* = .{ .fd = fd };
+        return r;
+    };
+    return null;
+}
+
 pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
     const fd = o.kind.accept;
     if (!a.enabled and a.find(fd) == null) return false;
-    const r = a.find(fd) orelse free: {
-        const first = @as(u32, @bitCast(fd)) % a.records.len;
-        for (0..@min(8, a.records.len)) |offset| {
-            const r = &a.records[(first + offset) % a.records.len];
-            if (r.fd != -1) continue;
-            const reserved = a.descriptors[a.index(r)].load(.acquire);
-            if (reserved >= 0 and reserved != fd) continue;
-            r.* = .{ .fd = fd };
-            a.descriptors[a.index(r)].store(fd, .release);
-            break :free r;
-        }
-        return false;
-    };
+    const r = a.find(fd) orelse (a.acquire(fd) orelse return false);
     if (!a.enabled and !r.armed and r.count == 0) {
         a.reset(r);
         return false;

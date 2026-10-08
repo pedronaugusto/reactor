@@ -145,3 +145,22 @@ test "accepting a burst keeps every connected peer" {
         socket.close(io);
     }
 }
+
+test "a reserved listener slot survives an earlier slot being released" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    table.records[0].fd = 4;
+    table.descriptors[0].store(4, .release);
+    try testing.expect(table.reserve(6));
+    table.reset(&table.records[0]);
+    var h: Harness = .{};
+    var o: Loop.Op = .{ .kind = .{ .accept = 6 } };
+    try testing.expect(table.submit(&h, &o));
+    try testing.expectEqual(@as(i32, 6), table.records[1].fd);
+    try testing.expect(table.cancel(&o));
+    _ = table.deliver(&h);
+    table.close(&h, 6);
+    const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
+    table.complete(&h, &table.records[1].slots[0], cqe, &h);
+}
