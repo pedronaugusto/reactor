@@ -35,7 +35,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - README follows the family shape and describes the combined LATER/R6 work as pending until its gates pass.
 - Opt-in overall touched-stack profiling and retained parked high-water statistics; diagnostic painting is disabled when timing.
 - Lane executor rejection no longer runs blocking work on the submitting scheduler worker. Disabled lanes reject rather than queue forever.
-- Deep ended or shallow parked stacks discard unused pages on systems that support it.
+- Deep stacks stay warm through immediate reuse. A shallow parked task releases unused pages only after one second idle; a loop-owned timer pins it until resume.
 - SQ/CQ pressure releases kernel ownership while keeping user callbacks and batch list mutations queued for `run`; SQPOLL file close waits for published file references before unregistering.
 - Native engines keep stable owned storage allocated at loop initialization; dispatch does not copy concurrently changing wake state.
 - Group completion releases every member stack before publishing an empty group.

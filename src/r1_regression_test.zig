@@ -59,8 +59,8 @@ noinline fn deepPark(io: Io, address: *usize) Io.Cancelable!u8 {
     return memory[16 << 10];
 }
 
-test "R1 ended deep stacks discard unused pages before recycling" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+test "R1 ended deep stacks stay warm through immediate recycling" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var d: Driver = undefined;
     try d.init(testing.allocator, 1, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
     defer d.deinit();
@@ -68,7 +68,8 @@ test "R1 ended deep stacks discard unused pages before recycling" {
     var future = try d.io().concurrent(deepPark, .{ d.io(), &address });
     try testing.expectEqual(@as(u8, 73), try future.await(d.io()));
     const byte: *volatile u8 = @ptrFromInt(address); // safe: reserved anonymous mapping, now free in the owned stack pool
-    try testing.expectEqual(@as(u8, 0), byte.*);
+    try testing.expectEqual(@as(u8, 73), byte.*);
+    try testing.expectEqual(@as(u64, 0), d.runtime.stats().stack_trims);
 }
 
 fn idleStopGuard(done: *std.atomic.Value(bool)) void {

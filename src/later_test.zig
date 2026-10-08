@@ -797,13 +797,13 @@ test "later: SQPOLL close captures published fixed-file references before unregi
     }
 }
 
-noinline fn shallowAfterDeep(io: Io) !u8 {
+noinline fn shallowAfterDeep(io: Io, duration: Io.Duration) !u8 {
     var address: usize = 0;
     try testing.expectEqual(@as(u8, 73), try deepLive(io, &address));
     var data: [8 << 10]u8 = undefined;
     const bytes: *volatile [8 << 10]u8 = &data;
     for (0..data.len) |at| bytes[at] = 0x52;
-    try io.sleep(.fromMilliseconds(1), .awake);
+    try io.sleep(duration, .awake);
     for (0..data.len) |at| try testing.expectEqual(@as(u8, 0x52), bytes[at]);
     return bytes[31];
 }
@@ -816,14 +816,36 @@ noinline fn deepLive(io: Io, address: *usize) !u8 {
     for (0..data.len) |at| try testing.expectEqual(@as(u8, 73), bytes[at]);
     return bytes[31];
 }
-test "later: trimming a shallow park preserves every live byte after a deep park" {
+test "later: idle trimming preserves live bytes and skips short shallow parks" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    for ([_]Io.Duration{ .fromMilliseconds(500), .fromMilliseconds(1500) }, 0..) |duration, at| {
+        var driver: Driver = undefined;
+        try driver.init(testing.allocator, 7, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
+        defer driver.deinit();
+        var task = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), duration });
+        try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
+        try testing.expectEqual(at != 0, driver.runtime.stats().stack_trims > 0);
+    }
+}
+
+test "later: waking an idle trim candidate removes its timer before stack reuse" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var driver: Driver = undefined;
-    try driver.init(testing.allocator, 7, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
+    try driver.init(testing.allocator, 7, .{ .max_tasks = 1, .stack_size = 512 << 10, .offload = .none });
     defer driver.deinit();
-    var task = try driver.io().concurrent(shallowAfterDeep, .{driver.io()});
-    try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
-    try testing.expect(driver.runtime.stats().stack_trims > 0);
+    for (0..16) |_| {
+        var task = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), Io.Duration.fromMilliseconds(1500) });
+        driver.runtime.run(.nowait);
+        driver.virtual.advance(.fromMilliseconds(2));
+        driver.runtime.run(.nowait);
+        try testing.expect(driver.runtime.core.processors[0].loop.in_flight >= 2);
+        try testing.expectError(error.Canceled, task.cancel(driver.io()));
+        try testing.expectEqual(@as(u32, 0), driver.runtime.core.processors[0].loop.in_flight);
+        driver.virtual.advance(.fromSeconds(2));
+        driver.runtime.run(.nowait);
+        try testing.expectEqual(@as(u64, 0), driver.runtime.stats().stack_trims);
+        try testing.expectEqual(@as(u32, 0), driver.runtime.stats().tasks);
+    }
 }
 
 fn drainCanceledPayload(socket: Io.net.Socket) !void {

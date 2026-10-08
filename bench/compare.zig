@@ -254,7 +254,6 @@ fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !
     if (builtin.os.tag == .linux) {
         try expectBefore(gpa, io, writer, zig, "R1 Linux dialing", "TODO implement netInterfaceName for linux");
         try expectBefore(gpa, io, writer, zig, "R1 native open", "R1 native open and stat use no inline file lane");
-        try expectBefore(gpa, io, writer, zig, "R1 ended deep", "R1 ended deep stacks discard unused pages before recycling");
         try checked(gpa, io, &.{ "git", "reset", "--hard", ownership_baseline }, base_dir);
         try focusTests(gpa, io);
         const ownership_tests = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);

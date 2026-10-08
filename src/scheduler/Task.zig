@@ -32,6 +32,8 @@ stack: ?u32 = null,
 stack_top: usize = 0,
 /// Deepest sampled use since pages were last discarded. Owned by the task.
 resident_water: usize = 0,
+/// An idle trim timer pins this parked task to its owning loop.
+trim_pending: bool = false,
 kind: Kind,
 /// Latency-sensitive tasks receive a bounded share ahead of normal work.
 priority: Priority = .normal,

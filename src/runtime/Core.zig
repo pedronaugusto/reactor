@@ -21,6 +21,7 @@ const loop_internal = @import("../loop/internal.zig");
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
 const Records = @import("../scheduler/Records.zig");
+const Trims = @import("../scheduler/Trims.zig");
 const Notifications = @import("../backend/iocp/Notifications.zig");
 const Processor = Scheduler.Processor;
 const futexes = @import("../ops/futex.zig");
@@ -111,11 +112,14 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     errdefer stacks.deinit(gpa);
     var records = try Records.init(gpa, options.max_tasks);
     errdefer records.deinit(gpa);
+    var trims = try Trims.init(gpa, options.max_tasks);
+    errdefer trims.deinit(gpa);
     c.scheduler = .{
         .processors = c.processors,
         .root = &c.root,
         .stacks = stacks,
         .records = records,
+        .trims = trims,
         .scheduling = if (workers == 0) .per_core else options.scheduling,
         .measure_stacks = options.measure_stacks,
         .budget_ops = options.budget_ops,
@@ -271,6 +275,7 @@ pub fn deinit(c: *Core) void {
     fiber.deinit(&c.processors[0].sched_context);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
     memory.release(c.home_stack);
+    c.scheduler.trims.deinit(c.gpa);
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);

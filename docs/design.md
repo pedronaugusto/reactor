@@ -74,13 +74,12 @@ landing; correctness and green CI remain required. Missing rival targets remain
 open in the mission. Shared-machine timing uses paired, interleaved ratios
 with spread. Native x86 rows stay open until hardware is available.
 
-Immediate deep-stack discard retains a documented departure from the planned
-one-second idle policy. Forced reuse costs 93.9 times the old Linux path and
-14.5 times the old macOS path: discarding and refaulting the touched pages
-causes the extra work. It bounds retained dead pages without a concurrent
-scanner touching a resumable stack; live-byte and guard proofs remain required.
-It is an idle-memory tradeoff, not a throughput improvement. Changing the
-policy needs the deferred idle-connection and suite measurements.
+Unused pages are discarded only after a task has been parked for a full
+second. An init-reserved timer pins the task to its owning loop until resume;
+the loop cancels the timer before the stack can run or be released. Ended
+stacks remain warm in the free pool, avoiding repeated discard/refault on
+immediate reuse. Retained free-stack pages are a resource cost until reuse or
+runtime teardown. Diagnostic painting still disables trimming.
 
 The one-worker group-spawn observation remains +37.9%. The ownership follow-up
 adds scheduler identity checks so independent runtimes cannot run one

@@ -17,6 +17,7 @@ const Loop = @import("Loop.zig");
 const loop_internal = @import("loop/internal.zig");
 const Task = @import("scheduler/Task.zig");
 const Records = @import("scheduler/Records.zig");
+const Trims = @import("scheduler/Trims.zig");
 const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
@@ -394,6 +395,7 @@ pub const Processor = struct {
 
     /// Runs `t` until it switches back, then does what it asked.
     fn runTask(p: *Processor, comptime watched: bool, t: *Task) void {
+        if (t.trim_pending) p.scheduler.trims.beforeRun(&p.loop, t);
         p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
         t.processor = p;
@@ -435,15 +437,14 @@ pub const Processor = struct {
             const depth = p.scheduler.stacks.highWater(index);
             p.stack_high_water.store(@max(depth, p.stack_high_water.load(.monotonic)), .monotonic);
         };
-        // Trim only after switching off the stack and before publishing a
-        // wake hook. Another processor cannot resume this task yet.
+        // Arm trimming off-stack, before publishing the wake hook. The
+        // timer only discards pages after a full second parked.
         if (!p.scheduler.measure_stacks and builtin.os.tag != .windows and action == .park) if (t.stack) |index| {
             const sp = fiber.stackPointer(&t.context);
             const live = t.stack_top - sp;
             if (t.resident_water > live + (64 << 10)) {
-                p.scheduler.stacks.trim(index, sp -| 256);
-                t.resident_water = live;
-                _ = p.scheduler.stack_trims.fetchAdd(1, .monotonic);
+                _ = index;
+                p.scheduler.trims.arm(&p.loop, t, &p.scheduler.stacks, &p.scheduler.stack_trims, sp);
             }
         };
         p.current = null;
@@ -594,6 +595,7 @@ processors: []Processor,
 root: *Task,
 stacks: Stacks,
 records: Records,
+trims: Trims,
 scheduling: Scheduling,
 measure_stacks: bool = false,
 budget_ops: u16,
@@ -1032,12 +1034,6 @@ inline fn createAt(s: *Scheduler, index: u32, kind: Task.Kind, extra: usize, ext
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
     s.stacks.ended(index, fiber.committedLimit(&t.context));
-    const water = t.resident_water;
-    if (!s.measure_stacks and builtin.os.tag != .windows and water > 64 << 10) {
-        // The record at the top stays live through fiber.deinit below.
-        s.stacks.trim(index, @intFromPtr(t)); // safe: release exclusively owns this ended task's stack
-        _ = s.stack_trims.fetchAdd(1, .monotonic);
-    }
     s.records.release(t);
     fiber.deinit(&t.context);
     t.* = undefined;
