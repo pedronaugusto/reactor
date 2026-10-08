@@ -589,7 +589,7 @@ fn canceledWait(io: Io, begun: *Io.Event, word: *u32) Io.Cancelable!void {
     begun.set(io);
     while (word.* == 0) try io.futexWait(u32, word, 0);
 }
-const NetObservation = struct { bytes: [256]u8 = @splat(0), timeout: ?anyerror = null, canceled: ?anyerror = null, eof: usize = 1 };
+const NetObservation = struct { bytes: [256]u8 = @splat(0), canceled: ?anyerror = null, eof: usize = 1 };
 fn networkSequence(io: Io, payload: []const u8) !NetObservation {
     var out: NetObservation = .{};
     var listener = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
@@ -602,16 +602,22 @@ fn networkSequence(io: Io, payload: []const u8) !NetObservation {
     var data: [1][]u8 = .{buffer[0..payload.len]};
     var storage: [1]Io.Operation.Storage = undefined;
     var batch: Io.Batch = .init(&storage);
-    defer batch.cancel(io);
-    _ = batch.add(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } });
-    batch.awaitConcurrent(io, ms(1)) catch |err| {
-        out.timeout = err;
-    };
-    if (out.timeout == null or out.timeout.? != error.Timeout) return error.WrongTimeout;
+    // Threaded's Windows batch supports files, not network operations.
+    // Compare shared stream semantics there with operate, and still assert
+    // reactor's generated native batch timeout/retry below on every OS.
+    const batches = builtin.os.tag != .windows or Runtime.recognize(io) != null;
+    defer if (batches) batch.cancel(io);
+    if (batches) {
+        _ = batch.add(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } });
+        try testing.expectError(error.Timeout, batch.awaitConcurrent(io, ms(1)));
+    }
     var sent: usize = 0;
     while (sent < payload.len) sent += try (try io.operate(.{ .net_write = .{ .socket_handle = peer.socket.handle, .data = &.{payload[sent..]} } })).net_write;
-    try batch.awaitConcurrent(io, ms(1000));
-    var got = (try batch.next().?.result.net_read).data_len;
+    const read = if (batches) result: {
+        try batch.awaitConcurrent(io, ms(1000));
+        break :result try batch.next().?.result.net_read;
+    } else try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read;
+    var got = read.data_len;
     @memcpy(out.bytes[0..got], buffer[0..got]);
     while (got < payload.len) {
         var remaining: [1][]u8 = .{out.bytes[got..payload.len]};
@@ -641,7 +647,6 @@ fn networkDifferential(backend: Loop.Backend, c: *shakedown.Case) !void {
     const expected = try networkSequence(testing.io, payload[0..count]);
     const actual = try networkSequence(r.io(), payload[0..count]);
     try testing.expectEqualSlices(u8, &expected.bytes, &actual.bytes);
-    try testing.expectEqual(expected.timeout, actual.timeout);
     try testing.expectEqual(expected.canceled, actual.canceled);
     try testing.expectEqual(expected.eof, actual.eof);
     try testing.expectEqual(@as(u32, 0), r.stats().tasks);
