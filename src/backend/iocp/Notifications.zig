@@ -43,7 +43,9 @@ pub const Record = struct {
             if (try record.take()) |message| return message;
             record.ready.waitTimeout(io, deadline) catch |err| {
                 if (try record.take()) |message| return message;
-                return err;
+                if (err == error.Canceled) return error.Canceled;
+                if (deadline.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) return error.Timeout;
+                continue;
             };
         }
     }

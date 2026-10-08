@@ -176,12 +176,13 @@ test "closing a file removes an idle registration on another ring" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const Scheduler = @import("Scheduler.zig");
     const Cached = struct {
+        const Self = @This();
         errand: Scheduler.Errand = .{ .run = run },
         io: Io,
         fd: posix.fd_t,
         done: Io.Event = .unset,
         fn run(errand: *Scheduler.Errand, p: *Scheduler.Processor) void {
-            const cached: *@This() = @alignCast(@fieldParentPtr("errand", errand)); // safe: the test sends this record
+            const cached: *Self = @alignCast(@fieldParentPtr("errand", errand)); // safe: the test sends this record
             var byte: [1]u8 = undefined;
             var sqe: std.os.linux.io_uring_sqe = undefined;
             sqe.prep_read(cached.fd, &byte, 0);
@@ -295,16 +296,29 @@ test "a host waiting on the runtime's handle is woken when a lane call ends" {
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 2 * std.time.ns_per_s);
 }
 
-/// The process's threads, as Linux counts them.
+/// User threads only: io_uring can create PF_IO_WORKER kernel threads.
+/// The flag is defined in Linux's include/linux/sched.h.
 fn threadCount() !usize {
     var buffer: [4096]u8 = undefined;
     const io = Io.Threaded.global_single_threaded.io();
-    const text = try Io.Dir.cwd().readFile(io, "/proc/self/status", &buffer);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "Threads:")) {
-        return std.fmt.parseInt(usize, std.mem.trim(u8, line["Threads:".len..], " \t"), 10);
-    };
-    return error.NoThreadCount;
+    const dir = try Io.Dir.openDirAbsolute(io, "/proc/self/task", .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        var path: [64]u8 = undefined;
+        const name = try std.mem.print(&path, "{s}/stat", .{entry.name});
+        const text = dir.readFile(io, name, &buffer) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        const end = std.mem.findScalarLast(u8, text, ')') orelse return error.NoThreadCount;
+        var fields = std.mem.tokenizeScalar(u8, text[end + 1 ..], ' ');
+        for (0..6) |_| _ = fields.next() orelse return error.NoThreadCount;
+        const flags = try std.fmt.parseInt(u64, fields.next() orelse return error.NoThreadCount, 10);
+        if (flags & 0x10 == 0) count += 1;
+    }
+    return count;
 }
 
 fn conformance(io: Io, failure: *shakedown.conformance.Failure, done: *std.atomic.Value(bool)) anyerror!void {
@@ -327,6 +341,7 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
     var failure: shakedown.conformance.Failure = undefined;
     var done: std.atomic.Value(bool) = .init(false);
     var suite = try io.concurrent(conformance, .{ io, &failure, &done });
+    defer _ = suite.cancel(io) catch {};
     // The host's frames: a millisecond of the runtime's time each.
     var frames: usize = 0;
     while (!done.load(.acquire)) : (frames += 1) {

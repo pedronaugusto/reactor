@@ -43,11 +43,8 @@ pub const Config = struct {
         defer f.close(io);
         var buffer: [4096]u8 = undefined;
         var reader = f.reader(io, &buffer);
-        while (reader.interface.takeDelimiterExclusive('\n')) |text| {
+        while (reader.interface.takeDelimiter('\n') catch return error.NameNotResolved) |text| {
             c.line(text);
-        } else |err| switch (err) {
-            error.EndOfStream => {},
-            else => return error.NameNotResolved,
         }
         if (c.server_count == 0) {
             c.servers[0] = .{ .ip4 = .loopback(53) };
@@ -119,12 +116,12 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
     var n: usize = 0;
-    while (reader.interface.takeDelimiterExclusive('\n')) |line| {
+    lines: while (reader.interface.takeDelimiter('\n') catch return error.NameNotResolved) |line| {
         var words = std.mem.tokenizeAny(u8, line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len], " \t\r");
         const text = words.next() orelse continue;
         const primary = words.next() orelse continue;
         if (!std.ascii.eqlIgnoreCase(primary, name)) {
-            while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue;
+            while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue :lines;
         }
         const address = net.IpAddress.parse(text, port) catch continue;
         if (family) |f| if (address != f) continue;
@@ -132,9 +129,6 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
         out[n] = address;
         if (n == 0) canonical.* = try Name.init(primary);
         n += 1;
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => return error.NameNotResolved,
     }
     return if (n == 0) null else n;
 }

@@ -58,9 +58,8 @@ pub const Pool = struct {
 
     /// Every buffer given back.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
-        _ = io;
         std.debug.assert(p.receivers.load(.acquire) == 0);
-        if (builtin.os.tag == .linux) if (p.groups) |*groups| groups.deinit(gpa);
+        if (builtin.os.tag == .linux) if (p.groups) |*groups| groups.deinit(gpa, io);
         gpa.free(p.lengths);
         gpa.free(p.memory);
         gpa.free(p.links);
