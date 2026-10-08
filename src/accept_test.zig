@@ -51,6 +51,26 @@ fn accept(io: Io, server: *Io.net.Server) !Io.net.Stream {
     return server.accept(io);
 }
 
+test "closing one listener keeps a colliding listener reachable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var table = try Accept.init(testing.allocator, 2, true);
+    defer table.deinit(testing.allocator);
+    var h: Harness = .{};
+    var a: Loop.Op = .{ .kind = .{ .accept = 17 } };
+    var b: Loop.Op = .{ .kind = .{ .accept = 19 } };
+    try testing.expect(table.submit(&h, &a));
+    try testing.expect(table.submit(&h, &b));
+    table.close(&h, 17);
+    const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
+    table.complete(&h, &table.records[1].slots[0], cqe, &h);
+    try testing.expect(table.contains(19));
+    try testing.expect(table.cancel(&b));
+    _ = table.deliver(&h);
+    try testing.expectError(error.Canceled, b.result.accept);
+    table.close(&h, 19);
+    table.complete(&h, &table.records[0].slots[0], cqe, &h);
+}
+
 test "a ring keeps at most eight accepted sockets between accepts" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var runtime: Runtime = undefined;

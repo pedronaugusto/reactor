@@ -32,7 +32,11 @@ pub fn deinit(f: *Files, gpa: Allocator) void {
 
 pub fn contains(f: *const Files, fd: linux.fd_t) bool {
     const start = @as(u32, @bitCast(fd)) % f.slots.len;
-    for (0..@min(8, f.slots.len)) |offset| if (f.slots[(start + offset) % f.slots.len].load(.acquire) == fd) return true;
+    for (0..@min(8, f.slots.len)) |offset| {
+        const found = f.slots[(start + offset) % f.slots.len].load(.acquire);
+        if (found == -1) return false;
+        if (found == fd) return true;
+    }
     return false;
 }
 
@@ -51,7 +55,8 @@ pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
             sqe.flags |= linux.IOSQE_FIXED_FILE;
             return;
         }
-        if (fd == -1 and vacant == null) vacant = @intCast(i);
+        if (fd < 0 and vacant == null) vacant = @intCast(i);
+        if (fd == -1) break;
     }
     const index = vacant orelse return;
     const fd = sqe.fd;
@@ -75,9 +80,11 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
     for (0..@min(8, f.slots.len)) |offset| {
         const i = (start + offset) % f.slots.len;
         const slot = &f.slots[i];
-        if (slot.load(.monotonic) != fd) continue;
+        const found = slot.load(.monotonic);
+        if (found == -1) return;
+        if (found != fd) continue;
         if (!f.registered[i]) {
-            slot.store(-1, .release);
+            slot.store(-2, .release); // tombstone: a later colliding file remains reachable
             return;
         }
         var head = @atomicLoad(u32, u.ring.sq.head, .acquire);
@@ -88,7 +95,7 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
             sqe.flags &= ~@as(u8, linux.IOSQE_FIXED_FILE);
         }
         u.ring.register_files_update(@intCast(i), &.{-1}) catch |err| std.debug.panic("reactor: removing a fixed file failed: {t}", .{err});
-        slot.store(-1, .release);
+        slot.store(-2, .release); // tombstone: a later colliding file remains reachable
         return;
     }
 }

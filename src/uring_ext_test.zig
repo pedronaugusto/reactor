@@ -148,6 +148,68 @@ test "a receiver on io_uring reads into the pool once the socket is readable" {
     try testing.expectEqualStrings("ring", try receiver.next(io, ms(5000)));
 }
 
+test "native provided buffers survive a receive timeout and return after detach" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try tcpPair(io);
+    defer for (pair) |stream| stream.close(io);
+    var pool: reactor.net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = 64, .buffers = 2 });
+    defer pool.deinit(testing.allocator, io);
+    if (pool.groups == null) return error.SkipZigTest;
+    var receiver: reactor.net.Receiver = .init(io, &pool, pair[0].socket.handle);
+    defer receiver.deinit(io);
+    try testing.expectError(error.Timeout, receiver.next(io, ms(1)));
+    var out: [16]u8 = undefined;
+    var writer = pair[1].writer(io, &out);
+    try writer.interface.writeAll("provided");
+    try writer.interface.flush();
+    const bytes = try receiver.next(io, ms(5000));
+    try testing.expectEqualStrings("provided", bytes);
+    try testing.expect(receiver.native_state != null);
+    receiver.release(bytes);
+}
+
+test "closing a file removes an idle registration on another ring" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const Scheduler = @import("Scheduler.zig");
+    const Cached = struct {
+        errand: Scheduler.Errand = .{ .run = run },
+        io: Io,
+        fd: posix.fd_t,
+        done: Io.Event = .unset,
+        fn run(errand: *Scheduler.Errand, p: *Scheduler.Processor) void {
+            const cached: *@This() = @alignCast(@fieldParentPtr("errand", errand)); // safe: the test sends this record
+            var byte: [1]u8 = undefined;
+            var sqe: std.os.linux.io_uring_sqe = undefined;
+            sqe.prep_read(cached.fd, &byte, 0);
+            const ring = &p.loop.backend.io_uring;
+            ring.files.use(&ring.ring, &sqe);
+            cached.done.set(cached.io);
+        }
+    };
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "registered", .{ .read = true });
+    var open = true;
+    defer if (open) file.close(io);
+    const ring = &r.core.processors[1].loop.backend.io_uring;
+    if (!ring.files.enabled) return error.SkipZigTest;
+    var cached: Cached = .{ .io = io, .fd = file.handle };
+    r.core.processors[1].send(&cached.errand);
+    try cached.done.wait(io);
+    try testing.expect(ring.files.contains(file.handle));
+    file.close(io);
+    open = false;
+    try testing.expect(!ring.files.contains(file.handle));
+}
+
 test "a native deadline ends a read in the kernel, poisons the socket, and nothing writes the buffer after" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;

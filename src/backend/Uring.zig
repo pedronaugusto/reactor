@@ -98,6 +98,9 @@ fn tagOf(user_data: u64) Tag {
 ring: linux.IoUring,
 next_group: std.atomic.Value(u32) = .init(1),
 accepts: Accept,
+/// Requests that a descriptor-wide cancellation could end, excluding
+/// listener slots (which close cancels individually) and the wake poll.
+active: usize = 0,
 files: Files,
 /// Opcodes the kernel has.
 supported: std.EnumSet(linux.IORING_OP),
@@ -261,7 +264,10 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             .windows => unreachable, // unreachable: only uring requests reach Linux
         },
         .io => |*operation| u.submitIo(o, operation, ud),
-        .accept => if (!u.accepts.submit(u, o)) u.submitSingleAccept(o),
+        .accept => {
+            if (u.accepts.submit(u, o)) return;
+            u.submitSingleAccept(o);
+        },
         .connect => |c| {
             o.state.scratch = .{ .io_uring = .{ .address = undefined } };
             const a = &o.state.scratch.io_uring.address;
@@ -323,6 +329,7 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
     }
+    u.active += 1;
 }
 
 /// A kernel without multishot support uses ordinary accept requests.
@@ -392,7 +399,7 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
 fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
     u.accepts.close(u, fd);
     u.files.remove(u, fd);
-    if (u.has(.ASYNC_CANCEL)) {
+    if (u.active != 0 and u.has(.ASYNC_CANCEL)) {
         const cancel_sqe = u.entry();
         cancel_sqe.prep_cancel_fd(fd, linux.IORING_ASYNC_CANCEL_ALL);
         // Hard-linked: the close runs whatever the cancel found.
@@ -428,6 +435,7 @@ fn readinessOnly(operation: Io.Operation) ?u32 {
 }
 
 pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) error{ SystemResources, Unexpected }!void {
+    u.active += 1;
     const sqe = u.entry();
     if (readinessOnly(operation)) |events| {
         sqe.prep_poll_add(socketOf(operation), events);
@@ -530,6 +538,7 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     const ud = cqe.user_data;
     switch (tagOf(ud)) {
         .op => {
+            u.active -= 1;
             const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
             const o: *Op = @ptrFromInt(ud);
             o.result = results.of(o, cqe);
@@ -537,10 +546,12 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             sink.complete(o);
         },
         .batch => {
+            u.active -= 1;
             const token: pending.Token = @fromBackingInt(@intCast(ud & ~@as(u64, 7)));
             sink.completePending(token, results.ofPending(token.pending().tag, cqe));
         },
         .batch_ready => {
+            u.active -= 1;
             const token: pending.Token = @fromBackingInt(@intCast(ud & ~@as(u64, 7)));
             if (cqe.err() == .CANCELED) return sink.completePending(token, .canceled);
             const operation = pending.unpack(token.pending());
@@ -554,6 +565,7 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
         },
         .receiver => {
+            if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.active -= 1;
             const r: *Receive = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the receiver owns this record through the terminal completion
             r.deliver(cqe);
         },

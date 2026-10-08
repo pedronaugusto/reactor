@@ -57,7 +57,11 @@ pub fn deinit(a: *Accept, gpa: Allocator) void {
 /// Close routing may ask from another processor.
 pub fn contains(a: *const Accept, fd: linux.fd_t) bool {
     const first = @as(u32, @bitCast(fd)) % a.records.len;
-    for (0..@min(8, a.records.len)) |offset| if (a.descriptors[(first + offset) % a.records.len].load(.acquire) == fd) return true;
+    for (0..@min(8, a.records.len)) |offset| {
+        const found = a.descriptors[(first + offset) % a.records.len].load(.acquire);
+        if (found == -1) return false;
+        if (found == fd) return true;
+    }
     return false;
 }
 
@@ -66,7 +70,7 @@ fn index(a: *Accept, r: *Record) usize {
 }
 
 pub fn reset(a: *Accept, r: *Record) void {
-    a.descriptors[a.index(r)].store(-1, .release);
+    a.descriptors[a.index(r)].store(-2, .release); // tombstone: a later colliding listener remains reachable
     r.* = .{};
 }
 
@@ -83,7 +87,9 @@ fn find(a: *Accept, fd: linux.fd_t) ?*Record {
     const first = @as(u32, @bitCast(fd)) % a.records.len;
     for (0..@min(8, a.records.len)) |offset| {
         const i = (first + offset) % a.records.len;
-        if (a.descriptors[i].load(.monotonic) != fd) continue;
+        const found = a.descriptors[i].load(.monotonic);
+        if (found == -1) return null;
+        if (found != fd) continue;
         const r = &a.records[i];
         if (r.fd == fd and !r.closing) return r;
     }

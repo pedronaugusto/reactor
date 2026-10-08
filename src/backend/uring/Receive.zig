@@ -20,6 +20,7 @@ pub fn arm(r: *Receive, u: anytype) void {
     sqe.buf_index = r.group;
     sqe.user_data = @intFromPtr(r) | 6; // safe: the receiver retains this record through the terminal completion
     r.active = true;
+    u.active += 1;
     r.ending = false;
 }
 
