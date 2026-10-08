@@ -300,13 +300,18 @@ test "a host waiting on the runtime's handle is woken when a lane call ends" {
 
 /// User threads only: io_uring can create PF_IO_WORKER kernel threads.
 /// The flag is defined in Linux's include/linux/sched.h.
-fn threadCount() !usize {
+const ThreadSnapshot = struct {
+    ids: [256]u32 = undefined,
+    len: usize = 0,
+};
+
+fn threadSnapshot() !ThreadSnapshot {
     var buffer: [4096]u8 = undefined;
     const io = Io.Threaded.global_single_threaded.io();
     const dir = try Io.Dir.openDirAbsolute(io, "/proc/self/task", .{ .iterate = true });
     defer dir.close(io);
     var iterator = dir.iterate();
-    var count: usize = 0;
+    var snapshot: ThreadSnapshot = .{};
     while (try iterator.next(io)) |entry| {
         var path: [64]u8 = undefined;
         const name = try std.mem.print(&path, "{s}/stat", .{entry.name});
@@ -318,9 +323,12 @@ fn threadCount() !usize {
         var fields = std.mem.tokenizeScalar(u8, text[end + 1 ..], ' ');
         for (0..6) |_| _ = fields.next() orelse return error.NoThreadCount;
         const flags = try std.fmt.parseInt(u64, fields.next() orelse return error.NoThreadCount, 10);
-        if (flags & 0x10 == 0) count += 1;
+        if (flags & 0x10 != 0) continue;
+        if (snapshot.len == snapshot.ids.len) return error.TooManyThreads;
+        snapshot.ids[snapshot.len] = try std.fmt.parseInt(u32, entry.name, 10);
+        snapshot.len += 1;
     }
-    return count;
+    return snapshot;
 }
 
 fn conformance(io: Io, failure: *shakedown.conformance.Failure, done: *std.atomic.Value(bool)) anyerror!void {
@@ -331,7 +339,7 @@ fn conformance(io: Io, failure: *shakedown.conformance.Failure, done: *std.atomi
 test "a runtime with no thread of its own runs the conformance suite in 1 ms frames, and starts no thread" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     if (!fiber.supported) return error.SkipZigTest;
-    const before = try threadCount();
+    const before = try threadSnapshot();
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .workers = 0, .offload = .none, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
@@ -348,7 +356,10 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
     var frames: usize = 0;
     while (!done.load(.acquire)) : (frames += 1) {
         r.run(.{ .until = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake }) });
-        try testing.expectEqual(before, try threadCount());
+        const current = try threadSnapshot();
+        // A joined helper may disappear after the baseline snapshot. A
+        // count alone also misses a new thread replacing that helper.
+        for (current.ids[0..current.len]) |id| try testing.expect(std.mem.containsScalar(u32, before.ids[0..before.len], id));
     }
     suite.await(io) catch |err| {
         std.debug.print("{s}: {t}\n", .{ failure.check, failure.err });

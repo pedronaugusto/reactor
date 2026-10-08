@@ -92,3 +92,9 @@ bypasses reactor's fixed-file cache removal. Its macOS write-call bound differs
 under this Io. These actual-suite failures remain explicit consumer contract
 or adoption questions; no library source, expectation or default is changed
 by the instrumentation to hide them.
+
+The actual conduit zero-worker suite can spin in a thread mutex while its
+holder is suspended in an Io wait. A thread yield cannot schedule a different
+fiber on that same thread. The required consumer profile or cooperative-lock
+seam remains an owner decision; instrumentation does not alter that lock or
+silently select a different profile.
