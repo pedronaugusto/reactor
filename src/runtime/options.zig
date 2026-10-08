@@ -40,6 +40,8 @@ pub const Options = struct {
     max_tasks: u32 = 16 << 10,
     /// Includes libc requests detached from canceled callers.
     max_lookups: u32 = 64,
+    /// Windows jobs attached to the runtime's completion ports at once.
+    max_jobs: u16 = 64,
     files: Files = .auto,
     offload: Offload = .{ .owned = .{} },
     /// Submission queue entries per ring.

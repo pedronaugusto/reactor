@@ -10,7 +10,7 @@ const perform = @import("../perform.zig");
 
 pub const Error = lookup.Error || Io.Cancelable;
 
-pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress) Error!usize {
+pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress, canonical_buffer: ?*[254]u8) Error!lookup.Result {
     var request: lookup.Request = .{};
     defer request.deinit();
     try request.start(name, port, family);
@@ -41,7 +41,7 @@ pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Fa
             }
         }
     }
-    const count = request.finish(out) catch |err| return if (canceled) error.Canceled else err;
+    const result = request.finish(out, canonical_buffer) catch |err| return if (canceled) error.Canceled else err;
     if (canceled) io.recancel();
-    return count;
+    return result;
 }

@@ -18,6 +18,7 @@ pub fn before(a: Rank, b: Rank) bool {
 
 pub fn sort(io: Io, addresses: []net.IpAddress) Io.Cancelable!void {
     std.debug.assert(addresses.len <= 64);
+    if (addresses.len < 2) return;
     var ranks: [64]Rank = undefined;
     for (addresses, ranks[0..addresses.len]) |address, *r| {
         // A UDP connect selects a source without sending a packet.

@@ -6,11 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Accept-ahead requests keep at most eight accepted or pending sockets per listener; burst connections stay in the kernel backlog. `Loop.UringFeatures.accept_ahead` controls this optimization.
+
 ### Added
 
 - `Runtime`: a complete `std.Io` on io_uring, with stackful tasks, work stealing or `per_core`, a home thread the root never leaves, a zero-thread profile driven by `run`, and four lanes (`sync`, `lookup`, `wait`, `general`) of owned `Io.Threaded` for calls that can block.
 - `Loop`: one thread's completion engine with a timing wheel, completions by callback or `reap`, and `run(.nowait/.once/.within/.until)`.
 - `wait`, `waitAny`, `Wake`, `Process`, `Job`, `blocking`, `Signals` and `net` (`connect`, `resolve`, `abort`, `Deadlines`, `Receiver`) over any `Io`, native on a runtime, and `fallbacks()`.
+- Bounded detached libc lookups, an evented DNS stub with EDNS0, truncation retries, CNAME resolution and destination ordering, and overlapped Windows lookups.
+- Local address and interface selection in `net.connect`.
+- Bounded io_uring accept-ahead queues, sparse registered regular files, and pooled multishot receives where supported.
+- Native request escapes through `kernel.submit` and `kernel.overlapped`, and `blockingHook` for raw library flush calls.
+- Atomic task summaries in `dump`, a worker crash summary, and ThreadSanitizer fiber annotations.
+- Bounded Windows Job notification storage on runtime completion ports; detach removes the association.
 - On Linux a runtime's `childWait` waits on the child's pidfd in the task's own loop.
 
 [Unreleased]: https://github.com/pedronaugusto/reactor/commits/main

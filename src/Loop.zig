@@ -43,7 +43,7 @@ pub const Owner = enum {
 };
 
 pub const UringFeatures = packed struct {
-    multishot_accept: bool = false,
+    accept_ahead: bool = false,
     fixed_files: bool = false,
     defer_taskrun: bool = false,
     msg_ring: bool = false,

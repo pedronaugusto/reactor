@@ -16,6 +16,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 const fiber = @import("../fiber.zig");
+const op = @import("../backend/op.zig");
+const Lanes = @import("../Lanes.zig");
 
 /// Saved registers while the task is not running.
 context: fiber.Context = undefined,
@@ -26,6 +28,8 @@ next: ?*Task = null,
 cancel_next: ?*Task = null,
 /// Its stack in the pool; null for the root, which runs on its thread's.
 stack: ?u32 = null,
+/// The immutable upper bound, also used for parked stack watermarks.
+stack_top: usize = 0,
 kind: Kind,
 /// The processor it runs or last ran on (an opaque `*Processor`).
 processor: ?*anyopaque = null,
@@ -57,8 +61,11 @@ context_bytes: [*]u8 = undefined,
 result_bytes: [*]u8 = undefined,
 /// Where `concurrent`, `async` or a group call started it.
 spawned_at: usize = 0,
+/// The crashing task's own summary; no other thread reads these fields.
+operation: ?std.meta.Tag(op.Kind) = null,
+lane: ?Lanes.Lane = null,
 
-pub const Kind = enum { root, future, member };
+pub const Kind = enum(u8) { root, future, member };
 
 pub const Start = union(enum) {
     none,

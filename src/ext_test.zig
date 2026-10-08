@@ -326,3 +326,38 @@ test "a blocking hook runs a library's raw call on the sync lane" {
     inline_hook.call(inline_hook.context, Call.run, &id);
     try testing.expectEqual(std.Thread.getCurrentId(), id);
 }
+
+test "job notification storage bounds messages and ignores retired attachments" {
+    if (@bitSizeOf(usize) != 64) return error.SkipZigTest;
+    const Notifications = @import("backend/iocp/Notifications.zig");
+    var table = try Notifications.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+    const record = table.acquire(testing.io).?;
+    const first_key = record.key();
+    try testing.expect(table.acquire(testing.io) == null);
+    for (0..33) |i| try testing.expect(table.dispatch(first_key, i, 6));
+    for (0..32) |i| {
+        const message = try record.next(testing.io, ms(0));
+        try testing.expectEqual(@as(u32, @intCast(i)), message.process);
+    }
+    try testing.expectError(error.SystemResources, record.next(testing.io, ms(0)));
+    try testing.expectError(error.Timeout, record.next(testing.io, ms(0)));
+    record.release();
+    const next_record = table.acquire(testing.io).?;
+    defer next_record.release();
+    try testing.expect(first_key != next_record.key());
+    try testing.expect(table.dispatch(first_key, 99, 6));
+    try testing.expectError(error.Timeout, next_record.next(testing.io, ms(0)));
+    try testing.expect(table.dispatch(next_record.key(), 42, 7));
+    try testing.expectEqual(@as(u32, 42), (try next_record.next(testing.io, ms(0))).process);
+}
+
+test "a zero timeout chooses a ready Wake before an ended process" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var wake = try reactor.Wake.init(io);
+    defer wake.deinit(io);
+    wake.signal();
+    const ended: reactor.Process = .{ .watch = .ended, .id = 0 };
+    try testing.expectEqual(@as(usize, 0), try reactor.waitAny(io, &.{ .{ .wake = &wake }, .{ .process = &ended } }, ms(0)));
+}

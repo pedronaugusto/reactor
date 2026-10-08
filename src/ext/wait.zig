@@ -3,8 +3,8 @@
 //!
 //! On a runtime's task every member that is a descriptor is a readiness
 //! operation of the task's own loop, so the wait is a cancelation point
-//! and costs no thread. Members a loop cannot wait on (Windows objects; a
-//! process on a system with no descriptor for it) go to the runtime's
+//! and costs no thread. Windows objects use native wait completion packets.
+//! A process on a system with no descriptor for it goes to the runtime's
 //! `wait` lane. Any other `Io` waits on the calling thread, in slices of
 //! `slice_ms` so a cancel is seen between them.
 const builtin = @import("builtin");
@@ -104,6 +104,9 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
 /// not.
 fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
     if (is_windows) {
+        // Separate wait packets could consume several auto-reset events or
+        // semaphore counts. A kernel wait-any consumes only its winner.
+        if (set.len > 1) for (set) |m| if (m == .object) return false;
         for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
             .readable => |h| .{ .readable = h },
             .writable => |h| .{ .writable = h },
@@ -151,15 +154,22 @@ fn once(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
     var entries: [max]poll.Entry = undefined;
     var map: [max]usize = undefined;
     var n: usize = 0;
+    var ended: ?usize = null;
     for (set, 0..) |m, i| {
         const entry: poll.Entry = switch (m) {
             .readable => |h| .{ .handle = h, .interest = .readable },
             .writable => |h| .{ .handle = h, .interest = .writable },
             .process => |p| switch (p.watch) {
                 .descriptor => |h| .{ .handle = h, .interest = .readable },
-                .ended => return i,
+                .ended => {
+                    ended = i;
+                    break;
+                },
                 .asking => {
-                    if (process.endedUnreaped(p.id) != .running) return i;
+                    if (process.endedUnreaped(p.id) != .running) {
+                        ended = i;
+                        break;
+                    }
                     continue;
                 },
             },
@@ -171,12 +181,13 @@ fn once(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
         n += 1;
     }
     if (n == 0) {
+        if (ended) |i| return i;
         // Nothing to wait on but processes asked about: wait the slice.
         try io.sleep(.fromMilliseconds(ms), .awake);
         return null;
     }
-    const ready = poll.descriptors(entries[0..n], ms) catch return error.Unexpected;
-    return if (ready) |r| map[r] else null;
+    const ready = poll.descriptors(entries[0..n], if (ended != null) 0 else ms) catch return error.Unexpected;
+    return if (ready) |r| map[r] else ended;
 }
 
 fn onceWindows(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {

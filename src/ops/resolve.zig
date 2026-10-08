@@ -91,8 +91,8 @@ pub fn lookup(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Family, 
 }
 
 pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress, canonical: *Name) Error!usize {
-    if (try hosts(io, name.bytes, port, family, out)) |n| {
-        canonical.* = try Name.init(name.bytes);
+    if (try hosts(io, name.bytes, port, family, out[0..@min(64, out.len)], canonical)) |n| {
+        try order.sort(io, out[0..n]);
         return n;
     }
     const config = try Config.read(io);
@@ -113,7 +113,7 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
     return error.NameNotResolved;
 }
 
-fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress) Error!?usize {
+fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress, canonical: *Name) Error!?usize {
     const file = Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch return null;
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
@@ -122,11 +122,15 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
     while (reader.interface.takeDelimiterExclusive('\n')) |line| {
         var words = std.mem.tokenizeAny(u8, line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len], " \t\r");
         const text = words.next() orelse continue;
-        while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue;
+        const primary = words.next() orelse continue;
+        if (!std.ascii.eqlIgnoreCase(primary, name)) {
+            while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue;
+        }
         const address = net.IpAddress.parse(text, port) catch continue;
         if (family) |f| if (address != f) continue;
         if (n == out.len) break;
         out[n] = address;
+        if (n == 0) canonical.* = try Name.init(primary);
         n += 1;
     } else |err| switch (err) {
         error.EndOfStream => {},

@@ -32,6 +32,7 @@ pub const Pool = struct {
     groups: if (builtin.os.tag == .linux) ?Groups else void = if (builtin.os.tag == .linux) null else {},
     /// The free list's head: an index plus one, and a tag against ABA.
     head: std.atomic.Value(u64) = .init(0),
+    receivers: std.atomic.Value(u32) = .init(0),
 
     pub const Options = struct { buffer_len: u32 = 4096, buffers: u32 = 4096 };
     pub const InitError = Groups.Error;
@@ -58,6 +59,7 @@ pub const Pool = struct {
     /// Every buffer given back.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
         _ = io;
+        std.debug.assert(p.receivers.load(.acquire) == 0);
         if (builtin.os.tag == .linux) if (p.groups) |*groups| groups.deinit(gpa);
         gpa.free(p.lengths);
         gpa.free(p.memory);
@@ -97,6 +99,7 @@ pub const Pool = struct {
 
 pub fn init(io: Io, pool: *Pool, socket: Io.net.Socket.Handle) Receiver {
     _ = io;
+    _ = pool.receivers.fetchAdd(1, .monotonic);
     return .{ .pool = pool, .socket = socket };
 }
 
@@ -104,6 +107,7 @@ pub fn init(io: Io, pool: *Pool, socket: Io.net.Socket.Handle) Receiver {
 pub fn deinit(r: *Receiver, io: Io) void {
     r.giveBack();
     if (builtin.os.tag == .linux) if (r.native_state) |*state| state.close(io);
+    _ = r.pool.receivers.fetchSub(1, .release);
     r.* = undefined;
 }
 
@@ -133,7 +137,7 @@ pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
             error.Unsupported, error.Unexpected => error.Unexpected,
         };
         const index = r.pool.take() orelse return error.SystemResources;
-        const n = read(io, r.socket, r.pool.buffer(index)) catch |err| {
+        const n = read(io, r.socket, r.pool.buffer(index), deadline) catch |err| {
             r.pool.give(index);
             return err;
         } orelse {
@@ -170,10 +174,13 @@ fn giveBack(r: *Receiver) void {
 }
 
 /// What the socket has now; null when nothing.
-fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8) (Io.Operation.NetRead.Error || Io.Cancelable)!?usize {
+fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8, deadline: Io.Timeout) NextError!?usize {
     if (builtin.os.tag != .windows) return receive.now(socket, buffer);
     var data: [1][]u8 = .{buffer};
-    const result = try io.operate(.{ .net_read = .{ .socket_handle = socket, .data = &data } });
+    const result = io.operateTimeout(.{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return switch (err) {
+        error.ConcurrencyUnavailable => error.SystemResources,
+        else => |e| e,
+    };
     const r = try result.net_read;
     return r.data_len;
 }

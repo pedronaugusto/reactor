@@ -15,10 +15,26 @@ pub const supported = std.Io.fiber.supported and switch (builtin.os.tag) {
 
 /// A stack's saved state while it is not running. On aarch64 reactor's
 /// own, with room for the link register; elsewhere std's.
-pub const Context = switch (builtin.cpu.arch) {
+const Registers = switch (builtin.cpu.arch) {
     .aarch64 => extern struct { sp: u64, fp: u64, pc: u64, lr: u64 },
     else => std.Io.fiber.Context,
 };
+
+pub const Context = if (builtin.sanitize_thread) extern struct {
+    registers: Registers,
+    sanitizer: *anyopaque,
+} else Registers;
+
+extern fn __tsan_create_fiber(flags: c_uint) *anyopaque;
+extern fn __tsan_destroy_fiber(handle: *anyopaque) void;
+extern fn __tsan_get_current_fiber() *anyopaque;
+extern fn __tsan_switch_to_fiber(handle: *anyopaque, flags: c_uint) void;
+
+/// Only contexts created by initial, after their stacks have stopped.
+pub fn deinit(context: *Context) void {
+    if (builtin.sanitize_thread) __tsan_destroy_fiber(context.sanitizer);
+    context.* = undefined;
+}
 
 /// What a switch carries: the two contexts, and whatever the switcher
 /// wants the resumed side to do once the old stack is no longer running.
@@ -35,6 +51,12 @@ pub const Entry = *const fn (arg: *anyopaque, message: *const Switch) callconv(.
 /// fixed register as both an input and a clobber made LLVM omit the input
 /// move in optimized builds, so the switch read an unrelated address.
 pub noinline fn switchTo(s: *const Switch) *const Switch {
+    if (builtin.sanitize_thread) {
+        s.old.sanitizer = __tsan_get_current_fiber();
+        // A switch hands its message and frame to the next context, even
+        // for a local task queue that requires no atomic publication.
+        __tsan_switch_to_fiber(s.new.sanitizer, 0);
+    }
     return switch (builtin.cpu.arch) {
         .aarch64 => switchAarch64(s),
         .x86_64 => switchX86(s),
@@ -347,6 +369,11 @@ inline fn switchRiscv(s: *const Switch) *const Switch {
 /// The context that starts `entry(arg, message)` on the stack ending at
 /// `top` (16-aligned) when first switched to. Uses the top 48 bytes.
 pub fn initial(top: usize, entry: Entry, arg: *anyopaque) Context {
+    const registers = initialRegisters(top, entry, arg);
+    return if (builtin.sanitize_thread) .{ .registers = registers, .sanitizer = __tsan_create_fiber(0) } else registers;
+}
+
+fn initialRegisters(top: usize, entry: Entry, arg: *anyopaque) Registers {
     std.debug.assert(top % 16 == 0);
     const base = top - 48;
     switch (builtin.cpu.arch) {

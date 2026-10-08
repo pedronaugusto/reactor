@@ -34,6 +34,7 @@ extern "ws2_32" fn GetAddrInfoExOverlappedResult(overlapped: *Overlapped) callco
 extern "ws2_32" fn FreeAddrInfoExW(info: *Info) callconv(.winapi) void;
 
 pub const Error = error{ NameNotResolved, SystemResources, Unexpected };
+pub const Result = struct { count: usize, canonical: ?Io.net.HostName = null };
 
 pub const Request = struct {
     overlapped: Overlapped = .{},
@@ -56,11 +57,11 @@ pub const Request = struct {
         const digits = std.mem.print(&text, "{d}", .{port}) catch unreachable; // unreachable: eight bytes hold a u16
         for (digits, 0..) |digit, i| r.service[i] = digit;
         r.service[digits.len] = 0;
-        const hints: Info = .{ .family = if (family) |f| switch (f) {
+        const hints: Info = .{ .flags = 2, .family = if (family) |f| switch (f) {
             .ip4 => 2,
             .ip6 => 23,
         } else 0 };
-        switch (GetAddrInfoExW(&r.name, &r.service, 12, null, &hints, &r.result, null, &r.overlapped, null, &r.handle)) {
+        switch (GetAddrInfoExW(&r.name, &r.service, 0, null, &hints, &r.result, null, &r.overlapped, null, &r.handle)) {
             0 => {},
             997 => r.pending = true,
             else => return error.NameNotResolved,
@@ -71,13 +72,18 @@ pub const Request = struct {
         if (r.pending) _ = GetAddrInfoExCancel(&r.handle);
     }
 
-    pub fn finish(r: *Request, out: []Io.net.IpAddress) Error!usize {
+    pub fn finish(r: *Request, out: []Io.net.IpAddress, canonical_buffer: ?*[254]u8) Error!Result {
         const pending = r.pending;
         r.pending = false;
         if (pending and GetAddrInfoExOverlappedResult(&r.overlapped) != 0) return error.NameNotResolved;
         var item = r.result;
         var n: usize = 0;
+        var canonical: ?Io.net.HostName = null;
         while (item) |info| : (item = info.next) {
+            if (canonical_buffer) |buffer| if (info.canonname) |text| if (canonical == null) {
+                const len = std.unicode.utf16LeToUtf8(buffer, std.mem.sliceTo(text, 0)) catch 0;
+                if (len != 0) canonical = Io.net.HostName.init(buffer[0..len]) catch null;
+            };
             if (n == out.len) break;
             if (info.family != 2 and info.family != 23) continue;
             const address = info.address orelse continue;
@@ -85,7 +91,7 @@ pub const Request = struct {
             n += 1;
         }
         if (n == 0) return error.NameNotResolved;
-        return n;
+        return .{ .count = n, .canonical = canonical };
     }
 
     /// Even on cancellation, wait for Winsock to release the request.

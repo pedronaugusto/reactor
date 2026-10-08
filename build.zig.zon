@@ -6,13 +6,13 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#472d3829cf9cb10fbbb7fec9694ee6137ba2f455",
-            .hash = "preflight-0.1.0-LX1Zwm2DBgDsKJnxFTgnbNbXiJN2_jt0s03sJWVcR-PX",
+            .url = "git+https://github.com/pedronaugusto/preflight#9af905ed85cab6dbb19d9431c65ee3f41fbaa74d",
+            .hash = "preflight-0.1.0-LX1ZwsWpBgALd07i_vgcbSkkKQ71JAHcV3xcZN8SyG3r",
             .lazy = true,
         },
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#1bb13e70ed64563d8bce33ed507ffa450f135769",
-            .hash = "shakedown-0.1.0-BR8U4wZFCADbHwHZYu07dR4hVzc_JjeTiZy8phJDromo",
+            .url = "git+https://github.com/pedronaugusto/shakedown#290beb1abc76d73915dae67c5941fd118b73d2eb",
+            .hash = "shakedown-0.1.0-BR8U4177DQAXS79Rcl1reGMylJ-qq3g0WNSWNyjjfw19",
             .lazy = true,
         },
     },

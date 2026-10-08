@@ -15,6 +15,7 @@ const fiber = @import("fiber.zig");
 const Stacks = @import("fiber/Stacks.zig");
 const Loop = @import("Loop.zig");
 const Task = @import("scheduler/Task.zig");
+const Records = @import("scheduler/Records.zig");
 const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
@@ -171,6 +172,7 @@ pub const Processor = struct {
 
     /// Makes `t` runnable on this processor; the owner's thread only.
     pub fn pushLocal(p: *Processor, t: *Task, how: How) void {
+        p.scheduler.records.publish(t, p.index, .ready);
         t.processor = p;
         if (t.home or t.pins > 0) {
             p.pinned.push(t);
@@ -202,6 +204,7 @@ pub const Processor = struct {
 
     /// From any thread: `t` runs on this processor next time it looks.
     pub fn pushRemote(p: *Processor, t: *Task) void {
+        p.scheduler.records.publish(t, p.index, .ready);
         _ = p.inbox.push(t);
         p.wakeIfIdle();
     }
@@ -318,6 +321,7 @@ pub const Processor = struct {
 
     /// Runs `t` until it switches back, then does what it asked.
     fn runTask(p: *Processor, t: *Task) void {
+        p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
@@ -335,6 +339,7 @@ pub const Processor = struct {
         if (t.kind == .root) p.away.store(false, .monotonic);
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
+        if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
             .park => |after| if (after) |a| a.func(a.context, t),
@@ -453,6 +458,7 @@ pub const Processor = struct {
 processors: []Processor,
 root: *Task,
 stacks: Stacks,
+records: Records,
 scheduling: Scheduling,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
@@ -469,7 +475,6 @@ holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
 searching: std.atomic.Value(u32) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),
 /// Tasks alive, the root excluded.
-live: std.atomic.Value(u32) = .init(0),
 /// Round robin for tasks started outside a processor under `per_core`.
 placement: std.atomic.Value(u32) = .init(0),
 steals: std.atomic.Value(u64) = .init(0),
@@ -528,6 +533,7 @@ pub fn park(after: ?Processor.After) void {
         .switch_ = .{ .old = &t.context, .new = &p.sched_context },
         .action = .{ .park = after },
     };
+    if (t.stack != null) p.scheduler.records.parked(t, p.index, t.stack_top - @intFromPtr(&message)); // safe: message is a frame below this task's stack top
     _ = fiber.switchTo(&message.switch_);
 }
 
@@ -607,6 +613,12 @@ pub fn injectMany(s: *Scheduler, tasks: []const *Task) void {
 }
 
 fn injectChain(s: *Scheduler, first: *Task, last: *Task, count: u32) void {
+    var task = first;
+    while (true) {
+        s.records.publish(task, std.math.maxInt(u16), .ready);
+        if (task == last) break;
+        task = task.next.?;
+    }
     last.next = null;
     s.inject_lock.lockUncancelable(system());
     if (s.inject_tail) |tail| tail.next = first else s.inject_head = first;
@@ -688,23 +700,24 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
         return null;
     }
     const t: *Task = @ptrFromInt(record_at);
-    t.* = .{ .kind = kind, .stack = index, .home = s.scheduling == .per_core };
+    t.* = .{ .kind = kind, .stack = index, .stack_top = top, .home = s.scheduling == .per_core };
     t.context = fiber.initial(sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
-    _ = s.live.fetchAdd(1, .monotonic);
     return .{ t, @ptrFromInt(extra_at) };
 }
 
 /// Gives back the stack of a task that has ended and been forgotten.
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
+    s.records.release(t);
+    fiber.deinit(&t.context);
     t.* = undefined;
     s.stacks.give(index);
-    _ = s.live.fetchSub(1, .release);
 }
 
 /// Where a newly made task runs first: the creator's processor, or,
 /// outside any, the next by round robin under `per_core`.
 pub fn place(s: *Scheduler, t: *Task) void {
+    s.records.created(t);
     if (heldNow()) |p| {
         t.processor = p;
         return p.pushLocal(t, .spawned);

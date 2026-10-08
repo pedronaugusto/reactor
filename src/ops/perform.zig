@@ -128,6 +128,9 @@ pub const Deadline = struct {
 pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     const p = Scheduler.processor().?;
     const t = p.current.?;
+    const previous_operation = t.operation;
+    t.operation = std.meta.activeTag(o.kind);
+    defer t.operation = previous_operation;
     var w: Waiter = .{ .task = t, .processor = p, .scheduler = s, .o = o };
     o.callback = Waiter.done;
     o.user_data = @intFromPtr(&w); // safe: read back by the callback while this frame waits

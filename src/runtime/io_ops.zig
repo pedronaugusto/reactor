@@ -44,7 +44,7 @@ pub fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.
     _ = Scheduler.processor() orelse return borrowed(r, "operate", .{operation});
     switch (operation) {
         .device_io_control => return borrowed(r, "operate", .{operation}),
-        .file_read_streaming, .file_write_streaming => if (r.options.files == .pool) return onLane(r, .general, "operate", .{operation}),
+        .file_read_streaming, .file_write_streaming => if (!native(r) or r.options.files == .pool) return onLane(r, .general, "operate", .{operation}),
         else => {},
     }
     var o: Loop.Op = .{ .kind = .{ .io = operation } };
@@ -293,9 +293,11 @@ const Kept = struct {
 fn lookupOnLane(lane_io: Io, host_name: net.HostName, options: net.HostName.LookupOptions, kept: *Kept) net.HostName.LookupError!void {
     var addresses: [max_kept]net.IpAddress = undefined;
     var canonical: stub.Name = .{};
-    const n = if (builtin.os.tag == .windows)
-        lookup_windows.resolve(lane_io, host_name.bytes, options.port, options.family, &addresses) catch |err| return if (err == error.Canceled) error.Canceled else error.UnknownHostName
-    else if (getaddrinfo.available)
+    const n = if (builtin.os.tag == .windows) windows: {
+        const result = lookup_windows.resolve(lane_io, host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch |err| return if (err == error.Canceled) error.Canceled else error.UnknownHostName;
+        kept.canonical = result.canonical;
+        break :windows result.count;
+    } else if (getaddrinfo.available)
         (getaddrinfo.lookup(host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch return error.UnknownHostName).addresses.len
     else
         stub.lookupNamed(lane_io, host_name, options.port, options.family, &addresses, &canonical) catch |err| switch (err) {

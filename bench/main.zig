@@ -106,6 +106,9 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("waits")) try waits(r, io, c);
     if (c.wants("lanes")) try lanes(r, io, c);
     if (c.wants("deadlines")) try deadlines(r, io, c);
+    if (c.wants("accept")) try accepts(r, io, c);
+    if (c.wants("resolve")) try resolves(r, io, c);
+    if (c.wants("receiver")) try receivers(r, gpa, io, c);
     _ = runtime;
 }
 
@@ -463,4 +466,67 @@ fn deadlines(r: Report, io: Io, c: Config) !void {
     try acceptor.await(io);
     try servers.await(io);
     try r.line("deadlines", "64 B round trips, reads under a deadline", @as(f64, @floatFromInt(total)) / (nsBetween(t0, t1) / std.time.ns_per_s), "msg/s");
+}
+
+// accept and connect
+fn accepts(r: Report, io: Io, c: Config) !void {
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const n: usize = if (c.smoke) 20 else 10_000;
+    const t0 = now(io);
+    for (0..n) |_| {
+        const connected = try reactor.net.connect(io, &server.socket.address, .{});
+        const accepted = try server.accept(io);
+        accepted.close(io);
+        connected.stream.close(io);
+    }
+    try r.line("accept", "loopback connect, accept and close", @as(f64, @floatFromInt(n)) * std.time.ns_per_s / nsBetween(t0, now(io)), "conn/s");
+}
+
+fn resolves(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 10 else 1000;
+    var addresses: [16]Io.net.IpAddress = undefined;
+    const t0 = now(io);
+    for (0..n) |_| {
+        const found = try reactor.net.resolve(io, "localhost", 80, .{}, &addresses);
+        std.debug.assert(found.len > 0);
+    }
+    try r.line("resolve", "bounded localhost lookup", nsBetween(t0, now(io)) / @as(f64, @floatFromInt(n)), "ns/lookup");
+}
+
+fn receiverConnection(io: Io, pool: *reactor.net.Receiver.Pool, stream: Io.net.Stream) !void {
+    defer stream.close(io);
+    var receiver: reactor.net.Receiver = .init(io, pool, stream.socket.handle);
+    defer receiver.deinit(io);
+    while (true) {
+        const bytes = receiver.next(io, .none) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        var sent: usize = 0;
+        while (sent < bytes.len) {
+            const data: [1][]const u8 = .{bytes[sent..]};
+            sent += try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_write;
+        }
+        receiver.release(bytes);
+    }
+}
+
+fn receiverAccept(io: Io, pool: *reactor.net.Receiver.Pool, server: *Io.net.Server) !void {
+    const stream = try server.accept(io);
+    try receiverConnection(io, pool, stream);
+}
+
+fn receivers(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
+    var pool = try reactor.net.Receiver.Pool.init(gpa, io, .{ .buffers = 4096 });
+    defer pool.deinit(gpa, io);
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const n: usize = if (c.smoke) 100 else 100_000;
+    var task = try io.concurrent(receiverAccept, .{ io, &pool, &server });
+    defer task.cancel(io) catch {};
+    const t0 = now(io);
+    try client(io, server.socket.address, n);
+    try task.await(io);
+    try r.line("receiver", "64 B round trips, pooled receives", @as(f64, @floatFromInt(n)) * std.time.ns_per_s / nsBetween(t0, now(io)), "msg/s");
 }

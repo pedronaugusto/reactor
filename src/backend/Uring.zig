@@ -31,7 +31,7 @@ const Allocator = std.mem.Allocator;
 const results = @import("uring/results.zig");
 
 pub const Features = packed struct(u6) {
-    multishot_accept: bool = false,
+    accept_ahead: bool = false,
     fixed_files: bool = false,
     defer_taskrun: bool = false,
     msg_ring: bool = false,
@@ -126,10 +126,11 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
-    u.accepts = try Accept.init(gpa, options.entries, !options.off.multishot_accept and u.has(.ACCEPT));
+    u.accepts = try Accept.init(gpa, options.entries, !options.off.accept_ahead and u.has(.ACCEPT));
     errdefer u.accepts.deinit(gpa);
     u.files = try Files.init(gpa, &u.ring, options.entries, !options.off.fixed_files);
     errdefer u.files.deinit(gpa);
+    u.features.accept_ahead = u.accepts.enabled;
     u.features.fixed_files = u.files.enabled;
     const efd = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
     if (linux.errno(efd) != .SUCCESS) return error.SystemResources;
@@ -219,9 +220,8 @@ pub fn drainListeners(u: *Uring) void {
         const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // unreachable: the ring remains valid until the terminal completions
         for (cqes[0..count]) |cqe| switch (tagOf(cqe.user_data)) {
             .listener => {
-                const record: *Accept.Record = @ptrFromInt(cqe.user_data & ~@as(u64, 7)); // safe: a live table entry owns this token
-                if (cqe.res >= 0) _ = linux.close(cqe.res);
-                if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.accepts.reset(record);
+                const slot: *Accept.Slot = @ptrFromInt(cqe.user_data & ~@as(u64, 7)); // safe: a live table entry owns this token
+                u.accepts.drain(slot, cqe.res);
             },
             .wake, .ignore => {},
             else => std.debug.panic("reactor: an operation outlived its owner", .{}),
@@ -381,7 +381,10 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
         .device_io_control => unreachable, // unreachable: device control runs borrowed
     }
     sqe.user_data = ud;
-    u.files.use(&u.ring, sqe);
+    switch (operation.*) {
+        .file_read_streaming, .file_write_streaming => u.files.use(&u.ring, sqe),
+        else => {},
+    }
 }
 
 /// Ends every operation this ring holds on `fd`, then closes it; the
@@ -439,7 +442,10 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
         else => unreachable, // unreachable: the rest go by readiness, device control never pends
     }
     sqe.user_data = userData(@backingInt(token), .batch);
-    u.files.use(&u.ring, sqe);
+    switch (operation) {
+        .file_read_streaming, .file_write_streaming => u.files.use(&u.ring, sqe),
+        else => {},
+    }
 }
 
 pub fn cancelPending(u: *Uring, token: pending.Token) void {
@@ -552,7 +558,7 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             r.deliver(cqe);
         },
         .listener => {
-            const r: *Accept.Record = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion
+            const r: *Accept.Slot = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion
             u.accepts.complete(u, r, cqe, sink);
         },
         .ignore => {},

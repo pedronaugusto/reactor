@@ -1,4 +1,4 @@
-//! Listener lifetime and bounded multishot acceptance on a real ring.
+//! Listener lifetime and bounded accept-ahead requests on a real ring.
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
@@ -23,7 +23,7 @@ const Harness = struct {
     }
 };
 
-test "multishot listener cancellation releases its task before the listener record" {
+test "accept-ahead listener cancellation releases its task before the listener record" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var table = try Accept.init(testing.allocator, 2, true);
     defer table.deinit(testing.allocator);
@@ -41,7 +41,7 @@ test "multishot listener cancellation releases its task before the listener reco
     const record = &table.records[1];
     try testing.expect(record.closing);
     const cqe: std.os.linux.io_uring_cqe = .{ .user_data = 0, .res = -@as(i32, @backingInt(std.os.linux.E.CANCELED)), .flags = 0 };
-    table.complete(&h, record, cqe, &h);
+    for (&record.slots) |*slot| if (slot.active) table.complete(&h, slot, cqe, &h);
     try testing.expectEqual(@as(usize, 2), h.completed);
     try testing.expectError(error.SocketNotListening, b.result.accept);
     try testing.expectEqual(@as(i32, -1), record.fd);
@@ -89,5 +89,39 @@ test "a ring keeps at most eight accepted sockets between accepts" {
     for (0..8) |_| {
         const stream = try server.accept(io);
         stream.close(io);
+    }
+}
+
+test "accepting a burst keeps every connected peer" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const perform = @import("ops/perform.zig");
+    const Scheduler = @import("Scheduler.zig");
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = 256 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    const io = runtime.io();
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var first = try io.concurrent(accept, .{ io, &server });
+    defer if (first.cancel(io)) |stream| stream.close(io) else |_| {};
+    runtime.run(.nowait);
+    var clients: [32]Io.net.Stream = undefined;
+    var made: usize = 0;
+    defer for (clients[0..made]) |stream| stream.close(testing.io);
+    // Queue the entire burst before this ring is driven again.
+    for (&clients) |*stream| {
+        stream.* = try server.socket.address.connect(testing.io, .{ .mode = .stream });
+        made += 1;
+    }
+    const accepted = try first.await(io);
+    accepted.close(io);
+    for (1..clients.len) |_| {
+        var op: Loop.Op = .{ .kind = .{ .accept = server.socket.handle } };
+        try perform.run(&runtime.core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }) });
+        const socket = try op.result.accept;
+        socket.close(io);
     }
 }

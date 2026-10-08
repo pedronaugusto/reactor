@@ -96,6 +96,24 @@ test "shakedown's conformance suite passes on the driver" {
     }
 }
 
+test "a fake loop leaves streaming file reads to the file lane" {
+    try skipWithoutFibers();
+    var d: Driver = undefined;
+    try d.init(testing.allocator, 17, small);
+    defer d.deinit();
+    const io = d.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "stream", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "abcd", 0);
+    try io.vtable.fileSeekTo(io.userdata, file, 1);
+    var bytes: [2]u8 = @splat(0);
+    const result = try io.operate(.{ .file_read_streaming = .{ .file = file, .data = &.{&bytes} } });
+    try testing.expectEqual(@as(usize, 2), try result.file_read_streaming);
+    try testing.expectEqualStrings("bc", &bytes);
+}
+
 test "shakedown's conformance suite passes on real worker threads" {
     try skipWithoutFibers();
     var t: Threads = undefined;
@@ -374,4 +392,29 @@ test "a canceled libc lookup detaches while its bounded storage stays alive" {
     var second = try t.io().concurrent(Slow.run, .{&t});
     try testing.expectError(error.SystemResources, second.await(t.io()));
     Slow.release.set(testing.io);
+}
+
+fn parkForDump(io: Io, event: *Io.Event) Io.Cancelable!void {
+    try event.wait(io);
+}
+
+test "dump streams a parked task without visiting its live stack" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = 256 << 10, .offload = .none });
+    defer t.deinit();
+    const io = t.io();
+    var event: Io.Event = .unset;
+    var task = try io.concurrent(parkForDump, .{ io, &event });
+    defer task.cancel(io) catch {};
+    t.runtime.run(.nowait);
+    var buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    try t.runtime.dump(&writer);
+    const text = writer.buffered();
+    try testing.expect(std.mem.find(u8, text, "state=waiting") != null);
+    try testing.expect(std.mem.find(u8, text, "kind=future") != null);
+    try testing.expect(t.runtime.core.scheduler.records.items[0].highWater() > 0);
+    event.set(io);
+    try task.await(io);
 }

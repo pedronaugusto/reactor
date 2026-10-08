@@ -33,6 +33,9 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
     const R = ReturnOf(@TypeOf(func));
     const t = Scheduler.current() orelse return direct(lanes, lane, func, args);
     if (lanes.inlined()) return direct(lanes, lane, func, args);
+    const previous_lane = t.lane;
+    t.lane = lane;
+    defer t.lane = previous_lane;
     const Call = struct {
         const Self = @This();
 

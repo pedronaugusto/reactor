@@ -5,6 +5,7 @@ const gantry = @import("gantry");
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "system calls", .patterns = &.{
         "src/sys.zig",
+        "src/sys/crash.zig",
         "src/sys/memory.zig",
         "src/sys/socket.zig",
         "src/sys/dial.zig",
@@ -35,6 +36,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/uring/Accept.zig",
         "src/backend/uring/Receive.zig",
         "src/backend/uring/Files.zig",
+        "src/backend/iocp/Notifications.zig",
         "src/backend/wait.zig",
     } },
     .{ .name = "loop", .patterns = &.{
@@ -44,6 +46,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "scheduler", .patterns = &.{
         "src/Scheduler.zig",
         "src/scheduler/Task.zig",
+        "src/scheduler/Records.zig",
         "src/scheduler/run_queue.zig",
         "src/scheduler/inbox.zig",
     } },

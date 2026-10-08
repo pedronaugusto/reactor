@@ -1,4 +1,6 @@
-//! A listener owns its multishot request and at most eight accepted sockets.
+//! A listener owns at most eight accepts, pending or completed.
+//! Ordinary accepts leave excess connections in the kernel backlog;
+//! multishot accept cannot bound the sockets produced before cancellation.
 //! Request storage outlives every waiting task and the terminal completion.
 const Accept = @This();
 const std = @import("std");
@@ -8,9 +10,19 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 pub const bound = 8;
+pub const Slot = struct {
+    record: *Record = undefined,
+    active: bool = false,
+    address: Io.Threaded.PosixAddress = undefined,
+    address_len: posix.socklen_t = @sizeOf(Io.Threaded.PosixAddress),
+};
+
 pub const Record = struct {
+    slots: [bound]Slot = @splat(.{}),
+    pending: usize = 0,
+    ahead: usize = 1,
     fd: linux.fd_t = -1,
-    sockets: [bound]linux.fd_t = undefined,
+    sockets: [bound]Io.net.Socket = undefined,
     count: usize = 0,
     first: usize = 0,
     armed: bool = false,
@@ -60,16 +72,19 @@ pub fn reset(a: *Accept, r: *Record) void {
 
 fn discard(_: *Accept, r: *Record) void {
     while (r.count > 0) {
-        _ = linux.close(r.sockets[r.first]);
+        _ = linux.close(r.sockets[r.first].handle);
         r.first = (r.first + 1) % bound;
         r.count -= 1;
+        if (r.count == 0) r.ahead = 1;
     }
 }
 
 fn find(a: *Accept, fd: linux.fd_t) ?*Record {
     const first = @as(u32, @bitCast(fd)) % a.records.len;
     for (0..@min(8, a.records.len)) |offset| {
-        const r = &a.records[(first + offset) % a.records.len];
+        const i = (first + offset) % a.records.len;
+        if (a.descriptors[i].load(.monotonic) != fd) continue;
+        const r = &a.records[i];
         if (r.fd == fd and !r.closing) return r;
     }
     return null;
@@ -97,7 +112,7 @@ pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
         const socket = r.sockets[r.first];
         r.first = (r.first + 1) % bound;
         r.count -= 1;
-        o.result = .{ .accept = peer(socket) };
+        o.result = .{ .accept = socket };
         a.ready(o);
     } else {
         o.state.next = null;
@@ -107,19 +122,22 @@ pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
         } else r.head = o;
         r.tail = o;
     }
-    if (!r.armed and a.enabled) a.arm(u, r);
+    if (a.enabled and !r.ending) a.arm(u, r);
     return true;
 }
 
 fn arm(_: *Accept, u: anytype, r: *Record) void {
-    std.debug.assert(!r.armed);
     std.debug.assert(!r.closing);
-    const sqe = u.entry();
-    sqe.prep_accept(r.fd, null, null, linux.SOCK.CLOEXEC);
-    sqe.ioprio |= linux.IORING_ACCEPT_MULTISHOT;
-    sqe.user_data = @intFromPtr(r) | 5; // safe: decoded as this persistent record
-    r.armed = true;
-    r.ending = false;
+    for (&r.slots) |*slot| {
+        if (r.count + r.pending >= r.ahead) break;
+        if (slot.active) continue;
+        slot.* = .{ .record = r, .active = true };
+        const sqe = u.entry();
+        sqe.prep_accept(r.fd, &slot.address.any, &slot.address_len, linux.SOCK.CLOEXEC);
+        sqe.user_data = @intFromPtr(slot) | 5; // safe: decoded as this persistent accept slot
+        r.pending += 1;
+    }
+    r.armed = r.pending != 0;
 }
 
 fn ready(a: *Accept, o: anytype) void {
@@ -181,60 +199,67 @@ pub fn close(a: *Accept, u: anytype, fd: linux.fd_t) void {
 fn stop(u: anytype, r: *Record) void {
     if (r.ending) return;
     r.ending = true;
-    const sqe = u.entry();
-    sqe.prep_cancel(@intFromPtr(r) | 5, 0); // safe: the listener's own completion token
-    sqe.user_data = 4; // ignored cancellation acknowledgement
+    for (&r.slots) |*slot| {
+        if (!slot.active) continue;
+        const sqe = u.entry();
+        sqe.prep_cancel(@intFromPtr(slot) | 5, 0); // safe: this accept slot's own completion token
+        sqe.user_data = 4; // ignored cancellation acknowledgement
+    }
 }
 
-pub fn complete(a: *Accept, u: anytype, r: *Record, cqe: linux.io_uring_cqe, sink: anytype) void {
+/// A slot is retained until its sole completion, including after close.
+pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, sink: anytype) void {
     const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
-    const more = cqe.flags & linux.IORING_CQE_F_MORE != 0;
-    if (!more) r.armed = false;
+    const r = slot.record;
+    std.debug.assert(slot.active);
+    slot.active = false;
+    r.pending -= 1;
+    r.armed = r.pending != 0;
     if (cqe.res >= 0) {
         if (r.closing) {
             _ = linux.close(cqe.res);
         } else if (pop(Op, r)) |o| {
-            o.result = .{ .accept = peer(cqe.res) };
+            o.result = .{ .accept = peer(slot, cqe.res) };
             sink.complete(o);
-        } else if (r.count < bound) {
-            r.sockets[(r.first + r.count) % bound] = cqe.res;
+        } else {
+            std.debug.assert(r.count < bound);
+            r.sockets[(r.first + r.count) % bound] = peer(slot, cqe.res);
             r.count += 1;
-            if (r.count == bound and more) stop(u, r);
-        } else _ = linux.close(cqe.res);
-    } else if (cqe.err() == .INVAL and !r.closing) {
-        // The opcode probe cannot distinguish multishot accept support.
-        a.enabled = false;
-        while (pop(Op, r)) |o| u.submitSingleAccept(o);
-        a.reset(r);
+            // Grow only when a connection arrives before its consumer.
+            // A listener keeping up pays for one request at a time.
+            r.ahead = @min(bound, r.ahead * 2);
+        }
     } else if (cqe.err() != .CANCELED or r.closing) {
         while (pop(Op, r)) |o| {
             o.result = .{ .accept = failure(cqe.err()) };
             sink.complete(o);
         }
+        if (!r.closing) r.ending = true;
     }
-    if (!more) {
-        if (r.closing) {
-            a.reset(r);
-        } else if (a.enabled and r.head != null) {
-            a.arm(u, r);
-        } else if (!a.enabled) {
-            while (pop(Op, r)) |o| u.submitSingleAccept(o);
-            if (r.count == 0) a.reset(r);
-        }
+    if (r.closing) {
+        if (r.pending == 0) a.reset(r);
+    } else if (r.pending == 0 and r.ending) {
+        r.ending = false;
+    } else if (cqe.res >= 0 and !r.ending) {
+        a.arm(u, r);
     }
 }
 
-fn peer(fd: linux.fd_t) Io.net.Server.AcceptError!Io.net.Socket {
-    var address: Io.Threaded.PosixAddress = undefined;
-    var len: posix.socklen_t = @sizeOf(@TypeOf(address));
-    while (true) switch (linux.errno(linux.getpeername(fd, &address.any, &len))) {
-        .SUCCESS => return .{ .handle = fd, .address = Io.Threaded.addressFromPosix(&address) },
-        .INTR => continue,
-        else => {
-            _ = linux.close(fd);
-            return error.Unexpected;
-        },
-    };
+/// Shutdown has no live task operations; release late accepted descriptors.
+pub fn drain(a: *Accept, slot: *Slot, result: i32) void {
+    const r = slot.record;
+    std.debug.assert(slot.active);
+    std.debug.assert(r.closing);
+    std.debug.assert(r.head == null);
+    if (result >= 0) _ = linux.close(result);
+    slot.active = false;
+    r.pending -= 1;
+    r.armed = r.pending != 0;
+    if (!r.armed) a.reset(r);
+}
+
+fn peer(slot: *const Slot, fd: linux.fd_t) Io.net.Socket {
+    return .{ .handle = fd, .address = Io.Threaded.addressFromPosix(&slot.address) };
 }
 
 fn failure(e: linux.E) Io.net.Server.AcceptError {

@@ -315,3 +315,35 @@ test "kernel submit reaps a timed out read before its buffer is poisoned" {
     try r.io().sleep(.fromMilliseconds(1), .awake);
     try testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xa5)), &buffer);
 }
+
+fn pendingRead(io: Io, socket: Io.net.Socket.Handle, timeout: Io.Timeout) !usize {
+    var byte: [1]u8 = undefined;
+    var data: [1][]u8 = .{&byte};
+    const result = try io.operateTimeout(.{ .net_read = .{ .socket_handle = socket, .data = &data } }, timeout);
+    return (try result.net_read).data_len;
+}
+
+test "a socket close reports EOF while unrelated reads remain pending" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const io = r.io();
+    const pair = try tcpPair(io);
+    defer pair[0].close(io);
+    var client_open = true;
+    defer if (client_open) pair[1].close(io);
+    const other = try tcpPair(io);
+    defer for (other) |stream| stream.close(io);
+    const out: [1][]const u8 = .{"x"};
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &out } })).net_write;
+    try testing.expectEqual(@as(usize, 1), try pendingRead(io, pair[0].socket.handle, ms(5000)));
+    var peer = try io.concurrent(pendingRead, .{ io, pair[0].socket.handle, ms(100) });
+    defer _ = peer.cancel(io) catch {};
+    var unrelated = try io.concurrent(pendingRead, .{ io, other[0].socket.handle, Io.Timeout.none });
+    defer _ = unrelated.cancel(io) catch {};
+    r.run(.nowait);
+    pair[1].close(io);
+    client_open = false;
+    try testing.expectEqual(@as(usize, 0), try peer.await(io));
+}

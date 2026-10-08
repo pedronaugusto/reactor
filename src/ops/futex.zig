@@ -112,8 +112,8 @@ fn unlockAfterPark(context: *anyopaque, t: *Task) void {
 /// (when `cancelable`), or spuriously. Only `error.Canceled` is reported.
 pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeout: Io.Timeout, cancelable: bool) error{Canceled}!void {
     const b = table.bucket(ptr);
-    const t = Scheduler.current() orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
-    const p = Scheduler.processor().?;
+    const p = Scheduler.processor() orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
+    const t = p.current orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
     var w: Waiter = .{ .ptr = ptr, .task = t, .bucket = b, .scheduler = s };
     if (cancelable) try t.enterWait(&w.hook);
     b.lock();

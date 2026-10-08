@@ -3,6 +3,7 @@
 //! std's own code borrowed on the worker where it never blocks and never
 //! calls back into its `Io` (vtable/route.zig).
 const std = @import("std");
+const crash = @import("../sys/crash.zig");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
@@ -147,11 +148,23 @@ pub const vtable: Io.VTable = .{
 // Tasks.
 
 fn crashHandler(userdata: ?*anyopaque) void {
-    _ = userdata;
+    const r = Core.of(userdata);
     // The crashing task may call the Io again while the panic is printed:
     // nothing it waits on may be cancelled under it.
-    const t = Scheduler.current() orelse return;
-    t.protection = .{ .user = .blocked, .acknowledged = true };
+    if (Scheduler.current()) |t| {
+        t.protection = .{ .user = .blocked, .acknowledged = true };
+        var buffer: [256]u8 = undefined;
+        const summary = std.mem.print(&buffer, "reactor: worker={d} task=0x{x} start=0x{x} operation={s} lane={s}\n", .{
+            Scheduler.processor().?.index,
+            @intFromPtr(t), // safe: the task address identifies it in the output
+            t.spawned_at,
+            if (t.operation) |operation| @tagName(operation) else "none",
+            if (t.lane) |lane| @tagName(lane) else "none",
+        }) catch "reactor: crash summary exceeded its buffer\n";
+        crash.write(summary);
+    }
+    const io = r.lanes.borrowedIo();
+    io.vtable.crashHandler(io.userdata);
 }
 
 fn async(userdata: ?*anyopaque, result: []u8, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void) ?*Io.AnyFuture {
