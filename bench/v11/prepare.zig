@@ -51,7 +51,10 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{ reactor, reactor, reactor });
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = try std.mem.concat(gpa, u8, &.{ build[0..at], call, build[at..], "\n", helper }) });
-    std.debug.print("V11 adapted {d} test Io selections in {s}; original {s} untouched\n", .{ sites, fixture, source });
+    var buffer: [4096]u8 = undefined;
+    var output = Io.File.stdout().writer(io, &buffer);
+    try output.interface.print("V11 adapted {d} test Io selections in {s}; original {s} untouched\n", .{ sites, fixture, source });
+    try output.interface.flush();
 }
 
 fn replaceIo(gpa: std.mem.Allocator, bytes: []const u8, sites: *usize) ![]const u8 {

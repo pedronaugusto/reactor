@@ -34,5 +34,8 @@
   ],
   "unreachable_exceptions": "ci/unreachable-exceptions.json",
   "debug_print_exceptions": "ci/debug-print-exceptions.json",
-  "file_name_exceptions": "ci/file-name-exceptions.json"
+  "file_name_exceptions": "ci/file-name-exceptions.json",
+  "shipped": {
+    "docs": "Design and lifetime contracts referenced by README for consumers integrating an embedded loop."
+  }
 }

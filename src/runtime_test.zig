@@ -444,3 +444,25 @@ test "global lane completions wake a host driving the home loop" {
     try testing.expect(queued > 0);
     try testing.expectEqual(@as(u32, 1), woken);
 }
+
+fn capturedChild(io: Io) !void {
+    const result = try std.process.run(testing.allocator, io, .{
+        .argv = if (builtin.os.tag == .windows) &.{ "cmd.exe", "/c", "echo output & echo error 1>&2" } else &.{ "/bin/sh", "-c", "printf output; printf error >&2" },
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+    try testing.expectEqual(@as(u8, 0), result.term.exited);
+    try testing.expect(std.mem.startsWith(u8, result.stdout, "output"));
+    try testing.expect(std.mem.startsWith(u8, result.stderr, "error"));
+}
+
+test "r6: a native child drains stdout and stderr before its wait completes" {
+    if (!fiber.supported) return error.SkipZigTest;
+    var runtime: Runtime = undefined;
+    try runtime.init(testing.allocator, .{ .workers = 0, .max_tasks = 16 });
+    defer runtime.deinit();
+    try runtime.start();
+    var task = try runtime.io().concurrent(capturedChild, .{runtime.io()});
+    try task.await(runtime.io());
+}
