@@ -5,6 +5,24 @@ const testing = std.testing;
 const linux = std.os.linux;
 const Files = @import("backend/uring/Files.zig");
 
+test "a positional read of a write-only file reports its missing read capability" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const Runtime = @import("Runtime.zig");
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    const io = runtime.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "write-only", .{});
+    defer file.close(io);
+    var byte: [1]u8 = undefined;
+    try testing.expectError(error.NotOpenForReading, file.readPositional(io, &.{&byte}, 0));
+}
+
 test "removing a fixed file preserves requests not submitted yet" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var owner: struct { ring: linux.IoUring } = .{ .ring = linux.IoUring.init(32, 0) catch return error.SkipZigTest };

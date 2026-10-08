@@ -270,7 +270,8 @@ fn readAt(e: E) (Io.File.ReadPositionalError || Io.Cancelable) {
         .NOBUFS, .NOMEM => error.SystemResources,
         .AGAIN => error.WouldBlock,
         .IO => error.InputOutput,
-        .ISDIR, .BADF => error.IsDir,
+        .ISDIR => error.IsDir,
+        .BADF => error.NotOpenForReading,
         .NOTCONN, .CONNRESET, .INVAL, .FAULT => bug(e),
         else => unexpected(e),
     };
