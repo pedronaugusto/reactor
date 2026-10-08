@@ -89,7 +89,10 @@ pub const Processor = struct {
     pinned: Fifo = .{},
     latency: RunQueue = .{},
     latency_pinned: Fifo = .{},
+    latency_ready: bool = false,
     latency_runs: u8 = 0,
+    parked_high_water: std.atomic.Value(usize) = .init(0),
+    stack_high_water: std.atomic.Value(usize) = .init(0),
     inbox: Inbox(Task, "next") = .{},
     cancels: Inbox(Task, "cancel_next") = .{},
     errands: Inbox(Errand, "next") = .{},
@@ -197,6 +200,7 @@ pub const Processor = struct {
         p.scheduler.records.publish(t, p.index, .ready);
         t.processor = p;
         if (t.priority == .latency) {
+            p.latency_ready = true;
             if (t.home or t.pins > 0) p.latency_pinned.push(t) else p.pushLatency(t);
             p.scheduler.notify(p);
             return;
@@ -230,6 +234,7 @@ pub const Processor = struct {
     }
 
     fn pushLatency(p: *Processor, t: *Task) void {
+        p.latency_ready = true;
         if (p.latency.push(t)) return;
         var half: [run_queue.capacity / 2]*Task = undefined;
         if (p.latency.takeHalf(&half)) {
@@ -329,7 +334,10 @@ pub const Processor = struct {
     }
 
     fn takeLatency(p: *Processor) ?*Task {
-        return p.latency_pinned.pop() orelse p.latency.pop();
+        if (!p.latency_ready) return null;
+        const task = p.latency_pinned.pop() orelse p.latency.pop();
+        if (task == null) p.latency_ready = false;
+        return task;
     }
 
     inline fn nextNormal(p: *Processor) ?*Task {
@@ -422,9 +430,13 @@ pub const Processor = struct {
             // The first home entry parks the root without runTask starting it.
             if (was_running) p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
+        if (p.scheduler.measure_stacks) if (t.stack) |index| {
+            const depth = p.scheduler.stacks.highWater(index);
+            p.stack_high_water.store(@max(depth, p.stack_high_water.load(.monotonic)), .monotonic);
+        };
         // Trim only after switching off the stack and before publishing a
         // wake hook. Another processor cannot resume this task yet.
-        if (action == .park) if (t.stack) |index| {
+        if (!p.scheduler.measure_stacks and builtin.os.tag != .windows and action == .park) if (t.stack) |index| {
             const sp = fiber.stackPointer(&t.context);
             const live = t.stack_top - sp;
             if (t.resident_water > live + (64 << 10)) {
@@ -582,6 +594,7 @@ root: *Task,
 stacks: Stacks,
 records: Records,
 scheduling: Scheduling,
+measure_stacks: bool = false,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
 budget_ns: u64,
@@ -686,6 +699,7 @@ pub fn park(after: ?Processor.After) void {
         const bytes = t.stack_top - @intFromPtr(&message); // safe: message is a live frame below this task's owned stack top
         t.resident_water = @max(t.resident_water, bytes);
         p.scheduler.records.parked(t, p.index, bytes);
+        p.parked_high_water.store(@max(bytes, p.parked_high_water.load(.monotonic)), .monotonic);
     } // safe: message is a frame below this task's stack top
     _ = fiber.switchTo(&message.switch_);
 }
@@ -987,17 +1001,23 @@ pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem
 
 pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?usize, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     const index = s.stacks.takeSized(size) orelse return null;
-    const top = s.stacks.top(index);
+    const location = s.stacks.locate(index);
+    const pool = location.pool;
+    const top = pool.top(location.index);
     const record_at = std.mem.alignBackward(usize, top - @sizeOf(Task), @alignOf(Task));
     const extra_at = extra_align.backward(record_at - extra);
     const sp = std.mem.alignBackward(usize, extra_at, 16);
-    if (sp - s.stacks.bottom(index) < s.stacks.sizeAt(index) / 2 or !s.stacks.reach(index, sp - 48)) {
+    if (sp - pool.bottom(location.index) < pool.size / 2 or !pool.reach(location.index, sp - 48)) {
+        s.stacks.give(index);
+        return null;
+    }
+    if (s.measure_stacks and !s.stacks.paint(index, extra_at)) {
         s.stacks.give(index);
         return null;
     }
     const t: *Task = @ptrFromInt(record_at);
     t.* = .{ .kind = kind, .stack = index, .stack_top = top, .home = s.scheduling == .per_core, .priority = priority };
-    t.context = fiber.initial(s.stacks.stack(index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
+    t.context = fiber.initial(pool.stack(location.index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
     return .{ t, @ptrFromInt(extra_at) };
 }
 
@@ -1006,7 +1026,7 @@ pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
     s.stacks.ended(index, fiber.committedLimit(&t.context));
     const water = s.records.items[index].highWater();
-    if (water > 64 << 10) {
+    if (!s.measure_stacks and builtin.os.tag != .windows and water > 64 << 10) {
         // The record at the top stays live through fiber.deinit below.
         s.stacks.trim(index, @intFromPtr(t)); // safe: release exclusively owns this ended task's stack
         _ = s.stack_trims.fetchAdd(1, .monotonic);

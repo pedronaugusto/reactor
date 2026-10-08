@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
             .tests = test_step,
             .portable_tests = true,
             .bench = .{
-                .programs = &.{.{ .name = "bench", .source = "bench/main.zig" }},
+                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
@@ -65,6 +65,12 @@ pub fn build(b: *std.Build) !void {
         // fetch: the build a consumer gets.
         preflight.addConsumerCheck(b, .{ .package = "reactor", .program = b.path("ci/consumer.zig") });
     }
+    const compare = b.addExecutable(.{ .name = "compare", .root_module = b.createModule(.{ .root_source_file = b.path("bench/compare.zig"), .target = target, .optimize = .fast }) });
+    const evidence = b.addRunArtifact(compare);
+    evidence.addArg(b.graph.zig_exe);
+    evidence.setCwd(b.path("."));
+    evidence.has_side_effects = true;
+    b.step("later-evidence", "Run interleaved ReleaseFast A/B evidence without a performance gate").dependOn(&evidence.step);
     return needed;
 }
 

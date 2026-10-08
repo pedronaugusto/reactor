@@ -102,12 +102,24 @@ pub const Stats = struct {
     stalls: u64,
     /// Deep parked or ended stacks whose unused pages were discarded.
     stack_trims: u64,
+    /// Deepest task frame observed at a park, retained after task release.
+    parked_high_water: usize,
+    /// Deepest touched task storage; null unless measure_stacks is on.
+    stack_high_water: ?usize,
 };
 
 pub fn stats(r: *Runtime) Stats {
     var lanes: [Lanes.count]Lanes.Stats = undefined;
     for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
+    var parked: usize = 0;
+    var overall: usize = 0;
+    for (r.core.processors) |*processor| {
+        parked = @max(parked, processor.parked_high_water.load(.monotonic));
+        overall = @max(overall, processor.stack_high_water.load(.monotonic));
+    }
     return .{
+        .parked_high_water = parked,
+        .stack_high_water = if (r.core.options.measure_stacks) overall else null,
         .stack_trims = r.core.scheduler.stack_trims.load(.monotonic),
         .workers = @intCast(r.core.processors.len - 1),
         .tasks = r.core.scheduler.stacks.in_use.load(.monotonic),

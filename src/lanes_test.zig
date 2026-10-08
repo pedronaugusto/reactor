@@ -47,3 +47,53 @@ test "a disabled owned lane refuses instead of queueing forever" {
     try testing.expect(!observed.ran);
     try testing.expectEqual(@as(u32, 0), lanes.stats(.general).queued);
 }
+
+const Ordered = struct {
+    job: Lanes.Job = .{ .lane = .general, .run = run, .done = done },
+    begun: ?*Io.Event = null,
+    gate: ?*Io.Event = null,
+    order: *[11]u8,
+    used: *usize,
+    value: u8 = 0,
+    finished: Io.Event = .unset,
+    fn run(job: *Lanes.Job) void {
+        const self: *Ordered = @alignCast(@fieldParentPtr("job", job)); // safe: the test retains every job until its group ends
+        if (self.begun) |event| event.set(testing.io);
+        if (self.gate) |event| event.waitUncancelable(testing.io) else {
+            self.order[self.used.*] = self.value;
+            self.used.* += 1;
+        }
+    }
+    fn done(job: *Lanes.Job) void {
+        const self: *Ordered = @alignCast(@fieldParentPtr("job", job)); // safe: same retained embedded job
+        self.finished.set(testing.io);
+    }
+};
+test "disk lane latency jobs pass queued normal jobs without starving them" {
+    var lanes: Lanes = undefined;
+    try lanes.init(testing.allocator, .{ .owned = .{ .general = 1 } }, .{});
+    defer lanes.deinit(testing.allocator);
+    var begun: Io.Event = .unset;
+    var gate: Io.Event = .unset;
+    var order: [11]u8 = undefined;
+    var used: usize = 0;
+    var blocker: Ordered = .{ .order = &order, .used = &used, .begun = &begun, .gate = &gate };
+    lanes.submit(&blocker.job);
+    try begun.wait(testing.io);
+    defer gate.set(testing.io);
+    var jobs: [11]Ordered = undefined;
+    for (&jobs, 0..) |*job, at| {
+        job.* = .{ .order = &order, .used = &used, .value = if (at == 0) 0 else 1 };
+        if (at != 0) job.job.priority = .latency;
+        lanes.submit(&job.job);
+    }
+    try testing.expectEqual(@as(u32, 11), lanes.stats(.general).queued);
+    gate.set(testing.io);
+    for (&jobs) |*job| {
+        try job.finished.wait(testing.io);
+        try job.job.group.await(lanes.executor(.general));
+    }
+    try blocker.job.group.await(lanes.executor(.general));
+    try testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1 }, &order);
+    try testing.expectEqual(@as(u64, 0), lanes.stats(.general).@"inline");
+}

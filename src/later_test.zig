@@ -525,3 +525,44 @@ test "later: every native file fault short transfer and cancellation leaves owne
     defer report.deinit();
     try testing.expect(report.runs > 10);
 }
+
+noinline fn touchWithoutPark() u8 {
+    var data: [96 << 10]u8 = undefined;
+    const bytes: *volatile [96 << 10]u8 = &data;
+    for (0..data.len) |at| bytes[at] = 0x39;
+    return bytes[7];
+}
+fn measured(io: Io) !void {
+    try testing.expectEqual(@as(u8, 0x39), touchWithoutPark());
+    try io.sleep(.fromMilliseconds(1), .awake);
+}
+test "later: diagnostic overall depth includes returned frames and survives task release" {
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = 256 << 10, .measure_stacks = true }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    var future = try r.io().concurrent(measured, .{r.io()});
+    try future.await(r.io());
+    const snapshot = r.stats();
+    try testing.expect(snapshot.parked_high_water > 0);
+    try testing.expect(snapshot.stack_high_water.? > 96 << 10);
+    try testing.expect(snapshot.stack_high_water.? > snapshot.parked_high_water);
+    try testing.expectEqual(@as(u32, 0), snapshot.tasks);
+}
+
+test "V3 owned Windows lane cancellation interrupts a synchronous pipe read" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ "cmd.exe", "/d", "/c", "ping -n 6 127.0.0.1 >nul" }, .stdout = .pipe });
+    defer child.kill(testing.io);
+    var r: Runtime = undefined;
+    try native(&r, .iocp);
+    defer r.deinit();
+    var begun: Io.Event = .unset;
+    var future = try r.io().concurrent(onPipe, .{ r.io(), r.core.lanes.executor(.wait), child.stdout.?, &begun });
+    try begun.wait(r.io());
+    try r.io().sleep(.fromMilliseconds(2), .awake);
+    try testing.expectError(error.Canceled, future.cancel(r.io()));
+    try testing.expectEqual(@as(u64, 0), r.stats().lanes[@backingInt(Runtime.Lane.wait)].@"inline");
+}

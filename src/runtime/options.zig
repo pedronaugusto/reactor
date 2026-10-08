@@ -39,6 +39,9 @@ pub const Options = struct {
     /// Each task's stack reservation; what a task costs is the pages it
     /// touches.
     stack_size: usize = 1 << 20,
+    /// Paint and scan task stacks to measure overall touched depth. This
+    /// commits diagnostic pages and suspends trimming; leave off when timing.
+    measure_stacks: bool = false,
     /// Additional size classes, counted within max_tasks; reserved at init.
     stack_classes: []const StackClass = &.{},
     /// Past this, `concurrent` fails with `ConcurrencyUnavailable` and
@@ -55,6 +58,8 @@ pub const Options = struct {
     uring_off: Loop.UringFeatures = .{},
     sqpoll: ?Loop.SqPoll = null,
     zero_copy_min: ?usize = 16 << 10,
+    /// Sparse fixed-buffer pools per ring, reserved at init.
+    registered_pools: u16 = 64,
     /// Linux: worker n on CPU n.
     pin_workers: bool = false,
     /// The monitor thread: stall reports, and on epoll, kqueue and IOCP under

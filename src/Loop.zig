@@ -43,6 +43,7 @@ pub const Options = struct {
     sqpoll: ?SqPoll = null,
     /// Minimum contiguous send eligible for SEND_ZC; null disables it.
     zero_copy_min: ?usize = 16 << 10,
+    registered_pools: u16 = 64,
     /// Windows: the host's completion port, which the loop shares. The host
     /// waits on it and hands the entries that carry `completionKey()` to
     /// `complete`; `run` then waits on nothing, so the host calls
@@ -188,6 +189,7 @@ fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
             .disabled = options.owner == .adopter,
             .sqpoll = options.sqpoll,
             .zero_copy_min = options.zero_copy_min,
+            .registered_pools = options.registered_pools,
         }) catch |err| return switch (err) {
             error.BackendUnavailable => error.BackendUnavailable,
             error.SystemResources => error.SystemResources,

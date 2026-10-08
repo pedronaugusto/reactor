@@ -3,6 +3,7 @@
 //! smallest configured class that fits and has capacity.
 const Stacks = @This();
 const std = @import("std");
+const builtin = @import("builtin");
 const Pool = @import("Stacks/Pool.zig");
 const memory = @import("../sys/memory.zig");
 const fiber = @import("../fiber.zig");
@@ -77,8 +78,8 @@ pub fn takeSized(s: *Stacks, bytes: ?usize) ?u32 {
     }
 }
 
-const Location = struct { pool: *Pool, index: u32 };
-fn locate(s: *const Stacks, index: u32) Location {
+pub const Location = struct { pool: *Pool, index: u32 };
+pub fn locate(s: *const Stacks, index: u32) Location {
     if (index < s.pools[0].count) return .{ .pool = &s.pools[0], .index = index };
     var remaining = index;
     for (s.pools) |*pool| {
@@ -119,4 +120,25 @@ pub fn give(s: *Stacks, index: u32) void {
 pub fn trim(s: *const Stacks, index: u32, keep_from: usize) void {
     const l = s.locate(index);
     l.pool.trim(l.index, keep_from);
+}
+
+/// Diagnostic painting commits the stack before entry; it is opt-in and
+/// disabled in ordinary runs. No live frame is ever painted.
+pub fn paint(s: *Stacks, index: u32, until: usize) bool {
+    const low = s.bottom(index) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
+    if (!s.reach(index, low)) return false;
+    const bytes: [*]u8 = @ptrFromInt(low); // safe: exclusively owned, committed stack below its initial frame
+    @memset(bytes[0 .. until - low], 0xa5);
+    return true;
+}
+
+/// Called off-stack, before publishing a wake or an ended task. The
+/// lowest changed byte measures deepest touched storage, including work
+/// which returned before the next park.
+pub fn highWater(s: *const Stacks, index: u32) usize {
+    const low = s.bottom(index) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
+    const bytes: [*]const u8 = @ptrFromInt(low); // safe: the scheduler exclusively owns this suspended stack
+    const size = s.top(index) - low;
+    for (bytes[0..size], 0..) |byte, at| if (byte != 0xa5) return size - at;
+    return 0;
 }
