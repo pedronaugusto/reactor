@@ -364,3 +364,37 @@ test "a zero timeout chooses a ready Wake before an ended process" {
     const ended: reactor.Process = .{ .watch = .ended, .id = 0 };
     try testing.expectEqual(@as(usize, 0), try reactor.waitAny(io, &.{ .{ .wake = &wake }, .{ .process = &ended } }, ms(0)));
 }
+
+test "a reaped operation can alternate kernel and timer requests without reinitialization" {
+    const clocks = @import("clock.zig");
+    const loop_internal = @import("loop/internal.zig");
+    var virtual: clocks.Virtual = .{};
+    var fake = Fake.init(testing.allocator, .{ .seeded = .{ .seed = 71, .virtual = &virtual } });
+    defer fake.deinit();
+    var loop: Loop = undefined;
+    loop_internal.initWith(&loop, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 8);
+    defer loop.deinit(testing.allocator);
+    var operation: Loop.Op = .{ .kind = .{ .sync = undefined } };
+    var reaped: [1]*Loop.Op = undefined;
+    for (0..32) |round| {
+        operation.kind = .{ .sync = undefined };
+        try loop.submit(&operation);
+        // Stand in for bytes a kernel backend leaves in its scratch.
+        @memset(std.mem.asBytes(&operation.state.storage.scratch), 0xa5);
+        var polls: usize = 0;
+        while (loop.in_flight > 0 and polls < 1000) : (polls += 1) _ = try loop.run(.nowait);
+        try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
+        try testing.expectEqual(&operation, reaped[0]);
+        try operation.result.sync;
+        operation.kind = .{ .timer = .{ .clock = .awake, .raw = virtual.now(.awake).addDuration(.fromMilliseconds(1)) } };
+        try loop.submit(&operation);
+        if (round % 2 == 0) {
+            loop.cancel(&operation);
+        } else {
+            virtual.advance(.fromMilliseconds(1));
+            _ = try loop.run(.nowait);
+        }
+        try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
+        if (round % 2 == 0) try testing.expectError(error.Canceled, operation.result.timer) else try operation.result.timer;
+    }
+}

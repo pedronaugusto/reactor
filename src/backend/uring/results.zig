@@ -76,12 +76,12 @@ fn io(o: anytype, operation: Io.Operation, cqe: linux.io_uring_cqe) Io.Operation
 
 fn readResult(o: anytype, r: Io.Operation.NetRead, n: usize) net.Stream.ReadResult {
     if (r.control.len == 0) return .{ .data_len = n };
-    const header = &o.state.scratch.io_uring.message.header;
+    const header = &o.state.storage.scratch.io_uring.message.header;
     return .{ .data_len = n, .control_len = header.controllen, .control_truncated = header.flags & posix.MSG.CTRUNC != 0 };
 }
 
 fn received(o: anytype, r: Io.Operation.NetReceive, n: usize) struct { ?net.Socket.ReceiveError, usize } {
-    const m = &o.state.scratch.io_uring.message;
+    const m = &o.state.storage.scratch.io_uring.message;
     fillMessage(&r.message_buffer[0], r.data_buffer[0..n], &m.address, &m.header);
     return .{ null, 1 };
 }
@@ -144,7 +144,7 @@ fn accept(o: anytype, cqe: linux.io_uring_cqe) net.Server.AcceptError!net.Socket
         .PERM => error.BlockedByFirewall,
         else => unexpected(e),
     };
-    const a = &o.state.scratch.io_uring.address;
+    const a = &o.state.storage.scratch.io_uring.address;
     return .{ .handle = cqe.res, .address = Threaded.addressFromPosix(&a.storage.ip) };
 }
 

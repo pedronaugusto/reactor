@@ -269,8 +269,8 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             u.submitSingleAccept(o);
         },
         .connect => |c| {
-            o.state.scratch = .{ .io_uring = .{ .address = undefined } };
-            const a = &o.state.scratch.io_uring.address;
+            o.state.storage.scratch = .{ .io_uring = .{ .address = undefined } };
+            const a = &o.state.storage.scratch.io_uring.address;
             a.* = .{ .storage = undefined, .len = 0 };
             a.len = switch (c.address) {
                 .ip => |*ip| Threaded.addressToPosix(ip, &a.storage.ip),
@@ -307,8 +307,8 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             sqe.user_data = ud;
         },
         .timer => |deadline| {
-            o.state.scratch = .{ .io_uring = .{ .timespec = undefined } };
-            const ts = &o.state.scratch.io_uring.timespec;
+            o.state.storage.scratch = .{ .io_uring = .{ .timespec = undefined } };
+            const ts = &o.state.storage.scratch.io_uring.timespec;
             ts.* = timespecOf(deadline.raw.nanoseconds);
             const clock_flag: u32 = switch (deadline.clock) {
                 .real => linux.IORING_TIMEOUT_REALTIME,
@@ -334,8 +334,8 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
 
 /// A kernel without multishot support uses ordinary accept requests.
 pub fn submitSingleAccept(u: *Uring, o: anytype) void {
-    o.state.scratch = .{ .io_uring = .{ .address = undefined } };
-    const a = &o.state.scratch.io_uring.address;
+    o.state.storage.scratch = .{ .io_uring = .{ .address = undefined } };
+    const a = &o.state.storage.scratch.io_uring.address;
     a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
     const sqe = u.entry();
     sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // safe: the kernel writes a socket address here
@@ -353,14 +353,14 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
         .net_read => |r| if (r.control.len == 0) {
             sqe.prep_recv(r.socket_handle, firstBuffer(r.data), 0);
         } else {
-            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
-            const m = &o.state.scratch.io_uring.message;
+            o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
+            const m = &o.state.storage.scratch.io_uring.message;
             m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = gather(&m.iovecs, r.data), .control = r.control.ptr, .controllen = @intCast(r.control.len), .flags = 0 };
             sqe.prep_recvmsg(r.socket_handle, &m.header, posix.MSG.CMSG_CLOEXEC);
         },
         .net_write => |w| {
-            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
-            const m = &o.state.scratch.io_uring.message;
+            o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
+            const m = &o.state.storage.scratch.io_uring.message;
             const count = scatter(&m.iovecs, &m.splat, w.header, w.data, w.splat);
             if (count == 1 and w.control.len == 0) {
                 sqe.prep_send(w.socket_handle, @as([*]const u8, m.iovecs[0].base)[0..m.iovecs[0].len], posix.MSG.NOSIGNAL);
@@ -370,16 +370,16 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
             }
         },
         .net_receive => |r| {
-            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
-            const m = &o.state.scratch.io_uring.message;
+            o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
+            const m = &o.state.storage.scratch.io_uring.message;
             const message = &r.message_buffer[0];
             m.iovecs[0] = .{ .base = r.data_buffer.ptr, .len = r.data_buffer.len };
             m.header = .{ .name = &m.address.any, .namelen = @sizeOf(Threaded.PosixAddress), .iov = &m.iovecs, .iovlen = 1, .control = message.control.ptr, .controllen = @intCast(message.control.len), .flags = 0 };
             sqe.prep_recvmsg(r.socket_handle, &m.header, receiveFlags(r.flags));
         },
         .net_send => |s| {
-            o.state.scratch = .{ .io_uring = .{ .message = undefined } };
-            const m = &o.state.scratch.io_uring.message;
+            o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
+            const m = &o.state.storage.scratch.io_uring.message;
             const message = &s.messages[0];
             m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len }; // safe: the kernel only reads what a send gives it
             m.header = .{ .name = &m.address.any, .namelen = Threaded.addressToPosix(message.address, &m.address), .iov = &m.iovecs, .iovlen = 1, .control = if (message.control.len == 0) null else @constCast(message.control.ptr), .controllen = @intCast(message.control.len), .flags = 0 }; // safe: the kernel only reads what a send gives it

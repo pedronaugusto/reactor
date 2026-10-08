@@ -99,7 +99,7 @@ fn one(s: Io.Operation.NetSend, information: usize) struct { ?net.Socket.SendErr
 }
 
 fn received(o: anytype, r: Io.Operation.NetReceive, status: Status, information: usize) struct { ?net.Socket.ReceiveError, usize } {
-    const d = &o.state.scratch.iocp.request.datagram_in;
+    const d = &o.state.storage.scratch.iocp.request.datagram_in;
     return datagram(&r.message_buffer[0], r.data_buffer, status, information, &d.address);
 }
 

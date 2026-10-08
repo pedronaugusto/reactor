@@ -223,8 +223,8 @@ fn bindHandle(b: *Iocp, handle: Handle) bool {
 /// Hands `o` to the kernel. True when it finished at once: its result is
 /// set, and no entry follows.
 pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
-    o.state.scratch = .{ .iocp = .{ .owner = b } };
-    const s = &o.state.scratch.iocp;
+    o.state.storage.scratch = .{ .iocp = .{ .owner = b } };
+    const s = &o.state.storage.scratch.iocp;
     const context: ?*anyopaque = @ptrFromInt(contextOf(@intFromPtr(o), .op)); // safe: read back as the `Op` in `dispatch`
     switch (o.kind) {
         .raw => |raw| switch (raw) {
@@ -335,7 +335,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
 }
 
 fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
-    const s = &o.state.scratch.iocp;
+    const s = &o.state.storage.scratch.iocp;
     switch (operation.*) {
         .net_read => |r| {
             if (!b.bindHandle(r.socket_handle)) return b.refuse(o);
@@ -409,7 +409,7 @@ fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*any
 /// A `real` or `boot` timer: a waitable timer of its own, absolute for
 /// `real`, whose packet completes the operation.
 fn submitTimer(b: *Iocp, o: anytype, deadline: Io.Clock.Timestamp, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
-    const s = &o.state.scratch.iocp;
+    const s = &o.state.storage.scratch.iocp;
     const timer, _ = try sys.createTimer();
     errdefer sys.close(timer);
     const packet = try sys.createWaitPacket();
@@ -446,7 +446,7 @@ fn settle(b: *Iocp, o: anytype, status: Status) bool {
     if (results.entryFollows(status)) return false;
     // The status block is written for a call that succeeded at once, and
     // left alone for one that failed at once.
-    const information = if (status == .SUCCESS or @backingInt(status) >> 30 == 0b01) o.state.scratch.iocp.iosb.Information else 0;
+    const information = if (status == .SUCCESS or @backingInt(status) >> 30 == 0b01) o.state.storage.scratch.iocp.iosb.Information else 0;
     return b.advance(o, status, information);
 }
 
@@ -454,7 +454,7 @@ fn settle(b: *Iocp, o: anytype, status: Status) bool {
 /// operation is over (its result set); false when its next request is
 /// under way.
 fn advance(b: *Iocp, o: anytype, first_status: Status, first_information: usize) bool {
-    const s = &o.state.scratch.iocp;
+    const s = &o.state.storage.scratch.iocp;
     const context: ?*anyopaque = @ptrFromInt(contextOf(@intFromPtr(o), .op)); // safe: read back as the `Op` in `dispatch`
     var status = first_status;
     var information = first_information;
@@ -537,7 +537,7 @@ fn advance(b: *Iocp, o: anytype, first_status: Status, first_information: usize)
 /// cancelation point's; after some went, the send reports them and the
 /// cancel stays for the next point, as std's does.
 fn sendEnded(o: anytype, status: Status) Io.Cancelable!Io.Operation.Result {
-    const sent = o.state.scratch.iocp.sent;
+    const sent = o.state.storage.scratch.iocp.sent;
     const ended = results.ended(status);
     if (ended and o.state.canceled) {
         if (sent == 0) return error.Canceled;
@@ -550,7 +550,7 @@ fn sendEnded(o: anytype, status: Status) Io.Cancelable!Io.Operation.Result {
 /// and no entry follows.
 pub fn cancel(b: *Iocp, o: anytype) bool {
     _ = b;
-    const s = &o.state.scratch.iocp;
+    const s = &o.state.storage.scratch.iocp;
     switch (s.stage) {
         .packet => switch (sys.disarmWaitPacket(s.request.packet.packet)) {
             .removed => {
@@ -732,7 +732,7 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
     switch (@as(Tag, @fromBackingInt(@as(u3, @truncate(e.context))))) {
         .op => {
             const o: *OpOf(@TypeOf(sink)) = @ptrFromInt(address);
-            const s = &o.state.scratch.iocp;
+            const s = &o.state.storage.scratch.iocp;
             if (s.owner != b) return s.owner.forward(e);
             if (b.advance(o, e.iosb.u.Status, e.iosb.Information)) sink.complete(o);
         },

@@ -63,13 +63,15 @@ pub const UringFeatures = packed struct {
 /// Caller-owned and pinned from `submit` until its completion is
 /// delivered: the loop never copies or allocates one.
 pub const Op = struct {
+    // Keep the completion fields beside the kind, ahead of aligned backend
+    // scratch. Wheel cancellation then touches fewer cache lines.
     kind: Kind,
     /// Runs inside `run`, on the loop's thread. Null: the completion waits
     /// for `reap`.
-    callback: ?*const fn (l: *Loop, o: *Op) void = null,
+    callback: ?*const fn (l: *Loop, o: *Op) void align(@alignOf(Kind)) = null,
     user_data: usize = 0,
     /// Valid once completed, under the field of `kind`.
-    result: Result = undefined,
+    result: Result align(@alignOf(Kind)) = undefined,
     /// The loop's and its backend's from `submit` to delivery.
     state: op.State(backends.Scratch) = .{},
 
@@ -103,7 +105,8 @@ pub const BatchSink = struct {
 
 backend: backends.Backend,
 clock: clocks.Source,
-wheel: Wheel,
+// Keep wheel heads at the start, independent of the backend union size.
+wheel: Wheel align(std.atomic.cache_line),
 /// Completed operations not delivered yet (finished at submit or cancel).
 ready: List = .{},
 /// Delivered operations without a callback, oldest first.
@@ -246,7 +249,7 @@ pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     switch (o.kind) {
         .timer => |deadline| if (l.backend.kind() == null or (deadline.clock != .real and deadline.clock != .boot)) {
             o.state.phase = .timer;
-            l.wheel.arm(&o.state.node, l.deadlineTicks(deadline));
+            l.wheel.arm(&o.state.storage.node, l.deadlineTicks(deadline));
             l.in_flight += 1;
             return false;
         },
@@ -264,6 +267,7 @@ pub fn start(l: *Loop, o: *Op) SubmitError!bool {
         },
         else => {},
     }
+    o.state.storage = .{ .scratch = undefined };
     o.state.phase = .kernel;
     const done = l.backend.submit(o) catch |err| {
         o.state.phase = .idle;
@@ -296,18 +300,22 @@ pub fn cancel(l: *Loop, o: *Op) void {
     switch (o.state.phase) {
         .idle, .done => {},
         .timer => {
-            l.wheel.disarm(&o.state.node);
+            l.wheel.disarm(&o.state.storage.node);
             o.state.canceled = true;
             o.result = .{ .timer = error.Canceled };
             l.deliver(o);
         },
-        .kernel => if (!o.state.canceled) {
-            o.state.canceled = true;
-            if (l.backend.cancel(o)) {
-                o.state.phase = .done;
-                l.ready.push(o);
-            }
-        },
+        .kernel => @call(.never_inline, cancelKernel, .{ l, o }),
+    }
+}
+
+// Keep backend dispatch out of the wheel's cancellation path.
+fn cancelKernel(l: *Loop, o: *Op) void {
+    if (o.state.canceled) return;
+    o.state.canceled = true;
+    if (l.backend.cancel(o)) {
+        o.state.phase = .done;
+        l.ready.push(o);
     }
 }
 
@@ -348,7 +356,11 @@ pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
 pub fn reap(l: *Loop, out: []*Op) []*Op {
     l.assertOwner();
     var n: usize = 0;
-    while (n < out.len) : (n += 1) out[n] = l.reaped.pop() orelse break;
+    while (n < out.len) : (n += 1) {
+        const o = l.reaped.pop() orelse break;
+        o.state.phase = .idle;
+        out[n] = o;
+    }
     return out[0..n];
 }
 
@@ -510,7 +522,8 @@ const Fired = struct {
     count: u32 = 0,
 
     pub fn fire(f: *Fired, node: *Wheel.Node) void {
-        const state: *op.State(backends.Scratch) = @alignCast(@fieldParentPtr("node", node)); // safe: the node is a field of an operation's state
+        const storage: *op.State(backends.Scratch).Storage = @ptrCast(@alignCast(node)); // safe: the timer owns this union's node
+        const state: *op.State(backends.Scratch) = @alignCast(@fieldParentPtr("storage", storage)); // safe: the storage belongs to the operation's state
         const o: *Op = @alignCast(@fieldParentPtr("state", state)); // safe: the state is a field of an operation
         o.result = .{ .timer = {} };
         f.count += 1;

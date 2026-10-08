@@ -227,12 +227,12 @@ pub fn Readiness(comptime Poller: type) type {
         // Operations.
 
         fn waiterOf(o: anytype) *Waiter {
-            return &@field(o.state.scratch, Poller.name);
+            return &@field(o.state.storage.scratch, Poller.name);
         }
 
         /// Starts `o`; true when it completed at once (its result is set).
         pub fn submit(self: *Self, o: anytype) SubmitError!bool {
-            o.state.scratch = @unionInit(@TypeOf(o.state.scratch), Poller.name, .{
+            o.state.storage.scratch = @unionInit(@TypeOf(o.state.storage.scratch), Poller.name, .{
                 .op = @intFromPtr(o), // safe: read back as this operation by its actions
                 .act = Acts(@TypeOf(o)).act,
             });

@@ -96,10 +96,13 @@ pub fn State(comptime Scratch: type) type {
         canceled: bool = false,
         /// The completion queue's link.
         next: ?*anyopaque = null,
-        /// A timer's place on the wheel.
-        node: Wheel.Node = .{},
-        /// What the backend needs alive while the kernel holds the operation.
-        scratch: Scratch = undefined,
+        /// The phase owns the wheel node or kernel scratch, never both.
+        storage: Storage = .{ .node = .{} },
+
+        pub const Storage = union {
+            node: Wheel.Node,
+            scratch: Scratch,
+        };
     };
 }
 
