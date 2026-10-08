@@ -15,9 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Opt-in overall touched-stack profiling and retained parked high-water statistics; diagnostic painting is disabled when timing.
 - Lane executor rejection no longer runs blocking work on the submitting scheduler worker. Disabled lanes reject rather than queue forever.
 - Deep ended or shallow parked stacks discard unused pages on systems that support it.
-- SQ/CQ pressure releases kernel ownership while keeping user callbacks queued for `run`; SQPOLL file close waits for published file references before unregistering.
+- SQ/CQ pressure releases kernel ownership while keeping user callbacks and batch list mutations queued for `run`; SQPOLL file close waits for published file references before unregistering.
 
 
 - Buffer-pool registration follows the ring owner as soon as runtime startup begins, avoiding a race with worker adoption.

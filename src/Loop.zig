@@ -190,6 +190,7 @@ fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
             .sqpoll = options.sqpoll,
             .zero_copy_min = options.zero_copy_min,
             .registered_pools = options.registered_pools,
+            .pending_bound = options.max_ops,
         }) catch |err| return switch (err) {
             error.BackendUnavailable => error.BackendUnavailable,
             error.SystemResources => error.SystemResources,

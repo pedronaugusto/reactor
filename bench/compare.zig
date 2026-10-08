@@ -72,6 +72,24 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (builtin.os.tag != .linux) return;
+    try measure(gpa, io, w, 0, "native-capabilities", ".", &.{ "--only", "info" });
+    for ([_]struct { name: []const u8, workload: []const u8, off: []const u8 }{
+        .{ .name = "fixed-files", .workload = "files", .off = "--fixed-files-off" },
+        .{ .name = "linked-timeout", .workload = "deadlines", .off = "--linked-timeout-off" },
+        .{ .name = "native-open-stat", .workload = "open-stat", .off = "--files-pool" },
+    }) |feature| {
+        for (0..5) |round| {
+            const a = &.{ "--only", feature.workload, feature.off };
+            const b = &.{ "--only", feature.workload };
+            if (round % 2 == 0) {
+                try measure(gpa, io, w, round, feature.off, ".", a);
+                try measure(gpa, io, w, round, feature.name, ".", b);
+            } else {
+                try measure(gpa, io, w, round, feature.name, ".", b);
+                try measure(gpa, io, w, round, feature.off, ".", a);
+            }
+        }
+    }
     for (0..5) |round| {
         const a = &.{ "--only", "files" };
         const b = &.{ "--only", "files", "--registered" };

@@ -53,6 +53,7 @@ pub const Options = struct {
     sqpoll: ?op.SqPoll = null,
     zero_copy_min: ?usize = 16 << 10,
     registered_pools: u16 = 64,
+    pending_bound: u32 = 1024,
 };
 
 pub const InitError = error{ BackendUnavailable, SystemResources, Unexpected };
@@ -123,6 +124,12 @@ notify_fd: ?linux.fd_t = null,
 enabled: bool,
 /// The kernel flags the ring when completions wait to be run.
 taskrun_flag: bool = false,
+/// Batch lists belong to parked callers. Pressure keeps their CQEs until
+/// poll instead of mutating a list a submitting/canceling task is walking.
+deferred: []linux.io_uring_cqe,
+deferred_head: usize = 0,
+deferred_count: usize = 0,
+draining_pressure: bool = false,
 /// Installed by the loop on its owner before submissions. Pressure drains
 /// kernel ownership while leaving user callbacks queued until Loop.run.
 pressure: ?struct {
@@ -141,7 +148,9 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
         .features = .{},
         .wake_fd = undefined,
         .enabled = !options.disabled,
+        .deferred = try gpa.alloc(linux.io_uring_cqe, options.pending_bound),
     };
+    errdefer gpa.free(u.deferred);
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
@@ -228,6 +237,7 @@ pub fn enable(u: *Uring) void {
 pub fn deinit(u: *Uring, gpa: Allocator) void {
     u.drainListeners();
     u.accepts.deinit(gpa);
+    gpa.free(u.deferred);
     u.files.deinit(gpa);
     u.buffers.deinit(gpa);
     if (u.notify_fd) |fd| _ = linux.close(fd);
@@ -288,6 +298,9 @@ fn drainPressure(u: *Uring) void {
         error.SignalInterrupt => return,
         else => std.debug.panic("reactor: pressure drain failed: {t}", .{err}),
     };
+    const previous = u.draining_pressure;
+    u.draining_pressure = true;
+    defer u.draining_pressure = previous;
     for (cqes[0..count]) |cqe| pressure.complete(pressure.context, cqe);
 }
 
@@ -567,7 +580,14 @@ fn socketOf(operation: Io.Operation) linux.fd_t {
 
 pub fn poll(u: *Uring, wait: Wait, sink: anytype) error{ SystemResources, Unexpected }!void {
     if (!u.wake_armed) u.armWake();
-    const delivered = u.accepts.deliver(sink);
+    var delivered = u.accepts.deliver(sink);
+    while (u.deferred_count > 0) {
+        const cqe = u.deferred[u.deferred_head];
+        u.deferred_head = (u.deferred_head + 1) % u.deferred.len;
+        u.deferred_count -= 1;
+        u.complete(cqe, sink);
+        delivered = true;
+    }
     try u.enter(if (delivered) .nowait else wait);
     var cqes: [256]linux.io_uring_cqe = undefined;
     while (true) {
@@ -626,7 +646,14 @@ fn pendingInKernel(u: *Uring) bool {
 
 pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     const ud = cqe.user_data;
-    switch (tagOf(ud)) {
+    const tag = tagOf(ud);
+    if (u.draining_pressure and (tag == .batch or tag == .batch_ready)) {
+        std.debug.assert(u.deferred_count < u.deferred.len);
+        u.deferred[(u.deferred_head + u.deferred_count) % u.deferred.len] = cqe;
+        u.deferred_count += 1;
+        return;
+    }
+    switch (tag) {
         .op => {
             const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
             const o: *Op = @ptrFromInt(ud); // safe: submit retains this op through every completion

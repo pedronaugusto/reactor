@@ -566,3 +566,132 @@ test "V3 owned Windows lane cancellation interrupts a synchronous pipe read" {
     try testing.expectError(error.Canceled, future.cancel(r.io()));
     try testing.expectEqual(@as(u64, 0), r.stats().lanes[@backingInt(Runtime.Lane.wait)].@"inline");
 }
+
+fn canceledWait(io: Io, begun: *Io.Event, word: *u32) Io.Cancelable!void {
+    begun.set(io);
+    while (word.* == 0) try io.futexWait(u32, word, 0);
+}
+const NetObservation = struct { bytes: [256]u8 = @splat(0), timeout: ?anyerror = null, canceled: ?anyerror = null, eof: usize = 1 };
+fn networkSequence(io: Io, payload: []const u8) !NetObservation {
+    var out: NetObservation = .{};
+    var listener = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    var buffer: [256]u8 = undefined;
+    var data: [1][]u8 = .{buffer[0..payload.len]};
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    defer batch.cancel(io);
+    _ = batch.add(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } });
+    batch.awaitConcurrent(io, ms(1)) catch |err| {
+        out.timeout = err;
+    };
+    if (out.timeout == null or out.timeout.? != error.Timeout) return error.WrongTimeout;
+    var sent: usize = 0;
+    while (sent < payload.len) sent += try (try io.operate(.{ .net_write = .{ .socket_handle = peer.socket.handle, .data = &.{payload[sent..]} } })).net_write;
+    try batch.awaitConcurrent(io, ms(1000));
+    var got = (try batch.next().?.result.net_read).data_len;
+    @memcpy(out.bytes[0..got], buffer[0..got]);
+    while (got < payload.len) {
+        var remaining: [1][]u8 = .{out.bytes[got..payload.len]};
+        const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &remaining } })).net_read).data_len;
+        if (n == 0) return error.EndOfStream;
+        got += n;
+    }
+    try peer.shutdown(io, .send);
+    data = .{&buffer};
+    out.eof = (try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read).data_len;
+    var begun: Io.Event = .unset;
+    var word: u32 = 0;
+    var future = try io.concurrent(canceledWait, .{ io, &begun, &word });
+    try begun.wait(io);
+    future.cancel(io) catch |err| {
+        out.canceled = err;
+    };
+    return out;
+}
+fn networkDifferential(backend: Loop.Backend, c: *shakedown.Case) !void {
+    var r: Runtime = undefined;
+    try native(&r, backend);
+    defer r.deinit();
+    var payload: [256]u8 = undefined;
+    const count = 1 + @as(usize, @intCast(c.source.below(255)));
+    for (payload[0..count]) |*byte| byte.* = @intCast(c.source.below(255));
+    const expected = try networkSequence(testing.io, payload[0..count]);
+    const actual = try networkSequence(r.io(), payload[0..count]);
+    try testing.expectEqualSlices(u8, &expected.bytes, &actual.bytes);
+    try testing.expectEqual(expected.timeout, actual.timeout);
+    try testing.expectEqual(expected.canceled, actual.canceled);
+    try testing.expectEqual(expected.eof, actual.eof);
+    try testing.expectEqual(@as(u32, 0), r.stats().tasks);
+    try testing.expectEqual(@as(u32, 0), r.core.processors[0].loop.in_flight);
+}
+test "later: generated streams EOF batch retry and futex cancellation match Threaded" {
+    for (if (builtin.os.tag == .linux) @as([]const Loop.Backend, &.{ .io_uring, .epoll }) else @as([]const Loop.Backend, &.{.auto})) |backend| {
+        var probe: Runtime = undefined;
+        native(&probe, backend) catch |err| switch (err) {
+            error.SkipZigTest => continue,
+            else => return err,
+        };
+        probe.deinit();
+        try shakedown.check(testing.allocator, backend, networkDifferential, .{ .cases = 32, .regressions = &.{ "0:7f", "ff:0:ff" } });
+    }
+}
+
+test "later: canceled fixed-buffer pipe read drains before unregister and a full table rolls back" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 0, .backend = .io_uring, .max_tasks = 8, .registered_pools = 1 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    defer pool.deinit(testing.allocator, r.io());
+    try testing.expectError(error.SystemResources, reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }));
+    const pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
+    defer for (pipe) |fd| {
+        _ = linux.close(fd);
+    };
+    const ring = &r.core.processors[0].loop.backend.io_uring;
+    const index = pool.fixed.?.items[0].index;
+    for (0..32) |_| {
+        var data: [1][]u8 = .{pool.memory[0..4096]};
+        var op: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = .{ .handle = pipe[0], .flags = .{ .nonblocking = false } }, .data = &data } } } };
+        const loop = &r.core.processors[0].loop;
+        try loop.submit(&op);
+        try testing.expectEqual(linux.IORING_OP.READ_FIXED, ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask].opcode);
+        try testing.expectEqual(@as(u32, 1), ring.buffers.slots[index].users);
+        loop.cancel(&op);
+        var out: [1]*Loop.Op = undefined;
+        while (loop.reap(&out).len == 0) _ = try loop.run(.once);
+        try testing.expectError(error.Canceled, op.result.io);
+        try testing.expectEqual(@as(u32, 0), ring.buffers.slots[index].users);
+        @memset(pool.memory, 0xdd);
+    }
+}
+
+test "later: stopping idle ring workers needs no subsequent source-ring poll" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 2, .backend = .io_uring, .max_tasks = 16 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    var done = std.atomic.Value(bool).init(false);
+    const guard = try std.Thread.spawn(.{}, ringGuard, .{&done});
+    defer {
+        done.store(true, .release);
+        guard.join();
+    }
+    try r.start();
+    try testing.io.sleep(.fromMilliseconds(10), .awake);
+    r.stop();
+}

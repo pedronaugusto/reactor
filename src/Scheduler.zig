@@ -987,7 +987,8 @@ fn wakeIdle(s: *Scheduler) void {
 
 /// Every processor's thread looks at its queues again.
 pub fn wakeAll(s: *Scheduler) void {
-    for (s.processors) |*p| wakeProcessor(p);
+    // Stop joins workers without driving the source ring again.
+    for (s.processors) |*p| p.loop.wake();
 }
 
 // Tasks.

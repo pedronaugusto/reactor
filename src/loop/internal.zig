@@ -34,6 +34,7 @@ pub fn canPend(l: *const Loop, operation: Io.Operation) bool {
 /// One operation of a batch, kept in the batch's own storage: null while
 /// the kernel holds it, else its outcome, which it had at once.
 pub fn submitPending(l: *Loop, token: backend.pending.Token, operation: Io.Operation) backend.SubmitError!?backend.pending.Outcome {
+    if (l.in_flight == l.max_ops) return error.SystemResources;
     const outcome = try l.backend.submitPending(token, operation);
     if (outcome == null) l.in_flight += 1;
     return outcome;

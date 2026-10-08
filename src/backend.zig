@@ -166,7 +166,8 @@ pub const Backend = union(enum) {
         return switch (b.*) {
             .epoll => |*e| if (has_epoll) e.hasCompletions() else unreachable, // unreachable: no such backend here
             .kqueue => |*k| if (has_kqueue) k.hasCompletions() else unreachable, // unreachable: no such backend here
-            .io_uring, .iocp, .custom => false,
+            .io_uring => |*u| if (builtin.os.tag == .linux) u.deferred_count != 0 or @atomicLoad(u32, u.ring.cq.tail, .acquire) != @atomicLoad(u32, u.ring.cq.head, .monotonic) else false,
+            .iocp, .custom => false,
         };
     }
 

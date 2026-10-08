@@ -52,6 +52,9 @@ const Config = struct {
     sqpoll: bool = false,
     bytes: usize = 64 << 10,
     msg_ring_off: bool = false,
+    linked_timeout_off: bool = false,
+    fixed_files_off: bool = false,
+    files_pool: bool = false,
 
     fn wants(c: Config, workload: []const u8) bool {
         const o = c.only orelse return true;
@@ -68,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
+        if (std.mem.eql(u8, arg, "--linked-timeout-off")) c.linked_timeout_off = true else if (std.mem.eql(u8, arg, "--fixed-files-off")) c.fixed_files_off = true else if (std.mem.eql(u8, arg, "--files-pool")) c.files_pool = true else if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
             i += 1;
             c.threaded = std.mem.eql(u8, args[i], "threaded");
         } else if (std.mem.eql(u8, arg, "--only")) {
@@ -111,7 +114,8 @@ pub fn main(init: std.process.Init) !void {
         .backend = c.backend,
         .zero_copy_min = c.zero_copy_min,
         .sqpoll = if (c.sqpoll) .{} else null,
-        .uring_off = .{ .msg_ring = c.msg_ring_off },
+        .uring_off = .{ .msg_ring = c.msg_ring_off, .linked_timeout = c.linked_timeout_off, .fixed_files = c.fixed_files_off },
+        .files = if (c.files_pool) .pool else .auto,
     }) catch |err| switch (err) {
         error.BackendUnavailable => {
             try r.line("runtime", "no evented backend on this system", 0, "-");
@@ -121,6 +125,16 @@ pub fn main(init: std.process.Init) !void {
     };
     defer runtime.deinit();
     try runtime.start();
+    if (c.only != null and std.mem.eql(u8, c.only.?, "info")) {
+        if (comptime builtin.os.tag == .linux) {
+            const backend = &runtime.core.processors[0].loop.backend;
+            if (backend.* != .io_uring) return error.BackendUnavailable;
+            const ring = &backend.io_uring;
+            try r.w.print("{{\"backend\":\"io_uring\",\"features\":{{\"fixed_files\":{},\"msg_ring\":{},\"linked_timeout\":{},\"waitid\":{},\"send_zc\":{},\"registered_buffers\":{}}},\"flags\":{d}}}\n", .{ ring.features.fixed_files, ring.features.msg_ring, ring.features.linked_timeout, ring.features.waitid, ring.features.zero_copy, ring.buffers.enabled, ring.ring.flags });
+            try r.w.flush();
+        }
+        return;
+    }
     try ioWorkloads(r, gpa, runtime.io(), c, &runtime);
 }
 
