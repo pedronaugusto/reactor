@@ -313,21 +313,33 @@ fn acceptAll(io: Io, server: *Io.net.Server, count: usize, group: *Io.Group) Io.
     }
 }
 
-fn client(io: Io, address: Io.net.IpAddress, messages: usize) Io.Cancelable!void {
-    const stream = address.connect(io, .{ .mode = .stream }) catch return;
+fn client(io: Io, address: Io.net.IpAddress, messages: usize) !void {
+    const stream = try address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
     var message: [64]u8 = @splat('x');
     for (0..messages) |_| {
-        var out: [1][]const u8 = .{&message};
-        _ = (io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &out } }) catch return).net_write catch return;
+        var sent: usize = 0;
+        while (sent < message.len) {
+            var out: [1][]const u8 = .{message[sent..]};
+            const wrote = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &out } })).net_write;
+            if (wrote == 0) return error.NoWriteProgress;
+            sent += wrote;
+        }
         var got: usize = 0;
         while (got < message.len) {
             var data: [1][]u8 = .{message[got..]};
-            const n = ((io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }) catch return).net_read catch return).data_len;
-            if (n == 0) return;
+            const n = (try (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read).data_len;
+            if (n == 0) return error.EndOfStream;
             got += n;
         }
     }
+}
+
+fn clientTask(io: Io, address: Io.net.IpAddress, messages: usize, failure: *?anyerror) Io.Cancelable!void {
+    client(io, address, messages) catch |err| {
+        failure.* = err;
+        if (err == error.Canceled) return error.Canceled;
+    };
 }
 
 fn echo(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
@@ -339,11 +351,16 @@ fn echo(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
         var server = try listen.listen(io, .{ .reuse_address = true });
         defer server.deinit(io);
         var servers: Io.Group = .init;
+        defer servers.cancel(io);
         var acceptor = try io.concurrent(acceptAll, .{ io, &server, connections, &servers });
+        defer acceptor.cancel(io) catch {};
         const t0 = now(io);
         var clients: Io.Group = .init;
-        for (0..connections) |_| try clients.concurrent(io, client, .{ io, server.socket.address, per });
+        defer clients.cancel(io);
+        var failures: [32]?anyerror = @splat(null);
+        for (0..connections) |i| try clients.concurrent(io, clientTask, .{ io, server.socket.address, per, &failures[i] });
         try clients.await(io);
+        for (failures[0..connections]) |failure| if (failure) |err| return err;
         const t1 = now(io);
         try acceptor.await(io);
         try servers.await(io);
@@ -703,4 +720,29 @@ fn priorityLanes(r: Report, io: Io, c: Config) !void {
         try future.await(io);
     }
     try r.line("priority-lanes", "task + owned lane + await", nsBetween(start, now(io)) / @as(f64, @floatFromInt(n)), "ns/call");
+}
+
+test "r6: an echo peer ending before its reply cannot count as completed work" {
+    const testing = std.testing;
+    const io = testing.io;
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const ClosingPeer = struct {
+        fn run(selected: Io, listener: *Io.net.Server) Io.Cancelable!void {
+            const stream = listener.accept(selected) catch return;
+            defer stream.close(selected);
+            var bytes: [64]u8 = undefined;
+            var received: usize = 0;
+            while (received < bytes.len) {
+                var data: [1][]u8 = .{bytes[received..]};
+                const read = ((selected.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }) catch return).net_read catch return).data_len;
+                if (read == 0) return;
+                received += read;
+            }
+        }
+    };
+    var closer = try io.concurrent(ClosingPeer.run, .{ io, &server });
+    defer closer.cancel(io) catch {};
+    try testing.expectError(error.EndOfStream, client(io, server.socket.address, 1));
+    try closer.await(io);
 }
