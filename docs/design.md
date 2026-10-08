@@ -73,11 +73,18 @@ measured misses; the complete manual workload/target pass is still pending.
 Injected executor refusal returns a representable resource error for fallible
 calls. A narrow/void call or refused cancellation job currently terminates.
 The owner decision on a fallible raw-offload API and guaranteed cancellation
-capacity remains pending; this document does not accept that contract as the
-finished design. Refusal never runs a call inline.
+capacity remains pending; [the minimal alternative](executor-decision.md)
+explains the remaining std.Io seam and required ownership accounting. This
+document does not accept the current behavior as the finished design. Refusal never runs a call inline.
 
 The published cloak source currently has no TLS engine suite. Its package
 floor cannot establish V11 TLS depth. Actual suites and partial observations
 are recorded by [the isolated harness](../bench/v11/README.md), without editing
 or adopting a consumer. No completion claim is made before all required
 measurements, native correctness, performance targets and final CI pass.
+
+Actual airlock trials also expose a Linux raw-descriptor seam: its raw close
+bypasses reactor's fixed-file cache removal. Its macOS write-call bound differs
+under this Io. These actual-suite failures remain explicit consumer contract
+or adoption questions; no library source, expectation or default is changed
+by the instrumentation to hide them.

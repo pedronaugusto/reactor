@@ -14,6 +14,9 @@ pub fn main(init: std.process.Init) !void {
     const fixture = args[3];
     const clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, fixture } });
     if (clone.term != .exited or clone.term.exited != 0) return error.CloneFailed;
+    const working = try std.fmt.allocPrint(gpa, "{s}/.v11-work", .{fixture});
+    const work_clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, working } });
+    if (work_clone.term != .exited or work_clone.term.exited != 0) return error.CloneFailed;
     var dir = try Io.Dir.cwd().openDir(io, fixture, .{ .iterate = true });
     defer dir.close(io);
     var sources = try dir.openDir(io, "src", .{ .iterate = true });
@@ -27,7 +30,8 @@ pub fn main(init: std.process.Init) !void {
         const adapted = try replaceIo(gpa, bytes, &sites);
         try sources.writeFile(io, .{ .sub_path = entry.path, .data = adapted });
     }
-    const build = try dir.readFileAlloc(io, "build.zig", gpa, .limited(1 << 20));
+    const original_build = try dir.readFileAlloc(io, "build.zig", gpa, .limited(1 << 20));
+    const build = try planning(gpa, original_build);
     const call = "    v11(b, tests, target, optimize);\n";
     const at = if (std.mem.indexOf(u8, build, "    return needed;")) |pos| pos else try buildEnd(gpa, build);
     const helper = try std.fmt.allocPrint(gpa,
@@ -38,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         \\    v11Imports(tests.root_module, state, &seen);
         \\    tests.test_runner = .{{ .path = .{{ .cwd_relative = "{s}/bench/v11/runner.zig" }}, .mode = .simple }};
         \\    const run = b.addRunArtifact(tests);
-        \\    run.setCwd(b.path("."));
+        \\    run.setCwd(b.path(".v11-work"));
         \\    b.step("v11", "Measure the actual suite on reactor task stacks").dependOn(&run.step);
         \\}}
         \\fn v11Imports(module: *std.Build.Module, state: *std.Build.Module, seen: *std.AutoHashMap(*std.Build.Module, void)) void {{
@@ -100,4 +104,18 @@ fn buildEnd(gpa: std.mem.Allocator, build: []const u8) !usize {
             if (entered and depth == 0) return start + token.loc.start;
         }
     }
+}
+
+/// A configure-only planner must not demand a lazily undeclared executable.
+/// The isolated suite preserves its pin and CI/SDK wiring; the canonical
+/// script invocation replaces only this unexecuted repository-tooling step.
+fn planning(gpa: std.mem.Allocator, build: []const u8) ![]const u8 {
+    const old = "const plan = b.addRunArtifact(dependency.artifact(\"preflight\"));";
+    const at = std.mem.indexOf(u8, build, old) orelse return build;
+    const replacement =
+        \\const plan = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--build-file" });
+        \\            plan.addFileArg(dependency.path("build.zig"));
+        \\            plan.addArg("--");
+    ;
+    return std.mem.concat(gpa, u8, &.{ build[0..at], replacement, build[at + old.len ..] });
 }

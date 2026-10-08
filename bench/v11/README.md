@@ -6,7 +6,12 @@ adapted fixture. Zig token matching changes only `testing.io` and
 Strings, comments, test bodies, expectations, production APIs and dependency
 pins are preserved. Its build receives a dedicated runner and `v11` step;
 existing native linking, SDKs, fixtures and dependencies remain in the build.
-No consumer repository or active clone is written.
+No consumer repository or active clone is written. A second unadapted working
+copy supplies the suite's original files and fixtures at run time, so actual
+source-boundary checks inspect the original package. Its scratch outputs live
+there; the immutable source snapshot remains untouched. An obsolete lazy
+planner-artifact lookup is replaced with its canonical script invocation only
+in the build fixture, preserving dependency pins and test/SDK wiring.
 
 `runner.zig` invokes the actual imported test functions, serially, inside
 reactor tasks. Each test gets a fresh runtime at the unchanged 1 MiB stack
