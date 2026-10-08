@@ -59,7 +59,9 @@ pub fn main(init: std.process.Init) !void {
     Io.Dir.cwd().access(io, base_dir, .{}) catch {
         try checked(gpa, io, &.{ "git", "clone", "--no-checkout", ".", base_dir }, ".");
     };
-    try checked(gpa, io, &.{ "git", "fetch", "origin" }, base_dir);
+    // A hosted scratch snapshot need not contain the later branch ancestry.
+    // Fetch the immutable public comparison checkpoint into our own fixture.
+    try checked(gpa, io, &.{ "git", "fetch", "--no-tags", "https://github.com/pedronaugusto/reactor.git", ownership_baseline }, base_dir);
     try checked(gpa, io, &.{ "git", "reset", "--hard", before_source }, base_dir);
     try checked(gpa, io, &.{ "git", "checkout", "--detach", before_source }, base_dir);
     if (args.len == 3 and std.mem.eql(u8, args[2], "--regressions")) {
