@@ -10,6 +10,7 @@ const Loop = reactor.Loop;
 const Runtime = reactor.Runtime;
 const Driver = @import("testing/Driver.zig");
 const perform = @import("ops/perform.zig");
+const Stacks = @import("fiber/Stacks.zig");
 const pending = @import("backend/pending.zig");
 const UringState = @import("backend/op.zig").UringState;
 
@@ -354,13 +355,17 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     const ring = &source.backend.io_uring.ring;
     try testing.expectEqual(linux.IORING_OP.MSG_RING, ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].opcode);
     _ = try source.run(.nowait);
+    // A DEFER_TASKRUN target must enter before remote task work is
+    // published as a CQE. Its CQ head proves the message was consumed.
+    const head = target.backend.io_uring.ring.cq.head.*;
     for (0..100) |_| {
-        if (target.backend.io_uring.ring.cq_ready() > 0) break;
+        _ = try target.run(.nowait);
+        if (target.backend.io_uring.ring.cq.head.* != head) break;
         _ = try source.run(.nowait);
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
-    try testing.expect(target.backend.io_uring.ring.cq_ready() > 0);
-    _ = try target.run(.nowait);
+    try testing.expect(target.backend.io_uring.ring.cq.head.* != head);
+    try testing.expect(!target.backend.io_uring.wake_pending.load(.acquire));
     source.backend.io_uring.features.msg_ring = false;
     target.wakeFrom(&source);
     try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
@@ -418,8 +423,13 @@ test "later: native linked deadline drains timer and read before releasing the f
     try native(&r, .io_uring);
     defer r.deinit();
     if (!r.core.processors[0].loop.backend.io_uring.features.linked_timeout) return error.SkipZigTest;
-    const pair = try Io.net.Socket.createPair(r.io(), .{ .mode = .stream });
-    defer for (pair) |socket| socket.close(r.io());
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(r.io(), .{});
+    defer server.deinit(r.io());
+    const stream = try server.socket.address.connect(r.io(), .{ .mode = .stream });
+    defer stream.close(r.io());
+    const peer = try server.accept(r.io());
+    defer peer.close(r.io());
+    const pair = [_]Io.net.Socket{ stream.socket, peer.socket };
     var byte: [1]u8 = undefined;
     var data: [1][]u8 = .{&byte};
     try testing.expectError(error.Timeout, r.io().operateTimeout(.{ .net_read = .{ .socket_handle = pair[0].handle, .data = &data } }, ms(1)));
@@ -675,4 +685,20 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
         try testing.expectEqual(@as(u32, 0), ring.buffers.slots[index].users);
         @memset(pool.memory, 0xdd);
     }
+}
+
+fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
+    var stacks: Stacks = undefined;
+    try stacks.init(gpa, .{ .count = 12, .size = 64 << 10, .classes = &.{ .{ .count = 3, .size = 128 << 10 }, .{ .count = 2, .size = 256 << 10 } } });
+    defer stacks.deinit(gpa);
+    const ordinary = stacks.take().?;
+    const explicit = stacks.takeSized(200 << 10).?;
+    try testing.expectEqual(@as(usize, 256 << 10), stacks.sizeAt(explicit));
+    try testing.expectEqual(@as(u32, 2), stacks.inUse(.monotonic));
+    stacks.give(explicit);
+    stacks.give(ordinary);
+}
+test "later: stack class initialization rolls back every allocation failure" {
+    var allocator = shakedown.alloc.NoResize.init(testing.allocator);
+    try testing.checkAllAllocationFailures(allocator.allocator(), stackAllocationFailures, .{});
 }

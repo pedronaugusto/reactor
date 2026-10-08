@@ -96,13 +96,14 @@ pub fn State(comptime Scratch: type) type {
         phase: Phase = .idle,
         /// The owner asked the kernel to end it.
         canceled: bool = false,
-        /// Kernel ownership beyond the primary CQE: linked timeout and
-        /// SEND_ZC notification must both settle before the frame is freed.
-        uring: if (builtin.os.tag == .linux) UringState else struct { timeout_pending: bool = false, timed_out: bool = false } = .{},
         /// The completion queue's link.
         next: ?*anyopaque = null,
         /// The phase owns the wheel node or kernel scratch, never both.
         storage: Storage = .{ .node = .{} },
+
+        /// Kernel ownership beyond the primary CQE: linked timeout and
+        /// SEND_ZC notification must both settle before the frame is freed.
+        uring: if (builtin.os.tag == .linux) UringState else struct { timeout_pending: bool = false, timed_out: bool = false } = .{},
 
         pub const Storage = union {
             node: Wheel.Node,

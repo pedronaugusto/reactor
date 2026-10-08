@@ -57,7 +57,7 @@ pub const Options = struct {
     ring_entries: u16 = 256,
     uring_off: Loop.UringFeatures = .{},
     sqpoll: ?Loop.SqPoll = null,
-    zero_copy_min: ?usize = 16 << 10,
+    zero_copy_min: ?usize = null,
     /// Sparse fixed-buffer pools per ring, reserved at init.
     registered_pools: u16 = 64,
     /// Linux: worker n on CPU n.

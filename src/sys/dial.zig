@@ -11,8 +11,8 @@ pub const Error = net.IpAddress.ConnectError;
 pub fn interface(io: Io, socket: net.Socket.Handle, family: net.IpAddress.Family, selected: net.Interface) Error!void {
     if (selected.isNone()) return;
     if (builtin.os.tag == .linux) {
-        const name = selected.name(io) catch return error.AddressUnavailable;
-        return option(io, socket, posix.SOL.SOCKET, posix.SO.BINDTODEVICE, name.toSlice());
+        const index: u32 = selected.index;
+        return option(io, socket, posix.SOL.SOCKET, posix.SO.BINDTOIFINDEX, std.mem.asBytes(&index));
     }
     const index: u32 = if (builtin.os.tag == .windows and family == .ip4) std.mem.nativeToBig(u32, selected.index) else selected.index;
     const code: u32 = switch (builtin.os.tag) {

@@ -42,7 +42,7 @@ pub const Options = struct {
     /// Linux only, explicitly requested; failure is reported, never downgraded.
     sqpoll: ?SqPoll = null,
     /// Minimum contiguous send eligible for SEND_ZC; null disables it.
-    zero_copy_min: ?usize = 16 << 10,
+    zero_copy_min: ?usize = null,
     registered_pools: u16 = 64,
     /// Windows: the host's completion port, which the loop shares. The host
     /// waits on it and hands the entries that carry `completionKey()` to
@@ -78,13 +78,14 @@ pub const Op = struct {
     /// for `reap`.
     callback: ?*const fn (l: *Loop, o: *Op) void align(@alignOf(Kind)) = null,
     user_data: usize = 0,
-    /// Absolute deadline, linked in the kernel where supported. Other
-    /// backends are timed by the runtime's wheel.
-    deadline: if (builtin.os.tag == .linux) ?Io.Clock.Timestamp else void = if (builtin.os.tag == .linux) null else {},
     /// Valid once completed, under the field of `kind`.
     result: Result align(@alignOf(Kind)) = undefined,
     /// The loop's and its backend's from `submit` to delivery.
     state: op.State(backends.Scratch) = .{},
+
+    /// Absolute deadline, linked in the kernel where supported. Other
+    /// backends are timed by the runtime's wheel.
+    deadline: if (builtin.os.tag == .linux) ?Io.Clock.Timestamp else void = if (builtin.os.tag == .linux) null else {},
 
     pub const Kind = op.Kind;
     pub const Result = op.Result;
@@ -172,6 +173,7 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
         .max_ops = options.max_ops,
         .owner = std.Thread.getCurrentId(),
     };
+    l.installPressure();
 }
 
 const has_kqueue = backends.Kqueue != void;
@@ -219,7 +221,6 @@ fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
 /// The calling thread becomes the loop's owner. For a loop built with
 /// `owner = .adopter`, once, on the thread that will run it.
 pub fn adopt(l: *Loop) void {
-    l.installPressure();
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
         .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
@@ -259,7 +260,6 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
 /// this returns true, `o.result` is set, and nothing is delivered for it.
 /// A host that runs its own tasks saves a trip through its scheduler.
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
-    l.installPressure();
     l.assertOwner();
     assert(o.state.phase == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
@@ -340,7 +340,6 @@ fn cancelKernel(l: *Loop, o: *Op) void {
 /// Delivers completions (callbacks run, or queued for `reap`) as `mode`
 /// allows and returns how many.
 pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
-    l.installPressure();
     l.assertOwner();
     var delivered: u32 = 0;
     const deadline: ?u64 = switch (mode) {

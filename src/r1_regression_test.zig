@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const reactor = @import("reactor.zig");
 const Runtime = @import("Runtime.zig");
 const Driver = @import("testing/Driver.zig");
 
@@ -93,4 +94,17 @@ test "R1 stopping idle ring workers needs no subsequent source poll" {
     try r.start();
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     r.stop();
+}
+
+test "R1 Linux dialing binds an interface without Threaded name lookup" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const name = try Io.net.Interface.Name.fromSlice("lo");
+    const selected = try name.resolve(testing.io);
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
+    defer server.deinit(testing.io);
+    const connected = try reactor.net.connect(testing.io, &server.socket.address, .{ .interface = selected });
+    defer connected.stream.close(testing.io);
+    const peer = try server.accept(testing.io);
+    defer peer.close(testing.io);
+    try testing.expectEqual(connected.stream.socket.address.getPort(), peer.socket.address.getPort());
 }

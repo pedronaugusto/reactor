@@ -997,11 +997,16 @@ pub fn wakeAll(s: *Scheduler) void {
 /// (aligned to `extra_align`) below its record for the caller's context
 /// and result; null when every stack is in use. `entry` runs first.
 pub fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
-    return s.createWith(kind, extra, extra_align, entry, null, .normal);
+    const index = s.stacks.take() orelse return null;
+    return s.createAt(index, kind, extra, extra_align, entry, .normal);
 }
 
 pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?usize, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     const index = s.stacks.takeSized(size) orelse return null;
+    return s.createAt(index, kind, extra, extra_align, entry, priority);
+}
+
+inline fn createAt(s: *Scheduler, index: u32, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     const location = s.stacks.locate(index);
     const pool = location.pool;
     const top = pool.top(location.index);
@@ -1026,7 +1031,7 @@ pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std
 pub fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
     s.stacks.ended(index, fiber.committedLimit(&t.context));
-    const water = s.records.items[index].highWater();
+    const water = t.resident_water;
     if (!s.measure_stacks and builtin.os.tag != .windows and water > 64 << 10) {
         // The record at the top stays live through fiber.deinit below.
         s.stacks.trim(index, @intFromPtr(t)); // safe: release exclusively owns this ended task's stack

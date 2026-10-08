@@ -41,8 +41,7 @@ fn measure(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, round: usize, var
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
-    const args = try init.minimal.args.toSlice(gpa);
-    defer gpa.free(args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 2 and std.mem.eql(u8, args[1], "--smoke")) return;
     if (args.len < 2 or args.len > 3) return error.ExpectedZigPath;
     const zig = args[1];
@@ -106,14 +105,16 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     for ([_][]const u8{ "512", "4096", "16384", "65536", "1048576" }) |bytes| {
+        const label = try std.fmt.allocPrint(gpa, "zero-copy-{s}", .{bytes});
+        defer gpa.free(label);
         for (0..5) |round| {
             const a = &.{ "--only", "bulk", "--bytes", bytes, "--zero-copy-min", "off" };
             const b = &.{ "--only", "bulk", "--bytes", bytes, "--zero-copy-min", "1" };
             if (round % 2 == 0) {
                 try measure(gpa, io, w, round, bytes, ".", a);
-                try measure(gpa, io, w, round, "zero-copy", ".", b);
+                try measure(gpa, io, w, round, label, ".", b);
             } else {
-                try measure(gpa, io, w, round, "zero-copy", ".", b);
+                try measure(gpa, io, w, round, label, ".", b);
                 try measure(gpa, io, w, round, bytes, ".", a);
             }
         }
@@ -133,6 +134,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn installTests(gpa: std.mem.Allocator, io: Io) !void {
     const directory = Io.Dir.cwd();
+    try excludeExample(gpa, io);
     const regression = try directory.readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
     defer gpa.free(regression);
     try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
@@ -163,11 +165,13 @@ fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !
     try expectBefore(gpa, io, writer, zig, "executor rejection", "executor rejection finishes without running a lane call inline");
     try expectBefore(gpa, io, writer, zig, "disabled owned lane", "a disabled owned lane refuses instead of queueing forever");
     if (builtin.os.tag == .linux) {
+        try expectBefore(gpa, io, writer, zig, "R1 Linux dialing", "TODO implement netInterfaceName for linux");
         try expectBefore(gpa, io, writer, zig, "R1 native open", "R1 native open and stat use no inline file lane");
         try expectBefore(gpa, io, writer, zig, "R1 ended deep", "R1 ended deep stacks discard unused pages before recycling");
         // The shutdown bug was introduced in the first pushed LATER
         // checkpoint, whose exact public source is retained in history.
         try checked(gpa, io, &.{ "git", "reset", "--hard", "f110c7943327868ef21172e80320f34355e0498c" }, base_dir);
+        try excludeExample(gpa, io);
         // That checkpoint already imported these two test files.
         const regression = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
         defer gpa.free(regression);
@@ -176,4 +180,15 @@ fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !
     } else if (builtin.os.tag == .macos) {
         try expectBefore(gpa, io, writer, zig, "R1 native child", "R1 native child wait uses no inline wait lane");
     }
+}
+
+fn excludeExample(gpa: std.mem.Allocator, io: Io) !void {
+    // An unrelated concurrent example can hang at the known-bad shutdown
+    // before the selected guarded regression reports its exact failure.
+    const path = base_dir ++ "/build.zig";
+    const original = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
+    defer gpa.free(original);
+    const focused = try std.mem.replaceOwned(u8, gpa, original, "test_step.dependOn(examples);", "");
+    defer gpa.free(focused);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = focused });
 }

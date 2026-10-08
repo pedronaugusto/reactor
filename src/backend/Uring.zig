@@ -51,7 +51,7 @@ pub const Options = struct {
     /// Built for another thread, which calls `enable`.
     disabled: bool = false,
     sqpoll: ?op.SqPoll = null,
-    zero_copy_min: ?usize = 16 << 10,
+    zero_copy_min: ?usize = null,
     registered_pools: u16 = 64,
     pending_bound: u32 = 1024,
 };
