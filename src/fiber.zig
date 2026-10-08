@@ -1,4 +1,5 @@
-//! Switching between stacks: std's `Io.fiber.contextSwitch`, which saves
+//! Switching between stacks: std's `Io.fiber.contextSwitch` (on aarch64 a
+//! copy that also keeps the link register), which saves
 //! the stack pointer, frame pointer and resume address and lets the
 //! compiler spill the callee-saved registers, and the first frame of a new
 //! stack. Windows needs a switch that also keeps the thread information
@@ -12,50 +13,61 @@ pub const supported = std.Io.fiber.supported and switch (builtin.os.tag) {
     else => false,
 };
 
-pub const Context = std.Io.fiber.Context;
+/// A stack's saved state while it is not running. On aarch64 reactor's
+/// own, with room for the link register; elsewhere std's.
+pub const Context = switch (builtin.cpu.arch) {
+    .aarch64 => extern struct { sp: u64, fp: u64, pc: u64, lr: u64 },
+    else => std.Io.fiber.Context,
+};
 
 /// What a switch carries: the two contexts, and whatever the switcher
 /// wants the resumed side to do once the old stack is no longer running.
-pub const Switch = std.Io.fiber.Switch;
+pub const Switch = extern struct { old: *Context, new: *Context };
 
 /// A new stack's first function. `message` is the switch that started it.
 pub const Entry = *const fn (arg: *anyopaque, message: *const Switch) callconv(.c) noreturn;
 
 /// Saves the running context into `s.old`, runs `s.new`, and returns the
 /// switch that resumed this context later.
-pub inline fn switchTo(s: *const Switch) *const Switch {
+///
+/// One switch in the whole program, never inlined: inlined at every site,
+/// optimized code may merge two sites' identical switches into one and
+/// pick the continuation after it from a register the switch has
+/// clobbered (seen on x86_64 in ReleaseFast as a parked task resuming into
+/// another site's code). As a call, the switch is opaque to its callers,
+/// and its own frame keeps the callee-saved registers on each stack.
+pub noinline fn switchTo(s: *const Switch) *const Switch {
     return switch (builtin.cpu.arch) {
         .aarch64 => switchAarch64(s),
-        else => std.Io.fiber.contextSwitch(s),
+        .x86_64 => switchX86(s),
+        .riscv64 => switchRiscv(s),
+        else => @compileError("no fiber switch for this architecture"),
     };
 }
 
-/// std's aarch64 switch, keeping the link register itself. LLVM knows x30
-/// only as `lr` and drops a clobber of `x30`, which is how std names it:
-/// in optimized code it then keeps a value in x30 across the switch and
-/// finds the resumer's there after it (seen as a task's frame overwritten
-/// through a stale pointer). So x30 is pushed on the stack being left and
-/// popped on the stack resumed; every switch goes through here, so every
-/// context it resumes has pushed it.
+/// std's aarch64 switch, keeping the link register in the context. LLVM
+/// knows x30 only as `lr` and drops a clobber of `x30`, which is how std
+/// names it: optimized code then kept a value in x30 across a switch and
+/// found the resumer's there after it (seen as a task pointer gone stale
+/// and a frame overwritten through it). Saved and restored here, x30
+/// holds after the switch what it held before.
 inline fn switchAarch64(s: *const Switch) *const Switch {
     return asm volatile (
         \\ ldp x0, x2, [x1]
         \\ ldr x3, [x2, #16]
-        \\ str x30, [sp, #-16]!
         \\ mov x4, sp
         \\ stp x4, fp, [x0]
         \\ adr x5, 0f
+        \\ stp x5, x30, [x0, #16]
         \\ ldp x4, fp, [x2]
-        \\ str x5, [x0, #16]
+        \\ ldr x30, [x2, #24]
         \\ mov sp, x4
         \\ br x3
         \\0:
-        \\ ldr x30, [sp], #16
         : [received_message] "={x1}" (-> *const Switch),
-        : [message_to_send] "{x1}" (s),
+        : [message_to_send] "0" (s),
         : .{
           .x0 = true,
-          .x1 = true,
           .x2 = true,
           .x3 = true,
           .x4 = true,
@@ -82,7 +94,7 @@ inline fn switchAarch64(s: *const Switch) *const Switch {
           .x26 = true,
           .x27 = true,
           .x28 = true,
-          .x30 = true,
+          .lr = true,
           .z0 = true,
           .z1 = true,
           .z2 = true,
@@ -138,6 +150,202 @@ inline fn switchAarch64(s: *const Switch) *const Switch {
         });
 }
 
+inline fn switchX86(s: *const Switch) *const Switch {
+    return asm volatile (
+        \\ movq 0(%%rsi), %%rax
+        \\ movq 8(%%rsi), %%rcx
+        \\ leaq 0f(%%rip), %%rdx
+        \\ movq %%rsp, 0(%%rax)
+        \\ movq %%rbp, 8(%%rax)
+        \\ movq %%rdx, 16(%%rax)
+        \\ movq 0(%%rcx), %%rsp
+        \\ movq 8(%%rcx), %%rbp
+        \\ jmpq *16(%%rcx)
+        \\0:
+        : [received_message] "={rsi}" (-> *const Switch),
+        : [message_to_send] "0" (s),
+        : .{
+          .rax = true,
+          .rcx = true,
+          .rdx = true,
+          .rbx = true,
+          .rdi = true,
+          .r8 = true,
+          .r9 = true,
+          .r10 = true,
+          .r11 = true,
+          .r12 = true,
+          .r13 = true,
+          .r14 = true,
+          .r15 = true,
+          .mm0 = true,
+          .mm1 = true,
+          .mm2 = true,
+          .mm3 = true,
+          .mm4 = true,
+          .mm5 = true,
+          .mm6 = true,
+          .mm7 = true,
+          .zmm0 = true,
+          .zmm1 = true,
+          .zmm2 = true,
+          .zmm3 = true,
+          .zmm4 = true,
+          .zmm5 = true,
+          .zmm6 = true,
+          .zmm7 = true,
+          .zmm8 = true,
+          .zmm9 = true,
+          .zmm10 = true,
+          .zmm11 = true,
+          .zmm12 = true,
+          .zmm13 = true,
+          .zmm14 = true,
+          .zmm15 = true,
+          .zmm16 = true,
+          .zmm17 = true,
+          .zmm18 = true,
+          .zmm19 = true,
+          .zmm20 = true,
+          .zmm21 = true,
+          .zmm22 = true,
+          .zmm23 = true,
+          .zmm24 = true,
+          .zmm25 = true,
+          .zmm26 = true,
+          .zmm27 = true,
+          .zmm28 = true,
+          .zmm29 = true,
+          .zmm30 = true,
+          .zmm31 = true,
+          .fpsr = true,
+          .fpcr = true,
+          .mxcsr = true,
+          .rflags = true,
+          .dirflag = true,
+          .memory = true,
+        });
+}
+
+inline fn switchRiscv(s: *const Switch) *const Switch {
+    return asm volatile (
+        \\ ld a0, 0(a1)
+        \\ ld a2, 8(a1)
+        \\ lla a3, 0f
+        \\ sd sp, 0(a0)
+        \\ sd fp, 8(a0)
+        \\ sd a3, 16(a0)
+        \\ ld sp, 0(a2)
+        \\ ld fp, 8(a2)
+        \\ ld a3, 16(a2)
+        \\ jr a3
+        \\0:
+        : [received_message] "={a1}" (-> *const Switch),
+        : [message_to_send] "0" (s),
+        : .{
+          .x1 = true,
+          .x3 = true,
+          .x4 = true,
+          .x5 = true,
+          .x6 = true,
+          .x7 = true,
+          .x9 = true,
+          .x10 = true,
+          .x12 = true,
+          .x13 = true,
+          .x14 = true,
+          .x15 = true,
+          .x16 = true,
+          .x17 = true,
+          .x18 = true,
+          .x19 = true,
+          .x20 = true,
+          .x21 = true,
+          .x22 = true,
+          .x23 = true,
+          .x24 = true,
+          .x25 = true,
+          .x26 = true,
+          .x27 = true,
+          .x28 = true,
+          .x29 = true,
+          .x30 = true,
+          .x31 = true,
+          .f0 = true,
+          .f1 = true,
+          .f2 = true,
+          .f3 = true,
+          .f4 = true,
+          .f5 = true,
+          .f6 = true,
+          .f7 = true,
+          .f8 = true,
+          .f9 = true,
+          .f10 = true,
+          .f11 = true,
+          .f12 = true,
+          .f13 = true,
+          .f14 = true,
+          .f15 = true,
+          .f16 = true,
+          .f17 = true,
+          .f18 = true,
+          .f19 = true,
+          .f20 = true,
+          .f21 = true,
+          .f22 = true,
+          .f23 = true,
+          .f24 = true,
+          .f25 = true,
+          .f26 = true,
+          .f27 = true,
+          .f28 = true,
+          .f29 = true,
+          .f30 = true,
+          .f31 = true,
+          .v0 = true,
+          .v1 = true,
+          .v2 = true,
+          .v3 = true,
+          .v4 = true,
+          .v5 = true,
+          .v6 = true,
+          .v7 = true,
+          .v8 = true,
+          .v9 = true,
+          .v10 = true,
+          .v11 = true,
+          .v12 = true,
+          .v13 = true,
+          .v14 = true,
+          .v15 = true,
+          .v16 = true,
+          .v17 = true,
+          .v18 = true,
+          .v19 = true,
+          .v20 = true,
+          .v21 = true,
+          .v22 = true,
+          .v23 = true,
+          .v24 = true,
+          .v25 = true,
+          .v26 = true,
+          .v27 = true,
+          .v28 = true,
+          .v29 = true,
+          .v30 = true,
+          .v31 = true,
+          .vtype = true,
+          .vl = true,
+          .vxsat = true,
+          .vxrm = true,
+          .vcsr = true,
+          .fflags = true,
+          .frm = true,
+          .memory = true,
+        });
+}
+
 /// The context that starts `entry(arg, message)` on the stack ending at
 /// `top` (16-aligned) when first switched to. Uses the top 48 bytes.
 pub fn initial(top: usize, entry: Entry, arg: *anyopaque) Context {
@@ -160,7 +368,8 @@ pub fn initial(top: usize, entry: Entry, arg: *anyopaque) Context {
             slots[1] = @intFromPtr(arg); // safe: read back as a pointer by the trampoline
             slots[2] = @intFromPtr(entry); // safe: the function the trampoline jumps to
             slots[3] = 0;
-            return .{ .sp = base, .fp = 0, .pc = @intFromPtr(&trampoline) }; // safe: the naked entry's address
+            const pc = @intFromPtr(&trampoline); // safe: the naked entry's address
+            return if (builtin.cpu.arch == .aarch64) .{ .sp = base, .fp = 0, .pc = pc, .lr = 0 } else .{ .sp = base, .fp = 0, .pc = pc };
         },
         else => @compileError("no fiber switch for this architecture"),
     }

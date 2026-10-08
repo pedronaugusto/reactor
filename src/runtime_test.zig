@@ -3,6 +3,7 @@
 //! idle fake (`Threads`, real time); shakedown's conformance suite on both.
 const builtin = @import("builtin");
 const std = @import("std");
+const getaddrinfo = @import("sys/getaddrinfo.zig");
 const testing = std.testing;
 const Io = std.Io;
 const shakedown = @import("shakedown");
@@ -329,4 +330,48 @@ test "lane calls one after another from a task and from the root keep their fram
     try task.await(io);
     try manyCalls(io, 5000);
     try testing.expectEqual(me, std.Thread.getCurrentId());
+}
+
+test "process spawn on a lane has space for std's temporary arena" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    defer t.deinit();
+    const io = t.io();
+    var child = try std.process.spawn(io, .{ .argv = if (builtin.os.tag == .windows) &.{ "C:\\Windows\\System32\\cmd.exe", "/c", @as([4096]u8, @splat(' ')) ++ "exit 0" } else &.{ "/bin/sh", "-c", @as([4096]u8, @splat(' ')) ++ "exit 0" } });
+    errdefer child.kill(io);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+}
+
+test "a canceled libc lookup detaches while its bounded storage stays alive" {
+    try skipWithoutFibers();
+    const Slow = struct {
+        var runtime_io: Io = undefined;
+        var started: Io.Event = .unset;
+        var release: Io.Event = .unset;
+        var finished: std.atomic.Value(bool) = .init(false);
+        fn lookup(_: []const u8, port: u16, _: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress) getaddrinfo.Error![]Io.net.IpAddress {
+            started.set(runtime_io);
+            release.waitUncancelable(testing.io);
+            out[0] = .{ .ip4 = .loopback(port) };
+            finished.store(true, .release);
+            return out[0..1];
+        }
+        fn run(t: *Threads) !usize {
+            var out: [2]Io.net.IpAddress = undefined;
+            return t.runtime.core.lookup.resolve(&t.runtime.core.scheduler, &t.runtime.core.lanes, lookup, try .init("slow.example"), .{ .port = 80 }, &out);
+        }
+    };
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .max_lookups = 1, .stack_size = 256 << 10 });
+    defer t.deinit();
+    Slow.runtime_io = t.io();
+    var task = try t.io().concurrent(Slow.run, .{&t});
+    defer Slow.release.set(testing.io);
+    try Slow.started.wait(t.io());
+    try testing.expectError(error.Canceled, task.cancel(t.io()));
+    try testing.expect(!Slow.finished.load(.acquire));
+    var second = try t.io().concurrent(Slow.run, .{&t});
+    try testing.expectError(error.SystemResources, second.await(t.io()));
+    Slow.release.set(testing.io);
 }

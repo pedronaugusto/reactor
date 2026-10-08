@@ -14,6 +14,7 @@ const Stacks = @import("../fiber/Stacks.zig");
 const memory = @import("../sys/memory.zig");
 const clock = @import("../clock.zig");
 const Lanes = @import("../Lanes.zig");
+const Lookup = @import("../ops/Lookup.zig");
 const Loop = @import("../Loop.zig");
 const loop_internal = @import("../loop/internal.zig");
 const Task = @import("../scheduler/Task.zig");
@@ -36,6 +37,7 @@ processors: []Processor,
 root: Task,
 futex: futexes.Table = .{},
 lanes: Lanes,
+lookup: Lookup,
 /// The home processor's scheduler runs here while the root waits.
 home_stack: []align(memory.page_size_min) u8,
 started: bool = false,
@@ -86,6 +88,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .processors = try gpa.alloc(Processor, count),
         .root = .{ .kind = .root, .home = true },
         .lanes = undefined,
+        .lookup = undefined,
         .home_stack = undefined,
         .csprngs = undefined,
     };
@@ -121,6 +124,9 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
 
     try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0 });
     errdefer c.lanes.deinit(gpa);
+
+    c.lookup = try Lookup.init(gpa, options.max_lookups);
+    errdefer c.lookup.deinit(gpa, &c.lanes);
 
     c.home_stack = memory.reserve(home_stack_size) catch return error.SystemResources;
     errdefer memory.release(c.home_stack);
@@ -197,6 +203,7 @@ pub fn deinit(c: *Core) void {
     c.stop();
     assert(c.scheduler.live.load(.acquire) == 0);
     Scheduler.leave();
+    c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
     memory.release(c.home_stack);

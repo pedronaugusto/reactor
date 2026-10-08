@@ -38,6 +38,8 @@ pub const Options = struct {
     /// Past this, `concurrent` fails with `ConcurrencyUnavailable` and
     /// `async` runs the function inline (both legal for `std.Io`).
     max_tasks: u32 = 16 << 10,
+    /// Includes libc requests detached from canceled callers.
+    max_lookups: u32 = 64,
     files: Files = .auto,
     offload: Offload = .{ .owned = .{} },
     /// Submission queue entries per ring.

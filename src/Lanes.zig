@@ -38,6 +38,8 @@ pub const Owned = struct {
     wait: u16 = 32,
     /// null: max(4, CPUs), at most 64.
     general: ?u16 = null,
+    /// Maximum allocation made by std inside one call; blocks are reserved at init.
+    scratch_bytes: u32 = 256 << 10,
 };
 
 /// What every Threaded instance needs from the runtime's options.
@@ -89,6 +91,7 @@ injected: Io = undefined,
 borrowed: Io.Threaded,
 states: [count]State,
 pool: SlotPool,
+scratch: SlotPool,
 /// Where cancels of calls run; never awaited until `deinit`.
 cancels: Io.Group = .init,
 
@@ -96,21 +99,30 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
     const caps = capsOf(config);
     var total: u32 = 0;
     for (caps) |c| total += c;
+    var pool = try SlotPool.init(gpa, 4 * total + 16);
+    errdefer pool.deinit(gpa);
+    const bytes = switch (config) {
+        .owned => |o| o.scratch_bytes,
+        else => 256 << 10,
+    };
+    const scratch = try SlotPool.initSized(gpa, total + 16, bytes);
     l.* = .{
         .mode = config,
         .borrowed = .init(.failing, .{ .async_limit = .nothing, .concurrent_limit = .nothing, .environ = env.environ, .argv0 = env.argv0 }),
         .states = undefined,
         // A closure for each running call, each cancel of one, and each
         // call that has ended but whose thread has not yet let go of it.
-        .pool = try .init(gpa, 4 * total + 16),
+        .pool = pool,
+        .scratch = scratch,
     };
+    l.borrowed.allocator = l.allocator();
     for (&l.states, caps) |*s, c| s.* = .{ .cap = c };
     switch (config) {
         // The lane's cap bounds its calls; std's own limit would also count
         // a call that has ended while its thread is still leaving, and
         // refuse the next call for it.
         .owned => for (&l.threaded) |*t| {
-            t.* = .init(l.pool.allocator(), .{
+            t.* = .init(l.allocator(), .{
                 .async_limit = .nothing,
                 .concurrent_limit = .unlimited,
                 .environ = env.environ,
@@ -134,6 +146,7 @@ pub fn deinit(l: *Lanes, gpa: Allocator) void {
     }
     l.borrowed.deinit();
     l.pool.deinit(gpa);
+    l.scratch.deinit(gpa);
     l.* = undefined;
 }
 
@@ -299,4 +312,24 @@ pub fn stats(l: *Lanes, lane: Lane) Stats {
 
 fn system() Io {
     return Io.Threaded.global_single_threaded.io();
+}
+
+/// Both allocation classes remain fixed after init: closures use small slots;
+/// std's temporary arenas use larger blocks, freed when the call returns.
+fn allocator(l: *Lanes) Allocator {
+    return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = Allocator.noResize, .remap = Allocator.noRemap, .free = free } };
+}
+
+fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    const a = if (len <= SlotPool.slot_len) l.pool.allocator() else l.scratch.allocator();
+    return a.rawAlloc(len, alignment, ret_addr);
+}
+
+fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    const address = @intFromPtr(memory.ptr); // safe: only compares the address with the reserved pools
+    const first = @intFromPtr(l.pool.buffer.ptr); // safe: only compares the pool's address
+    const a = if (address >= first and address < first + l.pool.buffer.len) l.pool.allocator() else l.scratch.allocator();
+    a.rawFree(memory, alignment, ret_addr);
 }
