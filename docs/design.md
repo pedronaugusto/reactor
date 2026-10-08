@@ -86,7 +86,7 @@ adds scheduler identity checks so independent runtimes cannot run one
 another's tasks or retain one another's ring storage. That safety is retained;
 newer noisy samples do not establish recovery. Default spawn, wakes and linked
 timeout throughput also retain measured misses. Opt-in feature costs and
-missing workloads remain explicit in the private results.
+missing workloads remain explicit in the private measurement rows.
 
 Raw offload refusal is fallible for every result shape, including void, under
 db221e5. No refused call runs inline. The remaining fixed std.Io signatures

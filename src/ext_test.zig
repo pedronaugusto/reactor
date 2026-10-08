@@ -505,8 +505,8 @@ test "r6: canceling a queued void offload drains without invoking it" {
     defer _ = first.cancel(io) catch {};
     // Drive the first task onto the lane before blocking on test infrastructure.
     t.runtime.run(.nowait);
-    try gate.begun.wait(testing.io);
     defer gate.release.set(testing.io);
+    try gate.begun.wait(testing.io);
     var ran = false;
     var queued = try io.concurrent(voidOffload, .{ io, &ran });
     defer _ = queued.cancel(io) catch {};

@@ -104,9 +104,7 @@ const Watchdog = struct {
         }
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
-        const file = std.Io.Dir.cwd().createFile(io, "v11-watchdog.log", .{}) catch std.Io.File.stderr();
-        defer file.close(io);
-        var output = file.writer(io, &buffer);
+        var output = std.Io.File.stderr().writer(io, &buffer);
         output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
         w.runtime.dump(&output.interface) catch {};
         output.interface.flush() catch {};
