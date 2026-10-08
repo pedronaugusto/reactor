@@ -50,7 +50,7 @@ pub fn init(gpa: Allocator, io: Io, memory: []u8, length: u32, buffers: u32) Err
     };
     var first: u32 = 0;
     for (groups, core.processors) |*g, *p| {
-        const ring = &p.loop.backend.io_uring;
+        const ring = p.loop.backend.io_uring;
         const count: u32 = @intCast((buffers - first) / (groups.len - made));
         const entries: u16 = @intCast(std.math.ceilPowerOfTwoAssert(u32, @max(2, count)));
         const id = ring.next_group.fetchAdd(1, .monotonic);

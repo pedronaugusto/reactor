@@ -48,6 +48,8 @@ const Config = struct {
     workers: ?u16 = null,
     backend: reactor.Loop.Backend = .auto,
     registered: bool = false,
+    task_size: ?usize = null,
+    latency: bool = false,
     zero_copy_min: ?usize = null,
     sqpoll: bool = false,
     bytes: usize = 64 << 10,
@@ -71,7 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--linked-timeout-off")) c.linked_timeout_off = true else if (std.mem.eql(u8, arg, "--fixed-files-off")) c.fixed_files_off = true else if (std.mem.eql(u8, arg, "--files-pool")) c.files_pool = true else if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
+        if (std.mem.eql(u8, arg, "--task-size")) {
+            i += 1;
+            c.task_size = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--latency")) c.latency = true else if (std.mem.eql(u8, arg, "--linked-timeout-off")) c.linked_timeout_off = true else if (std.mem.eql(u8, arg, "--fixed-files-off")) c.fixed_files_off = true else if (std.mem.eql(u8, arg, "--files-pool")) c.files_pool = true else if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
             i += 1;
             c.threaded = std.mem.eql(u8, args[i], "threaded");
         } else if (std.mem.eql(u8, arg, "--only")) {
@@ -112,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
     runtime.init(gpa, .{
         .workers = c.workers,
         .backend = c.backend,
+        .stack_classes = if (c.task_size) |size| &.{.{ .size = size, .count = 256 }} else &.{},
         .zero_copy_min = c.zero_copy_min,
         .sqpoll = if (c.sqpoll) .{} else null,
         .uring_off = .{ .msg_ring = c.msg_ring_off, .linked_timeout = c.linked_timeout_off, .fixed_files = c.fixed_files_off },
@@ -129,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
         if (comptime builtin.os.tag == .linux) {
             const backend = &runtime.core.processors[0].loop.backend;
             if (backend.* != .io_uring) return error.BackendUnavailable;
-            const ring = &backend.io_uring;
+            const ring = backend.io_uring;
             try r.w.print("{{\"backend\":\"io_uring\",\"features\":{{\"fixed_files\":{},\"msg_ring\":{},\"linked_timeout\":{},\"waitid\":{},\"send_zc\":{},\"registered_buffers\":{}}},\"flags\":{d}}}\n", .{ ring.features.fixed_files, ring.features.msg_ring, ring.features.linked_timeout, ring.features.waitid, ring.features.zero_copy, ring.buffers.enabled, ring.ring.flags });
             try r.w.flush();
         }
@@ -140,6 +146,8 @@ pub fn main(init: std.process.Init) !void {
 
 fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*reactor.Runtime) !void {
     if (c.wants("spawn")) try spawn(r, io, c);
+    if (c.wants("spawn-options")) try spawnOptions(r, io, c);
+    if (c.wants("priority-lanes")) try priorityLanes(r, io, c);
     if (c.wants("wake")) try wake(r, io, c);
     if (c.wants("timers")) try sleeps(r, io, c);
     if (c.wants("echo")) try echo(r, gpa, io, c);
@@ -672,4 +680,27 @@ fn bulk(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     const elapsed = nsBetween(start, now(io));
     try receiver.await(io);
     try r.line("bulk", "contiguous loopback send", @as(f64, @floatFromInt(messages * c.bytes)) / elapsed * std.time.ns_per_s / (1 << 20), "MiB/s");
+}
+
+fn spawnOptions(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 100 else 200_000;
+    const start = now(io);
+    for (0..n) |_| {
+        var future = try reactor.concurrentWith(io, .{ .stack_size = c.task_size, .priority = if (c.latency) .latency else .normal }, nothing, .{});
+        future.await(io);
+    }
+    try r.line("spawn-options", "concurrentWith + await, empty", nsBetween(start, now(io)) / @as(f64, @floatFromInt(n)), "ns/task");
+}
+fn priorityLane(io: Io) !void {
+    return reactor.blocking(io, .general, emptyLane, .{});
+}
+fn emptyLane() error{SystemResources}!void {}
+fn priorityLanes(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 10 else 2000;
+    const start = now(io);
+    for (0..n) |_| {
+        var future = try reactor.concurrentWith(io, .{ .priority = if (c.latency) .latency else .normal }, priorityLane, .{io});
+        try future.await(io);
+    }
+    try r.line("priority-lanes", "task + owned lane + await", nsBetween(start, now(io)) / @as(f64, @floatFromInt(n)), "ns/call");
 }

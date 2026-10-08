@@ -49,12 +49,12 @@ pub const Scratch = union {
 
 pub const Backend = union(enum) {
     /// Absent (void) where the system has no io_uring.
-    io_uring: Uring,
+    io_uring: if (has_uring) *Uring else void,
     /// Absent where the system has no epoll.
-    iocp: Iocp,
-    epoll: Epoll,
+    iocp: if (has_iocp) *Iocp else void,
+    epoll: if (has_epoll) *Epoll else void,
     /// Absent where the system has no kqueue.
-    kqueue: Kqueue,
+    kqueue: if (has_kqueue) *Kqueue else void,
     custom: Custom,
 
     pub fn kind(b: *const Backend) ?Kind {
@@ -69,10 +69,22 @@ pub const Backend = union(enum) {
 
     pub fn deinit(b: *Backend, gpa: Allocator) void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.deinit(gpa),
-            .epoll => |*e| if (has_epoll) e.deinit(),
-            .kqueue => |*k| if (has_kqueue) k.deinit(),
-            .iocp => |*w| if (has_iocp) w.deinit(gpa),
+            .io_uring => |u| if (has_uring) {
+                u.deinit(gpa);
+                gpa.destroy(u);
+            },
+            .epoll => |e| if (has_epoll) {
+                e.deinit();
+                gpa.destroy(e);
+            },
+            .kqueue => |k| if (has_kqueue) {
+                k.deinit();
+                gpa.destroy(k);
+            },
+            .iocp => |w| if (has_iocp) {
+                w.deinit(gpa);
+                gpa.destroy(w);
+            },
             .custom => {},
         }
         b.* = undefined;
@@ -83,10 +95,10 @@ pub const Backend = union(enum) {
     /// backend found it complete at once, its result set.
     pub fn submit(b: *Backend, o: anytype) SubmitError!bool {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) try u.submit(o) else unreachable, // unreachable: no such backend here
-            .epoll => |*e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) try u.submit(o) else unreachable, // unreachable: no such backend here
+            .epoll => |e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
+            .kqueue => |k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here
             .custom => |c| try c.vtable.submit(c.context, o),
         }
         return false;
@@ -95,10 +107,10 @@ pub const Backend = union(enum) {
     /// Asks the kernel to end `o`; its completion still arrives.
     pub fn cancel(b: *Backend, o: anytype) bool {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.cancel(o) else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) e.cancel(o) else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) k.cancel(o) else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) return w.cancel(o) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) u.cancel(o) else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) e.cancel(o) else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) k.cancel(o) else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) return w.cancel(o) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.cancel(c.context, o),
         }
         return false;
@@ -117,10 +129,10 @@ pub const Backend = union(enum) {
     /// its completion comes back to the sink under `token`.
     pub fn submitPending(b: *Backend, token: pending.Token, operation: Io.Operation) SubmitError!?pending.Outcome {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) try u.submitPending(token, operation) else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) try e.submitPending(token, operation) else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) try k.submitPending(token, operation) else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) return w.submitPending(token, operation) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) try u.submitPending(token, operation) else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) try e.submitPending(token, operation) else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) try k.submitPending(token, operation) else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) return w.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .custom => |c| try c.vtable.submitPending(c.context, token, operation),
         }
         return null;
@@ -128,10 +140,10 @@ pub const Backend = union(enum) {
 
     pub fn cancelPending(b: *Backend, token: pending.Token) void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.cancelPending(token) else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) e.cancelPending(token) else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) k.cancelPending(token) else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) w.cancelPending(token) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) u.cancelPending(token) else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) e.cancelPending(token) else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) k.cancelPending(token) else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) w.cancelPending(token) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.cancelPending(c.context, token),
         }
     }
@@ -141,10 +153,10 @@ pub const Backend = union(enum) {
     /// waiting as `wait` allows; a `wake` ends the wait.
     pub fn poll(b: *Backend, wait: Wait, sink: anytype) PollError!void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) try u.poll(wait, sink) else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) try e.poll(wait, sink) else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) try k.poll(wait, sink) else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) try w.poll(wait, sink) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) try u.poll(wait, sink) else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) try e.poll(wait, sink) else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) try k.poll(wait, sink) else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) try w.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.poll(c.context, wait, CustomSink(@TypeOf(sink)).of(sink)),
         }
     }
@@ -152,10 +164,10 @@ pub const Backend = union(enum) {
     /// From any thread.
     pub fn wake(b: *Backend) void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.wake() else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) e.wake() else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) k.wake() else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) w.wake() else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) u.wake() else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) e.wake() else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) k.wake() else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) w.wake() else unreachable, // unreachable: no such backend here
             .custom => |c| c.vtable.wake(c.context),
         }
     }
@@ -164,9 +176,9 @@ pub const Backend = union(enum) {
     /// poll delivers without waiting.
     pub fn hasCompletions(b: *const Backend) bool {
         return switch (b.*) {
-            .epoll => |*e| if (has_epoll) e.hasCompletions() else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) k.hasCompletions() else unreachable, // unreachable: no such backend here
-            .io_uring => |*u| if (builtin.os.tag == .linux) u.deferred_count != 0 or @atomicLoad(u32, u.ring.cq.tail, .acquire) != @atomicLoad(u32, u.ring.cq.head, .monotonic) else false,
+            .epoll => |e| if (has_epoll) e.hasCompletions() else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) k.hasCompletions() else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (builtin.os.tag == .linux) u.deferred_count != 0 or @atomicLoad(u32, u.ring.cq.tail, .acquire) != @atomicLoad(u32, u.ring.cq.head, .monotonic) else false,
             .iocp, .custom => false,
         };
     }
@@ -175,10 +187,10 @@ pub const Backend = union(enum) {
     /// poller; null for a custom backend.
     pub fn handle(b: *Backend) error{ SystemResources, Unexpected }!?Io.File.Handle {
         return switch (b.*) {
-            .io_uring => |*u| if (has_uring) try u.handle() else unreachable, // unreachable: no such backend here
-            .epoll => |*e| if (has_epoll) e.handle() else unreachable, // unreachable: no such backend here
-            .kqueue => |*k| if (has_kqueue) k.handle() else unreachable, // unreachable: no such backend here
-            .iocp => |*w| if (has_iocp) w.waitHandle() else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) try u.handle() else unreachable, // unreachable: no such backend here
+            .epoll => |e| if (has_epoll) e.handle() else unreachable, // unreachable: no such backend here
+            .kqueue => |k| if (has_kqueue) k.handle() else unreachable, // unreachable: no such backend here
+            .iocp => |w| if (has_iocp) w.waitHandle() else unreachable, // unreachable: no such backend here
             .custom => null,
         };
     }

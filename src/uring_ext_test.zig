@@ -188,7 +188,7 @@ test "closing a file removes an idle registration on another ring" {
             var byte: [1]u8 = undefined;
             var sqe: std.os.linux.io_uring_sqe = undefined;
             sqe.prep_read(cached.fd, &byte, 0);
-            const ring = &p.loop.backend.io_uring;
+            const ring = p.loop.backend.io_uring;
             ring.files.use(&ring.ring, &sqe);
             cached.done.set(cached.io);
         }
@@ -202,7 +202,7 @@ test "closing a file removes an idle registration on another ring" {
     const file = try tmp.dir.createFile(io, "registered", .{ .read = true });
     var open = true;
     defer if (open) file.close(io);
-    const ring = &r.core.processors[1].loop.backend.io_uring;
+    const ring = r.core.processors[1].loop.backend.io_uring;
     if (!ring.files.enabled) return error.SkipZigTest;
     var cached: Cached = .{ .io = io, .fd = file.handle };
     r.core.processors[1].send(&cached.errand);
@@ -490,7 +490,7 @@ test "a native receive alone returns from a loop waiting for a completion" {
     var sockets: [2]posix.fd_t = undefined;
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
     defer closeAll(&sockets);
-    const ring = &loop.backend.io_uring;
+    const ring = loop.backend.io_uring;
     var buffers = BufferRing.init(ring.ring.fd, 2, 1) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => |e| return e,

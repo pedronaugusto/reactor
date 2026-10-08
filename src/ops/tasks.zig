@@ -198,8 +198,10 @@ fn memberDone(context: *anyopaque, t: *Task) void {
     const last = head(g) == null;
     const a = if (last) st.awaiterPtr() else null;
     if (last) st = st.withAwaiter(null);
-    unlockGroup(g, st);
+    // Empty is observable only after every member has returned its stack.
+    // Awaiters that see an empty group may immediately stop the runtime.
     s.release(t);
+    unlockGroup(g, st);
     if (a) |awaiter| wakeAwaiter(s, awaiter);
 }
 

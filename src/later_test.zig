@@ -161,7 +161,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(r.io(), "fixed-buffer", .{ .read = true });
     defer file.close(r.io());
-    const ring = &r.core.processors[0].loop.backend.io_uring;
+    const ring = r.core.processors[0].loop.backend.io_uring;
     @memset(pool.memory, 0x3d);
     var write: Loop.Op = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = pool.memory[0..4096], .offset = 0 } } };
     try ring.submit(&write);
@@ -669,7 +669,7 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
     defer for (pipe) |fd| {
         _ = linux.close(fd);
     };
-    const ring = &r.core.processors[0].loop.backend.io_uring;
+    const ring = r.core.processors[0].loop.backend.io_uring;
     const index = pool.fixed.?.items[0].index;
     for (0..32) |_| {
         var data: [1][]u8 = .{pool.memory[0..4096]};
@@ -701,4 +701,95 @@ fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
 test "later: stack class initialization rolls back every allocation failure" {
     var allocator = shakedown.alloc.NoResize.init(testing.allocator);
     try testing.checkAllAllocationFailures(allocator.allocator(), stackAllocationFailures, .{});
+}
+
+fn fixedRead(io: Io, file: Io.File, bytes: []u8) !usize {
+    return file.readPositionalAll(io, bytes, 0);
+}
+test "later: fixed-buffer registrations survive worker adoption and owner teardown" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .workers = 2, .backend = .io_uring, .max_tasks = 8 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    const io = runtime.io();
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+        error.Unsupported => return error.SkipZigTest,
+        else => return err,
+    };
+    defer pool.deinit(testing.allocator, io);
+    try testing.expectEqual(@as(usize, 3), pool.fixed.?.items.len);
+    try runtime.start();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "adopt", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "adopted buffers", 0);
+    for (0..32) |_| {
+        @memset(pool.memory, 0xdd);
+        var future = try io.concurrent(fixedRead, .{ io, file, pool.memory[0..15] });
+        try testing.expectEqual(@as(usize, 15), try future.await(io));
+        try testing.expectEqualStrings("adopted buffers", pool.memory[0..15]);
+    }
+}
+
+test "later: SQPOLL close captures published fixed-file references before unregister" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var loop: Loop = undefined;
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .sqpoll = .{ .idle_ms = 1 } }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer loop.deinit(testing.allocator);
+    if (!loop.backend.io_uring.features.fixed_files) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (0..32) |_| {
+        const file = try tmp.dir.createFile(testing.io, "published", .{ .read = true });
+        try file.writePositionalAll(testing.io, "held", 0);
+        var bytes: [4]u8 = undefined;
+        var op: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = &bytes, .offset = 0 } } };
+        try loop.submit(&op);
+        const ring = &loop.backend.io_uring.ring;
+        try testing.expect(ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].flags & linux.IOSQE_FIXED_FILE != 0);
+        _ = ring.flush_sq();
+        loop.backend.io_uring.files.remove(loop.backend.io_uring, file.handle);
+        try testing.expectEqual(ring.sq.sqe_head, @atomicLoad(u32, ring.sq.head, .acquire));
+        file.close(testing.io);
+        var out: [1]*Loop.Op = undefined;
+        while (loop.reap(&out).len == 0) _ = try loop.run(.once);
+        try testing.expectEqual(@as(usize, 4), try op.result.read_at);
+        try testing.expectEqualStrings("held", &bytes);
+    }
+}
+
+noinline fn shallowAfterDeep(io: Io) !u8 {
+    var address: usize = 0;
+    try testing.expectEqual(@as(u8, 73), try deepLive(io, &address));
+    var data: [8 << 10]u8 = undefined;
+    const bytes: *volatile [8 << 10]u8 = &data;
+    for (0..data.len) |at| bytes[at] = 0x52;
+    try io.sleep(.fromMilliseconds(1), .awake);
+    for (0..data.len) |at| try testing.expectEqual(@as(u8, 0x52), bytes[at]);
+    return bytes[31];
+}
+noinline fn deepLive(io: Io, address: *usize) !u8 {
+    var data: [192 << 10]u8 = undefined;
+    const bytes: *volatile [192 << 10]u8 = &data;
+    for (0..data.len) |at| bytes[at] = 73;
+    address.* = @intFromPtr(&data[16 << 10]); // safe: the frame remains live until this call returns
+    try io.sleep(.fromMilliseconds(1), .awake);
+    for (0..data.len) |at| try testing.expectEqual(@as(u8, 73), bytes[at]);
+    return bytes[31];
+}
+test "later: trimming a shallow park preserves every live byte after a deep park" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var driver: Driver = undefined;
+    try driver.init(testing.allocator, 7, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
+    defer driver.deinit();
+    var task = try driver.io().concurrent(shallowAfterDeep, .{driver.io()});
+    try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
+    try testing.expect(driver.runtime.stats().stack_trims > 0);
 }

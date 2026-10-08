@@ -48,7 +48,7 @@ const Command = struct {
     fn run(e: *Scheduler.Errand, p: *Scheduler.Processor) void {
         if (comptime builtin.os.tag != .linux) unreachable; // unreachable: registration is Linux only
         const command: *Command = @alignCast(@fieldParentPtr("errand", e)); // safe: embedded command
-        const ring = &p.loop.backend.io_uring;
+        const ring = p.loop.backend.io_uring;
         switch (command.action) {
             .register => |memory| command.result = ring.buffers.register(&ring.ring, memory),
             .unregister => |index| ring.buffers.unregister(&ring.ring, index),

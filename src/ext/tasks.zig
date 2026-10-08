@@ -9,10 +9,8 @@ pub const Options = struct { stack_size: ?usize = null, priority: Priority = .no
 pub const ConcurrentError = Io.ConcurrentError;
 
 pub fn concurrentWith(io: Io, options: Options, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) ConcurrentError!Io.Future(@typeInfo(@TypeOf(function)).@"fn".return_type.?) {
-    const core = native.runtimeOf(io) orelse {
-        if (options.stack_size != null or options.priority != .normal) return error.ConcurrencyUnavailable;
-        return io.concurrent(function, args);
-    };
+    if (options.stack_size == null and options.priority == .normal) return io.concurrent(function, args);
+    const core = native.runtimeOf(io) orelse return error.ConcurrencyUnavailable;
     const result_type = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
     const Args = @TypeOf(args);
     const Entry = struct {

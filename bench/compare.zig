@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     Io.Dir.cwd().access(io, base_dir, .{}) catch {
         try checked(gpa, io, &.{ "git", "clone", "--no-checkout", ".", base_dir }, ".");
     };
+    try checked(gpa, io, &.{ "git", "reset", "--hard", baseline }, base_dir);
     try checked(gpa, io, &.{ "git", "checkout", "--detach", baseline }, base_dir);
     if (args.len == 3 and std.mem.eql(u8, args[2], "--regressions")) {
         try before(gpa, io, w, zig);
@@ -74,6 +75,32 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+    for ([_][]const u8{ "spawn-options", "priority-lanes" }) |workload| {
+        for (0..5) |round| {
+            const a = &.{ "--only", workload };
+            const b = &.{ "--only", workload, "--latency" };
+            if (round % 2 == 0) {
+                try measure(gpa, io, w, round, "normal-priority", ".", a);
+                try measure(gpa, io, w, round, "latency-priority", ".", b);
+            } else {
+                try measure(gpa, io, w, round, "latency-priority", ".", b);
+                try measure(gpa, io, w, round, "normal-priority", ".", a);
+            }
+        }
+    }
+    for ([_][]const u8{ "65536", "262144", "1048576" }) |bytes| {
+        for (0..5) |round| {
+            const a = &.{ "--only", "spawn-options" };
+            const b = &.{ "--only", "spawn-options", "--task-size", bytes };
+            if (round % 2 == 0) {
+                try measure(gpa, io, w, round, "default-stack", ".", a);
+                try measure(gpa, io, w, round, bytes, ".", b);
+            } else {
+                try measure(gpa, io, w, round, bytes, ".", b);
+                try measure(gpa, io, w, round, "default-stack", ".", a);
+            }
+        }
+    }
     if (builtin.os.tag != .linux) return;
     try measure(gpa, io, w, 0, "native-capabilities", ".", &.{ "--only", "info" });
     for ([_]struct { name: []const u8, workload: []const u8, off: []const u8 }{
@@ -91,6 +118,17 @@ pub fn main(init: std.process.Init) !void {
                 try measure(gpa, io, w, round, feature.name, ".", b);
                 try measure(gpa, io, w, round, feature.off, ".", a);
             }
+        }
+    }
+    for (0..5) |round| {
+        const a = &.{ "--only", "wake", "--workers", "1", "--msg-ring-off" };
+        const b = &.{ "--only", "wake", "--workers", "1" };
+        if (round % 2 == 0) {
+            try measure(gpa, io, w, round, "eventfd-wake", ".", a);
+            try measure(gpa, io, w, round, "msg-ring-wake", ".", b);
+        } else {
+            try measure(gpa, io, w, round, "msg-ring-wake", ".", b);
+            try measure(gpa, io, w, round, "eventfd-wake", ".", a);
         }
     }
     for (0..5) |round| {
@@ -134,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn installTests(gpa: std.mem.Allocator, io: Io) !void {
     const directory = Io.Dir.cwd();
-    try excludeExample(gpa, io);
+    try focusTests(gpa, io);
     const regression = try directory.readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
     defer gpa.free(regression);
     try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
@@ -151,7 +189,7 @@ fn installTests(gpa: std.mem.Allocator, io: Io) !void {
 fn expectBefore(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8, filter: []const u8, marker: []const u8) !void {
     const arg = try std.fmt.allocPrint(gpa, "-Dtest-filter={s}", .{filter});
     defer gpa.free(arg);
-    const result = try std.process.run(gpa, io, .{ .argv = &.{ zig, "build", "test", "-Dci-lint=false", arg }, .cwd = .{ .path = base_dir }, .timeout = .{ .duration = .{ .raw = .fromSeconds(180), .clock = .awake } } });
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ zig, "build", "later-before", "-Dci-lint=false", arg }, .cwd = .{ .path = base_dir }, .timeout = .{ .duration = .{ .raw = .fromSeconds(180), .clock = .awake } } });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try writer.print("BEFORE {s}\n{s}\n{s}\n", .{ filter, result.stdout, result.stderr });
@@ -171,24 +209,26 @@ fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !
         // The shutdown bug was introduced in the first pushed LATER
         // checkpoint, whose exact public source is retained in history.
         try checked(gpa, io, &.{ "git", "reset", "--hard", "f110c7943327868ef21172e80320f34355e0498c" }, base_dir);
-        try excludeExample(gpa, io);
+        try focusTests(gpa, io);
         // That checkpoint already imported these two test files.
         const regression = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
         defer gpa.free(regression);
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = regression });
+        try expectBefore(gpa, io, writer, zig, "R1 group await", "R1 group await observes all member stacks released");
         try expectBefore(gpa, io, writer, zig, "R1 stopping idle", "exited with code 97");
     } else if (builtin.os.tag == .macos) {
         try expectBefore(gpa, io, writer, zig, "R1 native child", "R1 native child wait uses no inline wait lane");
     }
 }
 
-fn excludeExample(gpa: std.mem.Allocator, io: Io) !void {
-    // An unrelated concurrent example can hang at the known-bad shutdown
-    // before the selected guarded regression reports its exact failure.
+fn focusTests(gpa: std.mem.Allocator, io: Io) !void {
+    // Select only the test artifact. Example and benchmark smoke programs
+    // otherwise hang at shutdown in the deliberately broken checkpoint.
     const path = base_dir ++ "/build.zig";
     const original = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
     defer gpa.free(original);
-    const focused = try std.mem.replaceOwned(u8, gpa, original, "test_step.dependOn(examples);", "");
+    const declaration = "const test_step = b.step(\"test\", \"Run the tests and example\");";
+    const focused = try std.mem.replaceOwned(u8, gpa, original, declaration, declaration ++ "\n    b.step(\"later-before\", \"Run only the selected before regression\").dependOn(&b.addRunArtifact(tests).step);");
     defer gpa.free(focused);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = focused });
 }

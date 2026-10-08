@@ -181,41 +181,51 @@ const has_kqueue = backends.Kqueue != void;
 fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
     if (builtin.os.tag != .linux) return error.BackendUnavailable;
     const entries = options.submission_entries orelse ringEntries(options.max_ops);
-    return .{
-        .io_uring = backends.Uring.init(gpa, .{
-            .entries = entries,
-            // The kernel takes at most 65,536; operations beyond the
-            // queue's size wait in the kernel (no completion is dropped).
-            .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
-            .off = @bitCast(options.uring_off),
-            .disabled = options.owner == .adopter,
-            .sqpoll = options.sqpoll,
-            .zero_copy_min = options.zero_copy_min,
-            .registered_pools = options.registered_pools,
-            .pending_bound = options.max_ops,
-        }) catch |err| return switch (err) {
-            error.BackendUnavailable => error.BackendUnavailable,
-            error.SystemResources => error.SystemResources,
-            error.Unexpected => error.Unexpected,
-            error.OutOfMemory => error.OutOfMemory,
-        },
+    const engine = try gpa.create(backends.Uring);
+    errdefer gpa.destroy(engine);
+    engine.* = backends.Uring.init(gpa, .{
+        .entries = entries,
+        // The kernel takes at most 65,536; operations beyond the
+        // queue's size wait in the kernel (no completion is dropped).
+        .completions = std.math.ceilPowerOfTwoAssert(u32, std.math.clamp(options.max_ops, 2 * @as(u32, entries), 1 << 16)),
+        .off = @bitCast(options.uring_off),
+        .disabled = options.owner == .adopter,
+        .sqpoll = options.sqpoll,
+        .zero_copy_min = options.zero_copy_min,
+        .registered_pools = options.registered_pools,
+        .pending_bound = options.max_ops,
+    }) catch |err| return switch (err) {
+        error.BackendUnavailable => error.BackendUnavailable,
+        error.SystemResources => error.SystemResources,
+        error.Unexpected => error.Unexpected,
+        error.OutOfMemory => error.OutOfMemory,
     };
+    return .{ .io_uring = engine };
 }
 
 fn initEpoll(gpa: Allocator, options: Options) InitError!backends.Backend {
     if (backends.Epoll == void) return error.BackendUnavailable;
-    return .{ .epoll = try .init(gpa, options.max_ops) };
+    const engine = try gpa.create(backends.Epoll);
+    errdefer gpa.destroy(engine);
+    engine.* = try .init(gpa, options.max_ops);
+    return .{ .epoll = engine };
 }
 
 fn initKqueue(gpa: Allocator, options: Options) InitError!backends.Backend {
     if (!has_kqueue) return error.BackendUnavailable;
-    return .{ .kqueue = try .init(gpa, options.max_ops) };
+    const engine = try gpa.create(backends.Kqueue);
+    errdefer gpa.destroy(engine);
+    engine.* = try .init(gpa, options.max_ops);
+    return .{ .kqueue = engine };
 }
 
 fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
     // Batch operations in flight, at most 65,536 (as io_uring's completion
     // queue): beyond, a batch operation fails as out of resources.
-    return .{ .iocp = try backends.Iocp.init(gpa, .{ .port = options.port, .slots = @min(options.max_ops, 1 << 16) }) };
+    const engine = try gpa.create(backends.Iocp);
+    errdefer gpa.destroy(engine);
+    engine.* = try .init(gpa, .{ .port = options.port, .slots = @min(options.max_ops, 1 << 16) });
+    return .{ .iocp = engine };
 }
 
 /// The calling thread becomes the loop's owner. For a loop built with
@@ -223,7 +233,7 @@ fn iocpBackend(gpa: Allocator, options: Options) InitError!backends.Backend {
 pub fn adopt(l: *Loop) void {
     l.owner = std.Thread.getCurrentId();
     switch (l.backend) {
-        .io_uring => |*u| if (builtin.os.tag == .linux) u.enable(),
+        .io_uring => |u| if (builtin.os.tag == .linux) u.enable(),
         // A poller serves whichever thread waits on it.
         .epoll, .kqueue, .iocp, .custom => {},
     }
@@ -424,7 +434,7 @@ pub fn complete(l: *Loop, entries: []const PortEntry) u32 {
     l.assertOwner();
     var counted: Counted = .{ .loop = l };
     switch (l.backend) {
-        .iocp => |*b| if (builtin.os.tag == .windows) b.complete(entries, &counted),
+        .iocp => |b| if (builtin.os.tag == .windows) b.complete(entries, &counted),
         .io_uring, .epoll, .kqueue, .custom => {},
     }
     return counted.count + l.deliverReady();
@@ -554,7 +564,7 @@ const Fired = struct {
 pub fn wakeFrom(l: *Loop, source: *Loop) void {
     l.woken.store(true, .release);
     if (comptime builtin.os.tag == .linux) if (source != l and source.backend == .io_uring and l.backend == .io_uring) {
-        if (source.backend.io_uring.messageWake(&l.backend.io_uring)) return;
+        if (source.backend.io_uring.messageWake(l.backend.io_uring)) return;
     };
     l.backend.wake();
 }

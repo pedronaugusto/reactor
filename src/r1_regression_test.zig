@@ -108,3 +108,28 @@ test "R1 Linux dialing binds an interface without Threaded name lookup" {
     defer peer.close(testing.io);
     try testing.expectEqual(connected.stream.socket.address.getPort(), peer.socket.address.getPort());
 }
+
+fn groupDeep(io: Io) void {
+    var address: usize = 0;
+    _ = deepPark(io, &address) catch @panic("group member sleep failed");
+}
+test "R1 group await observes all member stacks released" {
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .workers = 2, .max_tasks = 32, .stack_size = 512 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    try runtime.start();
+    const io = runtime.io();
+    for (0..200) |_| {
+        var group: Io.Group = .init;
+        for (0..16) |_| try group.concurrent(io, groupDeep, .{io});
+        try group.await(io);
+        const observed = runtime.stats().tasks;
+        // Let a broken before revision finish release, so the test reports
+        // the assertion instead of panicking during runtime teardown.
+        while (runtime.stats().tasks != 0) try testing.io.sleep(.fromMilliseconds(1), .awake);
+        try testing.expectEqual(@as(u32, 0), observed);
+    }
+}

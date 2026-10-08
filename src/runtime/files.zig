@@ -21,7 +21,7 @@ pub fn call(comptime name: []const u8, core: *Core, args: anytype) ?Return(name)
     if (core.options.files == .pool) return null;
     const p = Scheduler.processor() orelse return null;
     if (p.scheduler != &core.scheduler or p.loop.backend != .io_uring) return null;
-    const ring = &p.loop.backend.io_uring;
+    const ring = p.loop.backend.io_uring;
     if (!ring.has(if (opening) .OPENAT else .STATX) or !ring.has(.STATX)) return null;
     if (comptime std.mem.eql(u8, name, "dirOpenFile")) return openFile(core, args[0], args[1], args[2]);
     if (comptime std.mem.eql(u8, name, "dirCreateFile")) return createFile(core, args[0], args[1], args[2]);
