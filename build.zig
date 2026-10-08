@@ -81,6 +81,11 @@ pub fn build(b: *std.Build) !void {
     costs.setCwd(b.path("."));
     costs.has_side_effects = true;
     b.step("later-costs", "Run interleaved native process and deep-stack cost evidence").dependOn(&costs.step);
+    const ownership = b.addRunArtifact(compare);
+    ownership.addArgs(&.{ b.graph.zig_exe, "--ownership" });
+    ownership.setCwd(b.path("."));
+    ownership.has_side_effects = true;
+    b.step("later-ownership", "Run interleaved ReleaseFast scheduler ownership A/B").dependOn(&ownership.step);
     return needed;
 }
 

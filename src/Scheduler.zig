@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const fiber = @import("fiber.zig");
 const Stacks = @import("fiber/Stacks.zig");
 const Loop = @import("Loop.zig");
+const loop_internal = @import("loop/internal.zig");
 const Task = @import("scheduler/Task.zig");
 const Records = @import("scheduler/Records.zig");
 const run_queue = @import("scheduler/run_queue.zig");
@@ -754,10 +755,10 @@ pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
         @ptrCast(@alignCast(t.processor)) // safe: only processors are stored there
     else
         null;
-    if (heldNow()) |p| {
+    if (heldNow()) |p| if (p.scheduler == s) {
         if (target == null or target == p) return p.pushLocal(t, how);
         return target.?.pushRemote(t);
-    }
+    };
     if (target) |tp| return tp.pushRemote(t);
     s.inject(t);
 }
@@ -1047,10 +1048,10 @@ pub fn release(s: *Scheduler, t: *Task) void {
 /// outside any, the next by round robin under `per_core`.
 pub fn place(s: *Scheduler, t: *Task) void {
     s.records.created(t);
-    if (heldNow()) |p| {
+    if (heldNow()) |p| if (p.scheduler == s) {
         t.processor = p;
         return p.pushLocal(t, .spawned);
-    }
+    };
     if (s.scheduling == .per_core) {
         const i = s.placement.fetchAdd(1, .monotonic) % s.processors.len;
         const p = &s.processors[i];
@@ -1067,6 +1068,7 @@ fn taskEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) noretur
 }
 
 fn wakeProcessor(target: *Processor) void {
-    if (heldNow()) |source| return target.loop.wakeFrom(&source.loop);
+    if (heldNow()) |source| if (source.scheduler == target.scheduler)
+        return loop_internal.wakeFrom(&target.loop, &source.loop);
     target.loop.wake();
 }

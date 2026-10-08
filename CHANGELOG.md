@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Native Linux OPENAT, STATX, WAITID and linked deadlines, ring-message wakes, and BSD process-watch waits.
 - Shrinkable test-driver choices, submission fault injection, native lifetime regressions and portable guard-page death tests.
 
+### Breaking
+
+- Remove the unreleased scheduler-only `Loop.wakeFrom` surface; standalone and foreign loops use `Loop.wake`.
+
 ### Changed
 
 - Opt-in overall touched-stack profiling and retained parked high-water statistics; diagnostic painting is disabled when timing.
@@ -21,6 +25,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SQ/CQ pressure releases kernel ownership while keeping user callbacks and batch list mutations queued for `run`; SQPOLL file close waits for published file references before unregistering.
 - Native engines keep stable owned storage allocated at loop initialization; dispatch does not copy concurrently changing wake state.
 - Group completion releases every member stack before publishing an empty group.
+- Foreign spawning and wakes retain the destination scheduler; ring messages are confined to processors within one runtime.
 - Linux interface binding uses the interface index directly. SEND_ZC is opt-in after hosted measurements found no throughput crossover.
 
 

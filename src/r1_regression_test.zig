@@ -5,6 +5,7 @@ const testing = std.testing;
 const Io = std.Io;
 const reactor = @import("reactor.zig");
 const Runtime = @import("Runtime.zig");
+const Scheduler = @import("Scheduler.zig");
 const Driver = @import("testing/Driver.zig");
 
 fn init(r: *Runtime) !void {
@@ -132,4 +133,105 @@ test "R1 group await observes all member stacks released" {
         while (runtime.stats().tasks != 0) try testing.io.sleep(.fromMilliseconds(1), .awake);
         try testing.expectEqual(@as(u32, 0), observed);
     }
+}
+
+const CrossRuntime = struct {
+    mode: enum { wake, spawn },
+    scheduling: Scheduler.Scheduling = .stealing,
+    published: Io.Event = .unset,
+    release: Io.Event = .unset,
+    event: Io.Event = .unset,
+    io: Io = undefined,
+    expected: usize = 0,
+    observed: usize = 0,
+    future: ?Io.Future(usize) = null,
+    failure: ?Runtime.InitError = null,
+    processor: *Scheduler.Processor = undefined,
+
+    fn owner() usize {
+        return @intFromPtr(Scheduler.processor().?.scheduler); // safe: identity only, retained until both threads finish
+    }
+    fn waiter(c: *CrossRuntime) usize {
+        c.event.waitUncancelable(c.io);
+        return owner();
+    }
+    fn destination(c: *CrossRuntime) void {
+        var r: Runtime = undefined;
+        r.init(testing.allocator, .{ .workers = if (c.scheduling == .stealing) 1 else 0, .max_tasks = 8, .offload = .none, .scheduling = c.scheduling }) catch |err| {
+            c.failure = err;
+            c.published.set(testing.io);
+            return;
+        };
+        defer r.deinit();
+        c.processor = Scheduler.processor().?;
+        c.io = r.io();
+        c.expected = owner();
+        switch (c.mode) {
+            .wake => {
+                var future = c.io.concurrent(waiter, .{c}) catch @panic("destination spawn failed");
+                r.run(.nowait);
+                c.published.set(testing.io);
+                c.observed = future.await(c.io);
+            },
+            .spawn => {
+                c.published.set(testing.io);
+                c.release.waitUncancelable(testing.io);
+                c.observed = c.future.?.await(c.io);
+            },
+        }
+    }
+    fn sender(c: *CrossRuntime) Io.ConcurrentError!bool {
+        const p = Scheduler.processor().?;
+        const before = if (comptime builtin.os.tag == .linux)
+            if (p.loop.backend == .io_uring) p.loop.backend.io_uring.ring.sq.sqe_tail else 0
+        else
+            0;
+        switch (c.mode) {
+            .wake => {
+                // Destination waiter and root are both off-stack before waking.
+                while (!c.processor.sleeping.load(.seq_cst)) std.atomic.spinLoopHint();
+                c.event.set(c.io);
+            },
+            .spawn => c.future = try c.io.concurrent(owner, .{}),
+        }
+        const after = if (comptime builtin.os.tag == .linux)
+            if (p.loop.backend == .io_uring) p.loop.backend.io_uring.ring.sq.sqe_tail else 0
+        else
+            0;
+        return before == after;
+    }
+    fn check(c: *CrossRuntime) !void {
+        const thread = try std.Thread.spawn(.{}, destination, .{c});
+        c.published.waitUncancelable(testing.io);
+        if (c.failure) |err| {
+            thread.join();
+            if (err == error.BackendUnavailable) return error.SkipZigTest;
+            return err;
+        }
+        var source: Runtime = undefined;
+        try init(&source);
+        defer source.deinit();
+        var sender_future = try source.io().concurrent(sender, .{c});
+        const ordinary_wake = try sender_future.await(source.io());
+        source.run(.nowait);
+        c.release.set(testing.io);
+        thread.join();
+        try testing.expectEqual(c.expected, c.observed);
+        if (c.scheduling == .per_core) try testing.expect(ordinary_wake);
+    }
+};
+
+test "R1 cross-runtime spawning retains destination scheduler ownership" {
+    var c: CrossRuntime = .{ .mode = .spawn };
+    try c.check();
+}
+
+test "R1 cross-runtime wake retains destination scheduler ownership" {
+    var c: CrossRuntime = .{ .mode = .wake };
+    try c.check();
+}
+
+test "R1 cross-runtime pinned wake retains no source-ring target reference" {
+    var c: CrossRuntime = .{ .mode = .wake, .scheduling = .per_core };
+    try c.check();
 }

@@ -1,6 +1,7 @@
 //! What reactor's runtime does to a loop beyond its public interface:
 //! build one over a given backend and clock, and hand a batch's
 //! operations to its backend.
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 
@@ -55,4 +56,15 @@ pub fn takeCompleted(l: *Loop, o: *Loop.Op) bool {
 
 pub fn cancelPending(l: *Loop, token: backend.pending.Token) void {
     l.backend.cancelPending(token);
+}
+
+/// The caller owns source on this thread and retains both loops until all
+/// source completions drain. The scheduler uses this only within one runtime;
+/// independent runtimes use ordinary wake, which retains no target pointer.
+pub fn wakeFrom(l: *Loop, source: *Loop) void {
+    l.woken.store(true, .release);
+    if (comptime builtin.os.tag == .linux) if (source != l and source.backend == .io_uring and l.backend == .io_uring) {
+        if (source.backend.io_uring.messageWake(l.backend.io_uring)) return;
+    };
+    l.backend.wake();
 }

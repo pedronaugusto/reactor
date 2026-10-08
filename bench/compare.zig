@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const baseline = "46f6da8cba6b20ac3bc8e4cd6cba1d35861f19e4";
+const ownership_baseline = "7e7e851534d971da778956e4b587c14cb7f194ae";
 const base_dir = ".zig-cache/later-evidence-base";
 
 fn command(gpa: std.mem.Allocator, io: Io, argv: []const []const u8, cwd: []const u8) !std.process.RunResult {
@@ -51,13 +52,16 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &buffer);
     const w = &stdout.interface;
-    try w.print("{{\"baseline\":\"{s}\",\"os\":\"{s}\",\"arch\":\"{s}\"}}\n", .{ baseline, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
+    const ownership_mode = args.len == 3 and std.mem.eql(u8, args[2], "--ownership");
+    const before_source = if (ownership_mode) ownership_baseline else baseline;
+    try w.print("{{\"baseline\":\"{s}\",\"os\":\"{s}\",\"arch\":\"{s}\"}}\n", .{ before_source, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
     try w.flush();
     Io.Dir.cwd().access(io, base_dir, .{}) catch {
         try checked(gpa, io, &.{ "git", "clone", "--no-checkout", ".", base_dir }, ".");
     };
-    try checked(gpa, io, &.{ "git", "reset", "--hard", baseline }, base_dir);
-    try checked(gpa, io, &.{ "git", "checkout", "--detach", baseline }, base_dir);
+    try checked(gpa, io, &.{ "git", "fetch", "origin" }, base_dir);
+    try checked(gpa, io, &.{ "git", "reset", "--hard", before_source }, base_dir);
+    try checked(gpa, io, &.{ "git", "checkout", "--detach", before_source }, base_dir);
     if (args.len == 3 and std.mem.eql(u8, args[2], "--regressions")) {
         try before(gpa, io, w, zig);
         return;
@@ -67,6 +71,23 @@ pub fn main(init: std.process.Init) !void {
     try Io.Dir.cwd().createDirPath(io, base_dir ++ "/.zig-cache");
     try checked(gpa, io, compile, base_dir);
     try checked(gpa, io, compile, ".");
+    if (ownership_mode) {
+        for ([_][]const u8{ "spawn", "wake" }) |workload| for ([_][]const u8{ "0", "1" }) |workers| for (0..5) |round| {
+            const before_label = try std.fmt.allocPrint(gpa, "before-ownership-workers-{s}", .{workers});
+            defer gpa.free(before_label);
+            const after_label = try std.fmt.allocPrint(gpa, "after-ownership-workers-{s}", .{workers});
+            defer gpa.free(after_label);
+            const rows = &.{ "--only", workload, "--workers", workers };
+            if (round % 2 == 0) {
+                try measure(gpa, io, w, round, before_label, base_dir, rows);
+                try measure(gpa, io, w, round, after_label, ".", rows);
+            } else {
+                try measure(gpa, io, w, round, after_label, ".", rows);
+                try measure(gpa, io, w, round, before_label, base_dir, rows);
+            }
+        };
+        return;
+    }
     for ([_][]const u8{ "spawn", "wake", "loop", "files", "lanes", "echo", "deadlines", "waits", "timers" }) |workload| {
         for (0..5) |round| {
             const rows = &.{ "--only", workload };
@@ -207,12 +228,20 @@ fn expectBefore(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const
 fn before(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !void {
     try installTests(gpa, io);
     try checked(gpa, io, &.{ zig, "build", "--list-steps" }, base_dir);
+    try expectBefore(gpa, io, writer, zig, "R1 cross-runtime spawning", "R1 cross-runtime spawning retains destination scheduler ownership");
+    try expectBefore(gpa, io, writer, zig, "R1 cross-runtime wake retains destination", "R1 cross-runtime wake retains destination scheduler ownership");
     try expectBefore(gpa, io, writer, zig, "executor rejection", "executor rejection finishes without running a lane call inline");
     try expectBefore(gpa, io, writer, zig, "disabled owned lane", "a disabled owned lane refuses instead of queueing forever");
     if (builtin.os.tag == .linux) {
         try expectBefore(gpa, io, writer, zig, "R1 Linux dialing", "TODO implement netInterfaceName for linux");
         try expectBefore(gpa, io, writer, zig, "R1 native open", "R1 native open and stat use no inline file lane");
         try expectBefore(gpa, io, writer, zig, "R1 ended deep", "R1 ended deep stacks discard unused pages before recycling");
+        try checked(gpa, io, &.{ "git", "reset", "--hard", ownership_baseline }, base_dir);
+        try focusTests(gpa, io);
+        const ownership_tests = try Io.Dir.cwd().readFileAlloc(io, "src/r1_regression_test.zig", gpa, .unlimited);
+        defer gpa.free(ownership_tests);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = base_dir ++ "/src/r1_regression_test.zig", .data = ownership_tests });
+        try expectBefore(gpa, io, writer, zig, "R1 cross-runtime pinned", "R1 cross-runtime pinned wake retains no source-ring target reference");
         // The shutdown bug was introduced in the first pushed LATER
         // checkpoint, whose exact public source is retained in history.
         try checked(gpa, io, &.{ "git", "reset", "--hard", "f110c7943327868ef21172e80320f34355e0498c" }, base_dir);

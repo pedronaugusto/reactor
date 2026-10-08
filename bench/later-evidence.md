@@ -20,7 +20,7 @@ native ownership checks live in `src/later_test.zig` and `src/r1_regression_test
 | Zero-copy send (L5) | Ordinary send | Probed contiguous SEND_ZC; primary and notification ownership independent, notification-first handling, cancellation drain, ordinary-send fallback for unsupported requests. Native byte validation before buffer poisoning; invalid SEND_ZC flags force native EINVAL and verify the ordinary-SEND retry while the same frame stays retained. Opt-in `zero_copy_min`; default disabled by measurements. |
 | SQPOLL (L6) | No option | Explicit setup, optional CPU affinity, idle wake handling, no backend downgrade. Idle NOP and published fixed-file close-reference fence checks. |
 | Fixed files (R1) | `backend/uring/Files.zig`; `files_test.zig` covers rewriting unsubmitted references. Regular files only; sockets/pipes excluded. | Preserved; SQPOLL consumption fence added before unregister. Existing cross-ring close proof retained in `uring_ext_test.zig`. |
-| Cross-ring messages (R1) | Eventfd wakes | MSG_RING target CQ wake; target deferred task work entered before inspection; eventfd fallback on unavailable/failed messaging. Repeated wakes coalesce until target consumption; a deliberately invalid native message request verifies the source-CQE eventfd fallback. Shutdown keeps direct eventfd wakes because stop joins without another source poll. |
+| Cross-ring messages (R1) | Eventfd wakes | MSG_RING target CQ wake; target deferred task work entered before inspection; eventfd fallback on unavailable/failed messaging. Repeated wakes coalesce until target consumption; a deliberately invalid native message request verifies the source-CQE eventfd fallback. Shutdown keeps direct eventfd wakes because stop joins without another source poll. Messages are confined to one runtime; foreign wakes use eventfd and retain no destination pointer. Cross-runtime spawn/wake ownership and source-SQE regressions cover independent host runtimes. |
 | Linked timeouts (R1) | Wheel cancellation | IO_LINK plus absolute LINK_TIMEOUT, reserved two-entry submission, primary/timer lifetime drain, timeout mapping and batch retry. All generated completion permutations plus native blocked TCP read and retry. |
 | Native open/stat (R1) | File worker/lane routes | Linux OPENAT/STATX, exact std flags/errors and lock behavior; native path bypasses inline general lane. Differential file content, size, resize, missing/exclusive errors and fault injection. Windows metadata remains on its designed file worker/lane route. |
 | Native process waits (R1) | Linux pidfd; Windows wait-completion packets in `runtime/io_ops.zig`/`iocp_test.zig` | Linux WAITID where probed, pidfd fallback preserved; BSD/macOS process-watch wait before reaping. Zero wait-lane counters; historical Windows process tests preserved and rerun. |
@@ -76,9 +76,10 @@ performance misses are reported; they are not silently accepted as wins.
 - Before proof on exact main: rejected executor executes user code, cap-zero job never completes, Linux native open/stat increments inline counter four times, returned deep stack still contains byte 73, Linux interface bind panics in reverse name lookup. macOS native child wait increments the wait lane. Group-release and stop failures reproduce on the public first LATER checkpoint.
 - Earlier canceled/failed run IDs are retained in the final handoff; they are not passing evidence.
 
-Implementation checkpoint: `342c93dc982430e0b92aab740ce097990b4dc85e`.
-Only test fixtures, benchmark tooling, evidence and test-dependency pins changed
-after the measured production checkpoint `a55c5ec`. Final native validation is
+Historical implementation checkpoint: `342c93dc982430e0b92aab740ce097990b4dc85e`.
+Only verification and test-dependency pins changed between `a55c5ec` and that
+checkpoint. A subsequent scheduler ownership fix is measured separately below;
+its native validation will be appended. Historical native validation is
 recorded below; completion is still withheld for the remaining owner choices
 and measured performance misses. No merge tier has been dispatched by this batch.
 
@@ -274,3 +275,45 @@ this batch exposed them. A separate exact-main macOS group stress did not
 reproduce the release assertion; it is not claimed as failing-before proof.
 The mutable-engine copies were exposed by the later Debug layout under TSan;
 the fixed pointer storage passed conformance and expanded sanitizer checks.
+
+
+## Independent runtime ownership follow-up
+
+Exact main and `7e7e851` could put foreign spawned tasks and unpinned wakes on
+another runtime's local queue. Two native runtimes on separate host threads
+now regress both paths by recording the scheduler that actually runs each
+task. Both assertions fail on exact main (the local before harness retains the actual seeds; hosted
+evidence will retain them publicly) and pass
+locally after the fix. The before harness records the actual seeds.
+
+Ring-message fallback retained a raw destination engine pointer in the source
+SQE. Across independent runtimes the destination could be freed first.
+Scheduler messages now require equal scheduler identity; foreign wakes use
+ordinary wake and leave the source SQ unchanged. The pinned-wake regression
+waits until the destination is parked, then asserts no source SQE was added.
+It must fail on `7e7e851` on native Linux. `wakeFrom` belongs to the internal
+loop layer, with its shared-lifetime requirement, and is removed from the
+unreleased public Loop surface. Standalone embedding continues to use `wake`.
+
+Napkin: local spawn and wake add one cached scheduler-pointer comparison and
+predictable branch. Same-runtime MSG_RING adds the same comparison; no syscall
+is added there. Foreign eventfd incurs a syscall in exchange for independent
+lifetime safety. `zig build later-ownership` compiles `7e7e851` and current
+source in ReleaseFast and alternates five rounds for spawn/wake with zero and
+one worker. [Raw macOS rounds](later-results/macos-ownership-7e7e851.jsonl):
+
+| Row | Before → after | Change |
+| --- | --- | --- |
+| Empty spawn, workers=0 | 110.871 → 109.286 ns | −1.4% |
+| Group spawn, workers=0 | 257.815 → 278.529 ns | +8.0%; raised |
+| Wake, workers=0 | 63.963 → 64.479 ns | +0.8% |
+| Empty spawn, workers=1 | 141.814 → 127.453 ns | −10.1% |
+| Group spawn, workers=1 | 176.597 → 172.491 ns | −2.3% |
+| Wake, workers=1 | 89.572 → 89.879 ns | +0.3% |
+
+Preflight main advanced during this follow-up. Its new green pin is
+`b28046cc22055fcd32640117fc0e6965283a8ae5`, validated upstream by
+[37823307574](https://github.com/pedronaugusto/preflight/actions/runs/37823307574).
+The caller is regenerated with `zig build plan -- --workflow` rather than
+hand-edited matrices. Shakedown remains at `9357a9a`. Local cross-runtime
+regressions, Linux cross compilation and lint pass; hosted checks are pending.

@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const shakedown = @import("shakedown");
 const reactor = @import("reactor.zig");
 const Loop = reactor.Loop;
+const loop_internal = @import("loop/internal.zig");
 const Runtime = reactor.Runtime;
 const Driver = @import("testing/Driver.zig");
 const perform = @import("ops/perform.zig");
@@ -351,11 +352,11 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     var target: Loop = undefined;
     try target.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8 });
     defer target.deinit(testing.allocator);
-    target.wakeFrom(&source);
+    loop_internal.wakeFrom(&target, &source);
     const ring = &source.backend.io_uring.ring;
     try testing.expectEqual(linux.IORING_OP.MSG_RING, ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].opcode);
     const tail = ring.sq.sqe_tail;
-    for (0..1024) |_| target.wakeFrom(&source);
+    for (0..1024) |_| loop_internal.wakeFrom(&target, &source);
     try testing.expectEqual(tail, ring.sq.sqe_tail);
     _ = try source.run(.nowait);
     // A DEFER_TASKRUN target must enter before remote task work is
@@ -371,7 +372,7 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     try testing.expect(!target.backend.io_uring.wake_pending.load(.acquire));
     // A failed source CQE must clear coalescing and use the retained
     // target's eventfd. Corrupt only our still-unsubmitted request.
-    target.wakeFrom(&source);
+    loop_internal.wakeFrom(&target, &source);
     ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].fd = -1;
     for (0..100) |_| {
         _ = try source.run(.nowait);
@@ -382,7 +383,7 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     try testing.expect(!target.backend.io_uring.message_pending.load(.acquire));
     _ = try target.run(.nowait);
     source.backend.io_uring.features.msg_ring = false;
-    target.wakeFrom(&source);
+    loop_internal.wakeFrom(&target, &source);
     try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
     _ = try target.run(.nowait);
     _ = try source.run(.nowait);

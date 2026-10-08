@@ -562,16 +562,6 @@ const Fired = struct {
     }
 };
 
-/// The caller owns source on this thread. A message wakes another ring;
-/// other backends and foreign threads use the target's ordinary wake.
-pub fn wakeFrom(l: *Loop, source: *Loop) void {
-    l.woken.store(true, .release);
-    if (comptime builtin.os.tag == .linux) if (source != l and source.backend == .io_uring and l.backend == .io_uring) {
-        if (source.backend.io_uring.messageWake(l.backend.io_uring)) return;
-    };
-    l.backend.wake();
-}
-
 /// Backend pressure can release kernel references during submission, but
 /// user callbacks remain owned by run's ready queue.
 fn installPressure(l: *Loop) void {
