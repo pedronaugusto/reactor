@@ -1,0 +1,21 @@
+{"baseline":"46f6da8cba6b20ac3bc8e4cd6cba1d35861f19e4","os":"linux","arch":"x86_64"}
+{"round":0,"variant":"main-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":780535.945,"unit":"ns/call"}}
+{"round":0,"variant":"later-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":762299.11,"unit":"ns/call"}}
+{"round":1,"variant":"later-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":766261.34,"unit":"ns/call"}}
+{"round":1,"variant":"main-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":766674.94,"unit":"ns/call"}}
+{"round":2,"variant":"main-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":776918.75,"unit":"ns/call"}}
+{"round":2,"variant":"later-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":754258.295,"unit":"ns/call"}}
+{"round":3,"variant":"later-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":756796.47,"unit":"ns/call"}}
+{"round":3,"variant":"main-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":779606.575,"unit":"ns/call"}}
+{"round":4,"variant":"main-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":781920.305,"unit":"ns/call"}}
+{"round":4,"variant":"later-costs","measurement":{"io":"reactor","workload":"process","name":"spawn exit-zero child + wait","value":762908.58,"unit":"ns/call"}}
+{"round":0,"variant":"main-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":914.279,"unit":"ns/call"}}
+{"round":0,"variant":"later-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":80158.401,"unit":"ns/call"}}
+{"round":1,"variant":"later-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":82313.314,"unit":"ns/call"}}
+{"round":1,"variant":"main-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":865.723,"unit":"ns/call"}}
+{"round":2,"variant":"main-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":873.66,"unit":"ns/call"}}
+{"round":2,"variant":"later-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":81388.534,"unit":"ns/call"}}
+{"round":3,"variant":"later-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":81069.395,"unit":"ns/call"}}
+{"round":3,"variant":"main-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":853.765,"unit":"ns/call"}}
+{"round":4,"variant":"main-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":887.289,"unit":"ns/call"}}
+{"round":4,"variant":"later-costs","measurement":{"io":"reactor","workload":"stacks","name":"deep and shallow park + await","value":81673.823,"unit":"ns/call"}}

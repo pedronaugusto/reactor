@@ -369,6 +369,18 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     }
     try testing.expect(target.backend.io_uring.ring.cq.head.* != head);
     try testing.expect(!target.backend.io_uring.wake_pending.load(.acquire));
+    // A failed source CQE must clear coalescing and use the retained
+    // target's eventfd. Corrupt only our still-unsubmitted request.
+    target.wakeFrom(&source);
+    ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].fd = -1;
+    for (0..100) |_| {
+        _ = try source.run(.nowait);
+        if (target.backend.io_uring.wake_pending.load(.acquire)) break;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
+    try testing.expect(!target.backend.io_uring.message_pending.load(.acquire));
+    _ = try target.run(.nowait);
     source.backend.io_uring.features.msg_ring = false;
     target.wakeFrom(&source);
     try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
@@ -475,33 +487,39 @@ test "later: native zero-copy send completes ownership before payload reuse" {
     };
     defer loop.deinit(testing.allocator);
     if (!loop.backend.io_uring.features.zero_copy) return error.SkipZigTest;
-    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
-    defer server.deinit(testing.io);
-    const stream = try server.socket.address.connect(testing.io, .{ .mode = .stream });
-    defer stream.close(testing.io);
-    const peer = try server.accept(testing.io);
-    defer peer.close(testing.io);
-    var payload: [64 << 10]u8 = @splat(0x6d);
-    var reader = try testing.io.concurrent(drainPayload, .{ peer.socket, payload.len });
-    defer _ = reader.cancel(testing.io) catch {};
-    var sent: usize = 0;
-    var notified = false;
-    while (sent < payload.len) {
-        var op: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{payload[sent..]} } } } };
-        try loop.submit(&op);
-        try testing.expectEqual(linux.IORING_OP.SEND_ZC, loop.backend.io_uring.ring.sq.sqes[(loop.backend.io_uring.ring.sq.sqe_tail -% 1) & loop.backend.io_uring.ring.sq.mask].opcode);
-        var out: [1]*Loop.Op = undefined;
-        while (loop.reap(&out).len == 0) _ = try loop.run(.once);
-        const n = try (try op.result.io).net_write;
-        try testing.expect(n > 0);
-        try testing.expect(op.state.uring.ready());
-        notified = notified or op.state.uring.notification_seen;
-        @memset(payload[sent..][0..n], 0);
-        sent += n;
+    for ([_]bool{ false, true }) |invalid| {
+        var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
+        defer server.deinit(testing.io);
+        const stream = try server.socket.address.connect(testing.io, .{ .mode = .stream });
+        defer stream.close(testing.io);
+        const peer = try server.accept(testing.io);
+        defer peer.close(testing.io);
+        var payload: [64 << 10]u8 = @splat(0x6d);
+        var reader = try testing.io.concurrent(drainPayload, .{ peer.socket, payload.len });
+        defer _ = reader.cancel(testing.io) catch {};
+        var sent: usize = 0;
+        var notified = false;
+        while (sent < payload.len) {
+            var op: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{payload[sent..]} } } } };
+            try loop.submit(&op);
+            try testing.expectEqual(linux.IORING_OP.SEND_ZC, loop.backend.io_uring.ring.sq.sqes[(loop.backend.io_uring.ring.sq.sqe_tail -% 1) & loop.backend.io_uring.ring.sq.mask].opcode);
+            // Unknown SEND_ZC flags produce native EINVAL; ordinary SEND must
+            // retry while the same operation and buffer remain retained.
+            if (invalid) loop.backend.io_uring.ring.sq.sqes[(loop.backend.io_uring.ring.sq.sqe_tail -% 1) & loop.backend.io_uring.ring.sq.mask].ioprio = std.math.maxInt(u16);
+            var out: [1]*Loop.Op = undefined;
+            while (loop.reap(&out).len == 0) _ = try loop.run(.once);
+            const n = try (try op.result.io).net_write;
+            try testing.expect(n > 0);
+            try testing.expect(op.state.uring.ready());
+            if (invalid) try testing.expect(op.state.uring.use_copy);
+            notified = notified or op.state.uring.notification_seen;
+            @memset(payload[sent..][0..n], 0);
+            sent += n;
+        }
+        try reader.await(testing.io);
+        if (!invalid) try testing.expect(notified);
+        try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
     }
-    try reader.await(testing.io);
-    try testing.expect(notified);
-    try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
 }
 
 const FaultContext = struct {
