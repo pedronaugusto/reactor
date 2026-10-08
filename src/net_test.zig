@@ -266,3 +266,31 @@ test "a receiver holds no buffer while idle and lends one per read" {
     try client.shutdown(io, .send);
     try testing.expectError(error.EndOfStream, receiver.next(io, ms(5000)));
 }
+
+test "connect keeps a successful attempt when no task can run its timer" {
+    const OneTask = struct {
+        var attempts: std.atomic.Value(u32) = .init(0);
+        fn concurrent(_: ?*anyopaque, group: *Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            if (attempts.fetchAdd(1, .monotonic) != 0) return error.ConcurrencyUnavailable;
+            const base = testing.io;
+            return base.vtable.groupConcurrent(base.userdata, group, context, alignment, start);
+        }
+    };
+    const OnlyConnect = shakedown.Layer(u8, .{ .groupConcurrent = OneTask.concurrent });
+    var layer: OnlyConnect = .init(testing.io, 0);
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(testing.io, .{ .reuse_address = true });
+    defer listener.deinit(testing.io);
+    const result = try net.connect(layer.io(), &listener.socket.address, .{ .timeout = ms(5000) });
+    defer result.stream.close(testing.io);
+    try testing.expect(!result.timeout_enforced);
+}
+
+test "connect binds its requested local endpoint" {
+    const io = testing.io;
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const result = try net.connect(io, &listener.socket.address, .{ .local_address = .{ .ip4 = .loopback(0) }, .timeout = ms(5000) });
+    defer result.stream.close(io);
+    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &result.stream.socket.address.ip4.bytes);
+    try testing.expect(result.stream.socket.address.getPort() != 0);
+}

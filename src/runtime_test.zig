@@ -350,16 +350,16 @@ test "a canceled libc lookup detaches while its bounded storage stays alive" {
         var started: Io.Event = .unset;
         var release: Io.Event = .unset;
         var finished: std.atomic.Value(bool) = .init(false);
-        fn lookup(_: []const u8, port: u16, _: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress) getaddrinfo.Error![]Io.net.IpAddress {
+        fn lookup(_: []const u8, port: u16, _: ?Io.net.IpAddress.Family, out: []Io.net.IpAddress, _: ?*[254]u8) getaddrinfo.Error!getaddrinfo.Result {
             started.set(runtime_io);
             release.waitUncancelable(testing.io);
             out[0] = .{ .ip4 = .loopback(port) };
             finished.store(true, .release);
-            return out[0..1];
+            return .{ .addresses = out[0..1] };
         }
         fn run(t: *Threads) !usize {
             var out: [2]Io.net.IpAddress = undefined;
-            return t.runtime.core.lookup.resolve(&t.runtime.core.scheduler, &t.runtime.core.lanes, lookup, try .init("slow.example"), .{ .port = 80 }, &out);
+            return (try t.runtime.core.lookup.resolve(&t.runtime.core.scheduler, &t.runtime.core.lanes, lookup, try .init("slow.example"), .{ .port = 80 }, &out)).count;
         }
     };
     var t: Threads = undefined;

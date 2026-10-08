@@ -24,6 +24,10 @@ const Threaded = Io.Threaded;
 const op = @import("op.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
+const Receive = @import("uring/Receive.zig");
+const Accept = @import("uring/Accept.zig");
+const Files = @import("uring/Files.zig");
+const Allocator = std.mem.Allocator;
 const results = @import("uring/results.zig");
 
 pub const Features = packed struct(u6) {
@@ -78,6 +82,8 @@ const Tag = enum(u3) {
     wake = 3,
     /// A completion nobody waits for (a cancel's, a close's first step).
     ignore = 4,
+    listener = 5,
+    receiver = 6,
 };
 
 fn userData(address: u64, tag: Tag) u64 {
@@ -90,6 +96,9 @@ fn tagOf(user_data: u64) Tag {
 }
 
 ring: linux.IoUring,
+next_group: std.atomic.Value(u32) = .init(1),
+accepts: Accept,
+files: Files,
 /// Opcodes the kernel has.
 supported: std.EnumSet(linux.IORING_OP),
 features: Features,
@@ -104,9 +113,11 @@ enabled: bool,
 /// The kernel flags the ring when completions wait to be run.
 taskrun_flag: bool = false,
 
-pub fn init(options: Options) InitError!Uring {
+pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uring {
     var u: Uring = .{
         .ring = undefined,
+        .accepts = undefined,
+        .files = undefined,
         .supported = .empty,
         .features = .{},
         .wake_fd = undefined,
@@ -115,6 +126,11 @@ pub fn init(options: Options) InitError!Uring {
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
+    u.accepts = try Accept.init(gpa, options.entries, !options.off.multishot_accept and u.has(.ACCEPT));
+    errdefer u.accepts.deinit(gpa);
+    u.files = try Files.init(gpa, &u.ring, options.entries, !options.off.fixed_files);
+    errdefer u.files.deinit(gpa);
+    u.features.fixed_files = u.files.enabled;
     const efd = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
     if (linux.errno(efd) != .SUCCESS) return error.SystemResources;
     u.wake_fd = @intCast(efd);
@@ -180,17 +196,48 @@ pub fn enable(u: *Uring) void {
     u.enabled = true;
 }
 
-pub fn deinit(u: *Uring) void {
+pub fn deinit(u: *Uring, gpa: Allocator) void {
+    u.drainListeners();
+    u.accepts.deinit(gpa);
+    u.files.deinit(gpa);
     if (u.notify_fd) |fd| _ = linux.close(fd);
     _ = linux.close(u.wake_fd);
     u.ring.deinit();
     u.* = undefined;
 }
 
+/// Persistent listeners are reaped on the ring's owner before it exits.
+pub fn drainListeners(u: *Uring) void {
+    for (u.accepts.records) |*r| if (r.fd != -1) u.accepts.close(u, r.fd);
+    while (true) {
+        const active = for (u.accepts.records) |r| {
+            if (r.armed) break true;
+        } else false;
+        if (!active) return;
+        u.enter(.forever) catch |err| std.debug.panic("reactor: draining listeners failed: {t}", .{err});
+        var cqes: [256]linux.io_uring_cqe = undefined;
+        const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // unreachable: the ring remains valid until the terminal completions
+        for (cqes[0..count]) |cqe| switch (tagOf(cqe.user_data)) {
+            .listener => {
+                const record: *Accept.Record = @ptrFromInt(cqe.user_data & ~@as(u64, 7)); // safe: a live table entry owns this token
+                if (cqe.res >= 0) _ = linux.close(cqe.res);
+                if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.accepts.reset(record);
+            },
+            .wake, .ignore => {},
+            else => std.debug.panic("reactor: an operation outlived its owner", .{}),
+        };
+    }
+}
+
+/// Persistent kernel ownership survives the task that first used it.
+pub fn contains(u: *const Uring, fd: linux.fd_t) bool {
+    return u.files.contains(fd) or u.accepts.contains(fd);
+}
+
 // Submission.
 
 /// An entry to fill: flushes the queue to the kernel when it is full.
-fn entry(u: *Uring) *linux.io_uring_sqe {
+pub fn entry(u: *Uring) *linux.io_uring_sqe {
     while (true) {
         return u.ring.get_sqe() catch {
             _ = u.ring.submit() catch |err| switch (err) {
@@ -205,15 +252,16 @@ fn entry(u: *Uring) *linux.io_uring_sqe {
 pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
     const ud = userData(@intFromPtr(o), .op); // safe: read back as the `Op` in `complete`
     switch (o.kind) {
-        .io => |*operation| u.submitIo(o, operation, ud),
-        .accept => |fd| {
-            o.state.scratch = .{ .io_uring = .{ .address = undefined } };
-            const a = &o.state.scratch.io_uring.address;
-            a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
-            const sqe = u.entry();
-            sqe.prep_accept(fd, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // safe: the storage is a socket address, written by the kernel
-            sqe.user_data = ud;
+        .raw => |raw| switch (raw) {
+            .uring => |request| {
+                const sqe = u.entry();
+                request.prepare(request.context, sqe);
+                sqe.user_data = ud;
+            },
+            .windows => unreachable, // unreachable: only uring requests reach Linux
         },
+        .io => |*operation| u.submitIo(o, operation, ud),
+        .accept => if (!u.accepts.submit(u, o)) u.submitSingleAccept(o),
         .connect => |c| {
             o.state.scratch = .{ .io_uring = .{ .address = undefined } };
             const a = &o.state.scratch.io_uring.address;
@@ -230,19 +278,24 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             const sqe = u.entry();
             sqe.prep_read(r.file, r.buffer[0..@min(r.buffer.len, max_rw)], r.offset);
             sqe.user_data = ud;
+            u.files.use(&u.ring, sqe);
         },
         .write_at => |w| {
             const sqe = u.entry();
             sqe.prep_write(w.file, w.bytes[0..@min(w.bytes.len, max_rw)], w.offset);
             sqe.user_data = ud;
+            u.files.use(&u.ring, sqe);
         },
         .sync => |fd| {
             const sqe = u.entry();
             sqe.prep_fsync(fd, 0);
             sqe.user_data = ud;
+            u.files.use(&u.ring, sqe);
         },
         .close => |fd| u.submitClose(fd, ud),
         .abort => |fd| {
+            u.accepts.close(u, fd);
+            u.files.remove(u, fd);
             const sqe = u.entry();
             sqe.prep_cancel_fd(fd, linux.IORING_ASYNC_CANCEL_ALL);
             sqe.user_data = ud;
@@ -265,10 +318,21 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             switch (w) {
                 .readable => |fd| sqe.prep_poll_add(fd, linux.POLL.IN),
                 .writable => |fd| sqe.prep_poll_add(fd, linux.POLL.OUT),
+                .object => unreachable, // unreachable: Windows objects do not exist on Linux
             }
             sqe.user_data = ud;
         },
     }
+}
+
+/// A kernel without multishot support uses ordinary accept requests.
+pub fn submitSingleAccept(u: *Uring, o: anytype) void {
+    o.state.scratch = .{ .io_uring = .{ .address = undefined } };
+    const a = &o.state.scratch.io_uring.address;
+    a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
+    const sqe = u.entry();
+    sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // safe: the kernel writes a socket address here
+    sqe.user_data = userData(@intFromPtr(o), .op); // safe: this operation's own token
 }
 
 /// The most one read or write moves: Linux's own cap.
@@ -317,11 +381,14 @@ fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void
         .device_io_control => unreachable, // unreachable: device control runs borrowed
     }
     sqe.user_data = ud;
+    u.files.use(&u.ring, sqe);
 }
 
 /// Ends every operation this ring holds on `fd`, then closes it; the
 /// close completes the operation.
 fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
+    u.accepts.close(u, fd);
+    u.files.remove(u, fd);
     if (u.has(.ASYNC_CANCEL)) {
         const cancel_sqe = u.entry();
         cancel_sqe.prep_cancel_fd(fd, linux.IORING_ASYNC_CANCEL_ALL);
@@ -335,6 +402,7 @@ fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
 }
 
 pub fn cancel(u: *Uring, o: anytype) void {
+    if (o.kind == .accept and u.accepts.cancel(o)) return;
     const sqe = u.entry();
     sqe.prep_cancel(userData(@intFromPtr(o), .op), 0); // safe: the operation's own user data
     sqe.flags |= linux.IOSQE_CQE_SKIP_SUCCESS;
@@ -371,6 +439,7 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
         else => unreachable, // unreachable: the rest go by readiness, device control never pends
     }
     sqe.user_data = userData(@backingInt(token), .batch);
+    u.files.use(&u.ring, sqe);
 }
 
 pub fn cancelPending(u: *Uring, token: pending.Token) void {
@@ -397,7 +466,8 @@ fn socketOf(operation: Io.Operation) linux.fd_t {
 
 pub fn poll(u: *Uring, wait: Wait, sink: anytype) error{ SystemResources, Unexpected }!void {
     if (!u.wake_armed) u.armWake();
-    try u.enter(wait);
+    const delivered = u.accepts.deliver(sink);
+    try u.enter(if (delivered) .nowait else wait);
     var cqes: [256]linux.io_uring_cqe = undefined;
     while (true) {
         const n = u.ring.copy_cqes(&cqes, 0) catch |err| switch (err) {
@@ -476,6 +546,14 @@ fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             _ = linux.read(u.wake_fd, @ptrCast(&u.wake_buffer), 8); // safe: eight bytes, as an eventfd reads
             u.wake_pending.store(false, .release);
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
+        },
+        .receiver => {
+            const r: *Receive = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the receiver owns this record through the terminal completion
+            r.deliver(cqe);
+        },
+        .listener => {
+            const r: *Accept.Record = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion
+            u.accepts.complete(u, r, cqe, sink);
         },
         .ignore => {},
     }

@@ -5,6 +5,7 @@
 //! from the kernel before the wait returns; the task is held on its
 //! processor meanwhile, where all of them complete.
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 
@@ -57,7 +58,7 @@ const Waiter = struct {
         const index = (@intFromPtr(o) - @intFromPtr(w.ops.ptr)) / @sizeOf(Loop.Op); // safe: `o` is an element of `w.ops`
         w.processor.release(handleOf(o.kind.wait));
         if (o.result.wait) |_| {
-            if (w.first == null) w.first = index;
+            w.first = if (w.first) |old| @min(old, index) else index;
         } else |err| switch (err) {
             // Ended by this wait's own cancels, or, when nobody here asked,
             // by a close of the descriptor: a read or write now reports it.
@@ -83,6 +84,7 @@ const Waiter = struct {
 fn handleOf(w: Loop.Waitable) Io.File.Handle {
     return switch (w) {
         .readable, .writable => |h| h,
+        .object => |h| if (builtin.os.tag == .windows) h else unreachable, // unreachable: only Windows has objects
     };
 }
 

@@ -7,11 +7,14 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys.zig",
         "src/sys/memory.zig",
         "src/sys/socket.zig",
+        "src/sys/dial.zig",
+        "src/sys/BufferRing.zig",
         "src/sys/Notify.zig",
         "src/sys/poll.zig",
         "src/sys/process.zig",
         "src/sys/win32.zig",
         "src/sys/getaddrinfo.zig",
+        "src/sys/lookup_windows.zig",
         "src/sys/receive.zig",
     } },
     .{ .name = "fibers, time and lanes", .patterns = &.{
@@ -29,6 +32,9 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/pending.zig",
         "src/backend/Uring.zig",
         "src/backend/uring/results.zig",
+        "src/backend/uring/Accept.zig",
+        "src/backend/uring/Receive.zig",
+        "src/backend/uring/Files.zig",
         "src/backend/wait.zig",
     } },
     .{ .name = "loop", .patterns = &.{
@@ -49,6 +55,10 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ops/batch.zig",
         "src/ops/lane_call.zig",
         "src/ops/readiness.zig",
+        "src/ops/resolve.zig",
+        "src/ops/resolve/order.zig",
+        "src/ops/lookup/windows.zig",
+        "src/ops/Lookup.zig",
     } },
     .{ .name = "runtime", .patterns = &.{
         "src/Runtime.zig",
@@ -62,6 +72,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "extensions", .patterns = &.{
         "src/ext.zig",
         "src/ext/native.zig",
+        "src/ext/kernel.zig",
         "src/ext/Wake.zig",
         "src/ext/Process.zig",
         "src/ext/wait.zig",
@@ -74,6 +85,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/net/abort.zig",
         "src/ext/net/Deadlines.zig",
         "src/ext/net/Receiver.zig",
+        "src/ext/net/receiver/Groups.zig",
     } },
     .{ .name = "public", .patterns = &.{
         "src/reactor.zig",

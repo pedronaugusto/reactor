@@ -71,9 +71,15 @@ pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usi
 }
 
 fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
+    if (timeout.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) {
+        return try once(io, set, 0) orelse error.Timeout;
+    };
     // A process that had ended when it was opened needs no wait.
     if (!is_windows) for (set, 0..) |m, i| switch (m) {
-        .process => |p| if (p.watch == .ended) return i,
+        .process => |p| if (p.watch == .ended) {
+            if (i > 0) if (try once(io, set[0..i], 0)) |earlier| return earlier;
+            return i;
+        },
         else => {},
     };
     const core = native.runtimeOf(io) orelse return sliced(io, set, timeout.toDeadline(io));
@@ -81,12 +87,14 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
     var members: [max]Loop.Waitable = undefined;
     if (descriptors(set, &members)) {
         const p = Scheduler.processor().?;
-        return readiness.first(&core.scheduler, members[0..set.len], perform.deadline(p, timeout)) catch |err| switch (err) {
+        const index = readiness.first(&core.scheduler, members[0..set.len], perform.deadline(p, timeout)) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             error.Timeout => error.Timeout,
             error.Unsupported => error.Unsupported,
             error.Unexpected, error.SystemResources => error.Unexpected,
         };
+        if (index > 0) if (try once(io, set[0..index], 0)) |earlier| return earlier;
+        return index;
     }
     const lane_io = core.lanes.executor(.wait);
     return lane_call.call(&core.scheduler, &core.lanes, .wait, &sliced, .{ lane_io, set, timeout.toDeadline(io) });
@@ -95,7 +103,16 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
 /// Each member as a descriptor the loop can wait on; false when one is
 /// not.
 fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
-    if (is_windows) return false;
+    if (is_windows) {
+        for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
+            .readable => |h| .{ .readable = h },
+            .writable => |h| .{ .writable = h },
+            .process => |p| .{ .object = p.watch },
+            .wake => |w| .{ .object = w.notify.handle },
+            .object => |h| .{ .object = h },
+        };
+        return true;
+    }
     for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
         .readable => |h| .{ .readable = h },
         .writable => |h| .{ .writable = h },
@@ -112,6 +129,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
 /// Waits on the calling thread, in slices between which `io` is asked
 /// for a cancel, until a member is ready or `deadline` passes.
 fn sliced(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!usize {
+    if (try once(io, set, 0)) |i| return i;
     while (true) {
         try io.checkCancel();
         const slice = sliceOf(io, deadline) orelse return error.Timeout;
@@ -187,7 +205,9 @@ fn onceWindows(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
     if (sockets) for (set, 0..) |m, i| switch (m) {
         .readable => |h| if (try socketReady(io, h, .readable)) return i,
         .writable => |h| if (try socketReady(io, h, .writable)) return i,
-        else => {},
+        .process => |p| if (win32.WaitForSingleObject(p.watch, 0) == win32.wait_object_0) return i,
+        .object => |h| if (win32.WaitForSingleObject(h, 0) == win32.wait_object_0) return i,
+        .wake => |w| if (win32.WaitForSingleObject(w.notify.handle, 0) == win32.wait_object_0) return i,
     };
     if (n == 0) {
         try io.sleep(.fromMilliseconds(ms), .awake);

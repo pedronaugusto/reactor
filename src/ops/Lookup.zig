@@ -11,7 +11,8 @@ const Lanes = @import("../Lanes.zig");
 const getaddrinfo = @import("../sys/getaddrinfo.zig");
 
 pub const capacity = 64;
-pub const Provider = *const fn ([]const u8, u16, ?net.IpAddress.Family, []net.IpAddress) getaddrinfo.Error![]net.IpAddress;
+pub const Provider = *const fn ([]const u8, u16, ?net.IpAddress.Family, []net.IpAddress, ?*[254]u8) getaddrinfo.Error!getaddrinfo.Result;
+pub const Result = struct { count: usize, canonical: ?net.HostName = null };
 const State = enum(u8) { pending, completed, canceled };
 
 const Record = struct {
@@ -30,7 +31,8 @@ const Record = struct {
     port: u16 = 0,
     family: ?net.IpAddress.Family = null,
     addresses: [capacity]net.IpAddress = undefined,
-    result: net.HostName.LookupError!usize = undefined,
+    canonical_buffer: [254]u8 = undefined,
+    result: net.HostName.LookupError!getaddrinfo.Result = undefined,
     lanes: *Lanes = undefined,
 
     fn notify(r: *Record) void {
@@ -53,8 +55,7 @@ const Record = struct {
     fn run(job: *Lanes.Job) void {
         const r: *Record = @alignCast(@fieldParentPtr("job", job)); // safe: the job belongs to this request
         r.result = if (r.state.load(.acquire) == .canceled) error.Canceled else result: {
-            const addresses = r.provider(r.name[0..r.name_len], r.port, r.family, &r.addresses) catch break :result error.UnknownHostName;
-            break :result addresses.len;
+            break :result r.provider(r.name[0..r.name_len], r.port, r.family, &r.addresses, &r.canonical_buffer) catch error.UnknownHostName;
         };
     }
 
@@ -100,7 +101,7 @@ fn acquire(l: *Lookup) ?*Record {
 
 /// Completion wins a race with cancellation; an uninterruptible libc
 /// call whose caller was canceled holds its slot until it actually ends.
-pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, name: net.HostName, options: net.HostName.LookupOptions, out: []net.IpAddress) net.HostName.LookupError!usize {
+pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, name: net.HostName, options: net.HostName.LookupOptions, out: []net.IpAddress) net.HostName.LookupError!Result {
     const t = Scheduler.current() orelse return direct(lanes, provider, name, options, out);
     if (lanes.inlined()) return direct(lanes, provider, name, options, out);
     const r = l.acquire() orelse return error.SystemResources;
@@ -122,12 +123,19 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     Scheduler.park(.{ .func = Record.submit, .context = r });
     t.leaveWait();
     if (r.state.load(.acquire) == .canceled) return t.acknowledge();
-    const n = @min(try r.result, out.len);
+    const result = try r.result;
+    const n = @min(result.addresses.len, out.len);
     @memcpy(out[0..n], r.addresses[0..n]);
-    return n;
+    var canonical: ?net.HostName = null;
+    if (options.canonical_name_buffer) |buffer| if (result.canonical) |name_result| {
+        @memcpy(buffer[0..name_result.bytes.len], name_result.bytes);
+        canonical = net.HostName.init(buffer[0..name_result.bytes.len]) catch null;
+    };
+    return .{ .count = n, .canonical = canonical };
 }
 
-fn direct(lanes: *Lanes, provider: Provider, name: net.HostName, options: net.HostName.LookupOptions, out: []net.IpAddress) net.HostName.LookupError!usize {
+fn direct(lanes: *Lanes, provider: Provider, name: net.HostName, options: net.HostName.LookupOptions, out: []net.IpAddress) net.HostName.LookupError!Result {
     lanes.countInline(.lookup);
-    return (provider(name.bytes, options.port, options.family, out) catch return error.UnknownHostName).len;
+    const result = provider(name.bytes, options.port, options.family, out, options.canonical_name_buffer) catch return error.UnknownHostName;
+    return .{ .count = result.addresses.len, .canonical = result.canonical };
 }

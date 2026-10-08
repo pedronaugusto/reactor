@@ -2,6 +2,7 @@
 //! backend keep in it while it is under way. `Loop.Op` is built from these;
 //! the backends see an operation through these fields only.
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Wheel = @import("../Wheel.zig");
 
@@ -22,6 +23,8 @@ pub const Kind = union(enum) {
     timer: Io.Clock.Timestamp,
     /// Readiness of a descriptor.
     wait: Waitable,
+    /// A caller-prepared native request.
+    raw: Raw,
 };
 
 pub const Connect = struct {
@@ -43,6 +46,8 @@ pub const Waitable = union(enum) {
     readable: Io.File.Handle,
     /// The descriptor has room, or an error.
     writable: Io.File.Handle,
+    /// Windows: a waitable kernel object.
+    object: if (builtin.os.tag == .windows) std.os.windows.HANDLE else noreturn,
 
     pub const Error = error{ Unsupported, Unexpected };
 };
@@ -63,6 +68,7 @@ pub const Result = union {
     abort: usize,
     timer: Io.Cancelable!void,
     wait: (Waitable.Error || Io.Cancelable)!void,
+    raw: Io.Cancelable!RawResult,
 };
 
 pub const ConnectError = Io.net.IpAddress.ConnectError || Io.net.UnixAddress.ConnectError || Io.Cancelable;
@@ -93,3 +99,14 @@ pub fn State(comptime Scratch: type) type {
         scratch: Scratch = undefined,
     };
 }
+
+/// Backend escapes preserve the ordinary operation's cancellation lifetime.
+pub const Raw = union(enum) {
+    uring: struct { context: *anyopaque, prepare: *const fn (*anyopaque, *std.os.linux.io_uring_sqe) void },
+    windows: struct {
+        handle: std.os.windows.HANDLE,
+        context: *anyopaque,
+        start: *const fn (*anyopaque, *std.os.windows.IO_STATUS_BLOCK, *anyopaque) std.os.windows.NTSTATUS,
+    },
+};
+pub const RawResult = union(enum) { uring: i32, windows: std.os.windows.IO_STATUS_BLOCK };

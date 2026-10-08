@@ -10,12 +10,17 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const receive = @import("../../sys/receive.zig");
+const Scheduler = @import("../../Scheduler.zig");
+const Receive = @import("../../backend/uring/Receive.zig");
+const Groups = @import("receiver/Groups.zig");
+const native = @import("../native.zig");
 const wait = @import("../wait.zig");
 
 pool: *Pool,
 socket: Io.net.Socket.Handle,
 /// The buffer the last `next` lent; not to be touched.
 lent: ?u32 = null,
+native_state: if (builtin.os.tag == .linux) ?Native else void = if (builtin.os.tag == .linux) null else {},
 
 /// Buffers of one length, all allocated at `init`, taken and given back
 /// from any thread without a lock.
@@ -23,19 +28,25 @@ pub const Pool = struct {
     memory: []u8,
     buffer_len: u32,
     links: []u32,
+    lengths: []u32,
+    groups: if (builtin.os.tag == .linux) ?Groups else void = if (builtin.os.tag == .linux) null else {},
     /// The free list's head: an index plus one, and a tag against ABA.
     head: std.atomic.Value(u64) = .init(0),
 
     pub const Options = struct { buffer_len: u32 = 4096, buffers: u32 = 4096 };
-    pub const InitError = Allocator.Error;
+    pub const InitError = Groups.Error;
 
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Pool {
-        _ = io;
         std.debug.assert(options.buffer_len > 0);
         std.debug.assert(options.buffers > 0);
         const memory = try gpa.alloc(u8, @as(usize, options.buffer_len) * options.buffers);
         errdefer gpa.free(memory);
-        var p: Pool = .{ .memory = memory, .buffer_len = options.buffer_len, .links = try gpa.alloc(u32, options.buffers) };
+        const links = try gpa.alloc(u32, options.buffers);
+        errdefer gpa.free(links);
+        const lengths = try gpa.alloc(u32, options.buffers);
+        errdefer gpa.free(lengths);
+        var p: Pool = .{ .memory = memory, .buffer_len = options.buffer_len, .links = links, .lengths = lengths };
+        if (builtin.os.tag == .linux) p.groups = try Groups.init(gpa, io, memory, options.buffer_len, options.buffers);
         var i = options.buffers;
         while (i > 0) {
             i -= 1;
@@ -47,6 +58,8 @@ pub const Pool = struct {
     /// Every buffer given back.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
         _ = io;
+        if (builtin.os.tag == .linux) if (p.groups) |*groups| groups.deinit(gpa);
+        gpa.free(p.lengths);
         gpa.free(p.memory);
         gpa.free(p.links);
         p.* = undefined;
@@ -60,6 +73,7 @@ pub const Pool = struct {
     const Free = packed struct(u64) { index_plus_one: u32, tag: u32 };
 
     fn take(p: *Pool) ?u32 {
+        if (builtin.os.tag == .linux) if (p.groups != null) return null;
         var raw = p.head.load(.acquire);
         while (true) {
             const f: Free = @bitCast(raw);
@@ -88,8 +102,8 @@ pub fn init(io: Io, pool: *Pool, socket: Io.net.Socket.Handle) Receiver {
 
 /// Gives back a buffer still lent.
 pub fn deinit(r: *Receiver, io: Io) void {
-    _ = io;
     r.giveBack();
+    if (builtin.os.tag == .linux) if (r.native_state) |*state| state.close(io);
     r.* = undefined;
 }
 
@@ -100,6 +114,17 @@ pub const NextError = Io.Operation.NetRead.Error || error{ Timeout, EndOfStream 
 /// The bytes are borrowed until `release` or the next `next`.
 pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
     r.giveBack();
+    if (builtin.os.tag == .linux) if (r.pool.groups) |*groups| {
+        const core = native.runtimeOf(io) orelse return error.Unexpected;
+        if (!native.taskRuntime(core)) return error.Unexpected;
+        if (r.native_state == null) {
+            const p = Scheduler.processor().?;
+            r.native_state = .{ .receiver = r, .owner = p, .group = &groups.items[p.index], .io = io };
+            const state = &r.native_state.?;
+            state.request = .{ .socket = r.socket, .group = state.group.id, .context = state, .complete = Native.completed };
+        }
+        return r.native_state.?.next(io, timeout.toDeadline(io));
+    };
     const deadline = timeout.toDeadline(io);
     while (true) {
         wait.wait(io, .{ .readable = r.socket }, deadline) catch |err| return switch (err) {
@@ -137,6 +162,10 @@ pub fn release(r: *Receiver, bytes: []const u8) void {
 fn giveBack(r: *Receiver) void {
     const index = r.lent orelse return;
     r.lent = null;
+    if (builtin.os.tag == .linux) if (r.native_state) |*state| {
+        state.group.give(r.pool.memory, r.pool.buffer_len, index - state.group.first);
+        return;
+    };
     r.pool.give(index);
 }
 
@@ -148,3 +177,139 @@ fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8) (Io.Operation.NetRea
     const r = try result.net_read;
     return r.data_len;
 }
+
+/// Native requests stay pinned here until their terminal completion.
+const Native = struct {
+    receiver: *Receiver,
+    owner: *Scheduler.Processor,
+    group: *Groups.Group,
+    io: Io,
+    request: Receive = undefined,
+    lock: Io.Mutex = .init,
+    ready: Io.Event = .unset,
+    ended: Io.Event = .unset,
+    command: Scheduler.Errand = .{ .run = commandRun },
+    command_queued: bool = false,
+    closed: bool = false,
+    eof: bool = false,
+    failure: ?NextError = null,
+    head: ?u32 = null,
+    tail: ?u32 = null,
+
+    fn system() Io {
+        return Io.Threaded.global_single_threaded.io();
+    }
+
+    fn send(state: *Native, close_request: bool) void {
+        state.lock.lockUncancelable(system());
+        if (close_request) state.closed = true;
+        if (state.command_queued) {
+            state.lock.unlock(system());
+            return;
+        }
+        state.command_queued = true;
+        state.lock.unlock(system());
+        if (Scheduler.processor() == state.owner) commandRun(&state.command, state.owner) else state.owner.send(&state.command);
+    }
+
+    fn commandRun(command: *Scheduler.Errand, _: *Scheduler.Processor) void {
+        const state: *Native = @alignCast(@fieldParentPtr("command", command)); // safe: this command belongs to the receiver's native state
+        state.lock.lockUncancelable(system());
+        state.command_queued = false;
+        const closing = state.closed;
+        if (closing) {
+            state.request.cancel(state.group.ring);
+        } else if (!state.request.active and !state.eof) {
+            state.failure = null;
+            state.ended.reset();
+            state.owner.hold(state.receiver.socket);
+            state.request.arm(state.group.ring);
+        }
+        const ended = closing and !state.request.active;
+        state.lock.unlock(system());
+        if (ended) state.ended.set(state.io);
+    }
+
+    fn completed(context: *anyopaque, cqe: std.os.linux.io_uring_cqe) void {
+        const state: *Native = @ptrCast(@alignCast(context)); // safe: the receive request retained this native state
+        const pool = state.receiver.pool;
+        state.lock.lockUncancelable(system());
+        const final = cqe.flags & std.os.linux.IORING_CQE_F_MORE == 0;
+        if (final) state.owner.release(state.receiver.socket);
+        if (cqe.flags & std.os.linux.IORING_CQE_F_BUFFER != 0) {
+            const local: u32 = @as(u16, @truncate(cqe.flags >> 16));
+            std.debug.assert(local < state.group.count);
+            const index = state.group.first + local;
+            if (cqe.res <= 0 or state.closed) {
+                state.group.give(pool.memory, pool.buffer_len, local);
+            } else {
+                pool.lengths[index] = @intCast(cqe.res);
+                pool.links[index] = std.math.maxInt(u32);
+                if (state.tail) |tail| pool.links[tail] = index else state.head = index;
+                state.tail = index;
+            }
+        }
+        if (cqe.res == 0) state.eof = true;
+        if (cqe.res < 0 and !state.closed) state.failure = switch (cqe.err()) {
+            .NOBUFS, .NOMEM => error.SystemResources,
+            .CANCELED, .BADF, .NOTCONN => error.SocketUnconnected,
+            .CONNRESET => error.ConnectionResetByPeer,
+            else => error.Unexpected,
+        };
+        state.ready.set(state.io);
+        const ended = final and state.closed and !state.command_queued;
+        state.lock.unlock(system());
+        if (ended) state.ended.set(state.io);
+    }
+
+    fn take(state: *Native) NextError!?[]const u8 {
+        state.lock.lockUncancelable(system());
+        defer state.lock.unlock(system());
+        if (state.head) |index| {
+            const pool = state.receiver.pool;
+            const following = pool.links[index];
+            state.head = if (following == std.math.maxInt(u32)) null else following;
+            if (state.head == null) {
+                state.tail = null;
+                state.ready.reset();
+            }
+            state.receiver.lent = index;
+            return pool.buffer(index)[0..pool.lengths[index]];
+        }
+        if (state.eof) return error.EndOfStream;
+        if (state.failure) |failure| {
+            state.failure = null;
+            state.ready.reset();
+            return failure;
+        }
+        state.ready.reset();
+        return null;
+    }
+
+    fn next(state: *Native, io: Io, deadline: Io.Timeout) NextError![]const u8 {
+        if (try state.take()) |bytes| return bytes;
+        state.send(false);
+        while (true) {
+            state.ready.waitTimeout(io, deadline) catch |err| {
+                if (try state.take()) |bytes| return bytes;
+                if (err == error.Canceled) return error.Canceled;
+                if (deadline.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) return error.Timeout;
+                continue;
+            };
+            if (try state.take()) |bytes| return bytes;
+        }
+    }
+
+    fn close(state: *Native, io: Io) void {
+        state.send(true);
+        state.ended.waitUncancelable(io);
+        state.lock.lockUncancelable(system());
+        defer state.lock.unlock(system());
+        const pool = state.receiver.pool;
+        while (state.head) |index| {
+            const following = pool.links[index];
+            state.head = if (following == std.math.maxInt(u32)) null else following;
+            state.group.give(pool.memory, pool.buffer_len, index - state.group.first);
+        }
+    }
+};

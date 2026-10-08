@@ -277,3 +277,41 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
     };
     try testing.expect(frames > 0);
 }
+
+fn rawNop(_: void, sqe: *std.os.linux.io_uring_sqe) void {
+    sqe.prep_nop();
+}
+
+const RawRead = struct { fd: posix.fd_t, buffer: []u8 };
+fn rawRead(request: RawRead, sqe: *std.os.linux.io_uring_sqe) void {
+    sqe.prep_read(request.fd, request.buffer, std.math.maxInt(u64));
+}
+
+fn rawMultishot(_: void, sqe: *std.os.linux.io_uring_sqe) void {
+    sqe.prep_recv(0, &.{}, 0);
+    sqe.ioprio = std.os.linux.IORING_RECV_MULTISHOT;
+}
+
+test "kernel submit returns one completion and rejects a multishot lifetime" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    try testing.expectEqual(@as(i32, 0), try reactor.kernel.submit(r.io(), rawNop, {}, .none));
+    try testing.expectError(error.Unsupported, reactor.kernel.submit(r.io(), rawMultishot, {}, .none));
+}
+
+test "kernel submit reaps a timed out read before its buffer is poisoned" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    const fds = try pipe();
+    defer closeAll(&fds);
+    var buffer: [8]u8 = undefined;
+    try testing.expectError(error.Timeout, reactor.kernel.submit(r.io(), rawRead, RawRead{ .fd = fds[0], .buffer = &buffer }, ms(1)));
+    @memset(&buffer, 0xa5);
+    try testing.expectEqual(@as(usize, 8), posix.system.write(fds[1], "latebyte", 8));
+    try r.io().sleep(.fromMilliseconds(1), .awake);
+    try testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xa5)), &buffer);
+}

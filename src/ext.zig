@@ -10,3 +10,5 @@ pub const Job = @import("ext/Job.zig");
 pub const blocking = @import("ext/blocking.zig");
 pub const Signals = @import("ext/Signals.zig");
 pub const net = @import("ext/net.zig");
+
+pub const kernel = @import("ext/kernel.zig");

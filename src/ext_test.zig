@@ -297,3 +297,32 @@ test "Windows: console control events have listeners; the POSIX-only signals are
     try testing.expectError(error.Unsupported, reactor.Signals.start(io, &.{.window_change}));
     try testing.expectError(error.Timeout, s.next(io, ms(10)));
 }
+
+test "a zero timeout consumes a ready Wake and otherwise times out" {
+    const io = testing.io;
+    var wake = try reactor.Wake.init(io);
+    defer wake.deinit(io);
+    wake.signal();
+    try reactor.wait(io, .{ .wake = &wake }, ms(0));
+    try testing.expectError(error.Timeout, reactor.wait(io, .{ .wake = &wake }, ms(0)));
+}
+
+test "a blocking hook runs a library's raw call on the sync lane" {
+    try skipWithoutFibers();
+    const Call = struct {
+        fn run(context: *anyopaque) void {
+            const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the test passed the thread id
+            id.* = std.Thread.getCurrentId();
+        }
+    };
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    defer t.deinit();
+    var id: std.Thread.Id = undefined;
+    const hook = reactor.blockingHook(t.io());
+    hook.call(hook.context, Call.run, &id);
+    try testing.expect(id != std.Thread.getCurrentId());
+    const inline_hook = reactor.blockingHook(testing.io);
+    inline_hook.call(inline_hook.context, Call.run, &id);
+    try testing.expectEqual(std.Thread.getCurrentId(), id);
+}

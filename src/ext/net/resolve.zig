@@ -56,7 +56,7 @@ pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpA
     }
     var queue: Io.Queue(HostName.LookupResult) = .init(&buffer);
     var future = io.concurrent(HostName.lookup, .{ name, io, &queue, lookup_options }) catch {
-        if (getaddrinfo.available) return getaddrinfo.lookup(host, port, options.family, out) catch error.NameNotResolved;
+        if (getaddrinfo.available) return (getaddrinfo.lookup(host, port, options.family, out, null) catch return error.NameNotResolved).addresses;
         return error.ConcurrencyUnavailable;
     };
     defer future.cancel(io) catch {};

@@ -30,12 +30,10 @@ pub const Entry = *const fn (arg: *anyopaque, message: *const Switch) callconv(.
 /// Saves the running context into `s.old`, runs `s.new`, and returns the
 /// switch that resumed this context later.
 ///
-/// One switch in the whole program, never inlined: inlined at every site,
-/// optimized code may merge two sites' identical switches into one and
-/// pick the continuation after it from a register the switch has
-/// clobbered (seen on x86_64 in ReleaseFast as a parked task resuming into
-/// another site's code). As a call, the switch is opaque to its callers,
-/// and its own frame keeps the callee-saved registers on each stack.
+/// A call keeps the callee-saved registers in this stack's frame. The
+/// assembly ties its input to its returned message register: listing that
+/// fixed register as both an input and a clobber made LLVM omit the input
+/// move in optimized builds, so the switch read an unrelated address.
 pub noinline fn switchTo(s: *const Switch) *const Switch {
     return switch (builtin.cpu.arch) {
         .aarch64 => switchAarch64(s),

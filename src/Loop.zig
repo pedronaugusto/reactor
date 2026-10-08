@@ -127,11 +127,10 @@ const List = struct {
 /// Builds the backend `options` names. io_uring: the calling thread is
 /// the ring's only submitter for the loop's life.
 pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
-    _ = gpa;
     const entries = options.submission_entries orelse ringEntries(options.max_ops);
     const native: backends.Backend = switch (options.backend) {
         .auto, .io_uring => if (builtin.os.tag == .linux) .{
-            .io_uring = backends.Uring.init(.{
+            .io_uring = backends.Uring.init(gpa, .{
                 .entries = entries,
                 // The kernel takes at most 65,536; operations beyond the
                 // queue's size wait in the kernel (no completion is dropped).
@@ -142,6 +141,7 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
                 error.BackendUnavailable => error.BackendUnavailable,
                 error.SystemResources => error.SystemResources,
                 error.Unexpected => error.Unexpected,
+                error.OutOfMemory => error.OutOfMemory,
             },
         } else return error.BackendUnavailable,
         .epoll, .kqueue, .iocp => return error.BackendUnavailable,
@@ -166,9 +166,8 @@ pub fn adopt(l: *Loop) void {
 }
 
 pub fn deinit(l: *Loop, gpa: Allocator) void {
-    _ = gpa;
     assert(l.in_flight == 0);
-    l.backend.deinit();
+    l.backend.deinit(gpa);
     l.* = undefined;
 }
 

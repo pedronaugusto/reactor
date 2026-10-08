@@ -6,6 +6,7 @@
 //! timer on the same processor that asks the kernel to end the operation
 //! the same way.
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 
@@ -173,8 +174,9 @@ pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {
         .sync => |fd| fd,
         .wait => |w| switch (w) {
             .readable, .writable => |fd| fd,
+            .object => |h| if (builtin.os.tag == .windows) h else unreachable, // unreachable: only Windows has objects
         },
-        .close, .abort, .timer => null,
+        .close, .abort, .timer, .raw => null,
     };
 }
 
@@ -191,6 +193,7 @@ fn canceledResult(o: *const Loop.Op) bool {
         .close, .abort => false,
         .timer => if (o.result.timer) |_| false else |err| err == error.Canceled,
         .wait => if (o.result.wait) |_| false else |err| err == error.Canceled,
+        .raw => if (o.result.raw) |_| false else |err| err == error.Canceled,
     };
 }
 

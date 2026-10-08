@@ -6,6 +6,7 @@
 const Scheduler = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -45,6 +46,9 @@ fn processorBit(index: u16) u64 {
 
 /// Whether processor `index`'s kernel queue may hold an operation on `fd`.
 pub fn holds(s: *const Scheduler, index: u16, fd: Io.File.Handle) bool {
+    if (comptime builtin.os.tag == .linux) if (s.processors[index].loop.backend == .io_uring) {
+        if (s.processors[index].loop.backend.io_uring.contains(fd)) return true;
+    };
     return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
 }
 
@@ -442,6 +446,7 @@ pub const Processor = struct {
         defer Scheduler.leave();
         p.loop.adopt();
         p.schedule();
+        if (comptime builtin.os.tag == .linux) if (p.loop.backend == .io_uring) p.loop.backend.io_uring.drainListeners();
     }
 };
 

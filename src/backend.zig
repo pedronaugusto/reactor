@@ -39,9 +39,9 @@ pub const Backend = union(enum) {
         };
     }
 
-    pub fn deinit(b: *Backend) void {
+    pub fn deinit(b: *Backend, gpa: std.mem.Allocator) void {
         switch (b.*) {
-            .io_uring => |*u| if (has_uring) u.deinit(),
+            .io_uring => |*u| if (has_uring) u.deinit(gpa),
             .custom => {},
         }
         b.* = undefined;

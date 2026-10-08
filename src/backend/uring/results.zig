@@ -25,6 +25,7 @@ pub fn of(o: anytype, cqe: linux.io_uring_cqe) op.Result {
     const canceled = e == .CANCELED;
     const ours = canceled and o.state.canceled;
     return switch (o.kind) {
+        .raw => .{ .raw = if (ours) error.Canceled else .{ .uring = cqe.res } },
         .io => |operation| .{ .io = if (ours) error.Canceled else io(o, operation, cqe) },
         .accept => .{ .accept = if (ours) error.Canceled else if (canceled) error.SocketNotListening else accept(o, cqe) },
         .connect => .{ .connect = if (ours) error.Canceled else if (canceled) error.ConnectionResetByPeer else if (e == .SUCCESS) {} else connect(e) },

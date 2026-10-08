@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const Lanes = @import("../Lanes.zig");
+const Core = @import("../runtime/Core.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const native = @import("native.zig");
 
@@ -20,4 +21,22 @@ fn Return(comptime F: type) type {
 pub fn blocking(io: Io, lane: Lanes.Lane, function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Return(@TypeOf(function)) {
     const core = native.runtimeOf(io) orelse return @call(.auto, function, args);
     return lane_call.call(&core.scheduler, &core.lanes, lane, &function, args);
+}
+
+/// A raw call adapter for libraries that keep their own syscall vocabulary.
+/// The library puts arguments and the typed result in its own context.
+pub const Hook = struct {
+    context: ?*anyopaque,
+    call: *const fn (?*anyopaque, *const fn (*anyopaque) void, *anyopaque) void,
+};
+
+/// Device flushes use the sync lane. Another Io executes on the caller.
+/// No Io is retained: the application's runtime must outlive the hook.
+pub fn blockingHook(io: Io) Hook {
+    return .{ .context = native.runtimeOf(io), .call = invoke };
+}
+
+fn invoke(context: ?*anyopaque, function: *const fn (*anyopaque) void, args: *anyopaque) void {
+    const core = if (context) |c| @as(*Core, @ptrCast(@alignCast(c))) else return function(args); // safe: blockingHook retained the recognized core
+    lane_call.call(&core.scheduler, &core.lanes, .sync, function, .{args});
 }
