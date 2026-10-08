@@ -506,3 +506,47 @@ test "a recycled Wake descriptor remains registered on readiness backends" {
         }
     }
 }
+
+test "r6: a short final stream read preserves EOF readiness" {
+    for (readiness) |backend| {
+        var l: Loop = undefined;
+        try loopOf(&l, backend);
+        defer l.deinit(testing.allocator);
+        const io = testing.io;
+        const pair = try tcpPair(io);
+        defer {
+            Loop.closing(pair[0].socket.handle);
+            pair[0].close(io);
+        }
+        var sender_open = true;
+        defer if (sender_open) pair[1].close(io);
+        var buffer: [64]u8 = undefined;
+        var data: [1][]u8 = .{&buffer};
+        var read: Loop.Op = .{ .kind = .{ .io = .{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } } } };
+        var out: [4]*Loop.Op = undefined;
+        // Register while empty. Both the final bytes and EOF are present
+        // before the next poll: an edge must cover both reads.
+        try l.submit(&read);
+        defer if (l.in_flight != 0) {
+            l.cancel(&read);
+            _ = l.run(.nowait) catch unreachable; // unreachable: cancelling this registered read needs no allocation
+            _ = l.reap(&out);
+        };
+        try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
+        var writer = pair[1].writer(io, &.{});
+        try writer.interface.writeAll("final bytes");
+        try writer.interface.flush();
+        pair[1].close(io);
+        sender_open = false;
+        const deadline = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
+        try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = deadline }));
+        const got = (try (try l.reap(&out)[0].result.io).net_read).data_len;
+        try testing.expectEqualStrings("final bytes", buffer[0..got]);
+        for (0..2) |_| {
+            try l.submit(&read);
+            const end = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
+            try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = end }));
+            try testing.expectEqual(@as(usize, 0), (try (try l.reap(&out)[0].result.io).net_read).data_len);
+        }
+    }
+}

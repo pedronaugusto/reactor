@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         var runtime_alive = true;
         defer if (runtime_alive) runtime.deinit();
         try runtime.start();
-        v11.io = runtime.io();
+        v11.select(runtime.io());
         try output.interface.print("{{\"event\":\"start\",\"test\":{f}}}\n", .{std.json.fmt(test_fn.name, .{})});
         try output.interface.flush();
         var watchdog: Watchdog = .{ .runtime = &runtime };

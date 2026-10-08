@@ -20,6 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Readiness backends retain terminal read events through final bytes and EOF instead of parking after a short final read.
+
 - Child wait and kill close their POSIX pipes through the runtime, invalidating cached readiness registrations before descriptor reuse.
 
 ### Changed

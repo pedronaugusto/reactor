@@ -6,15 +6,18 @@ adapted fixture. Zig token matching changes only `testing.io` and
 Strings, comments, test bodies, expectations, production APIs and dependency
 pins are preserved. Its build receives a dedicated runner and `v11` step;
 existing native linking, SDKs, fixtures and dependencies remain in the build.
-No consumer repository or active clone is written. A second unadapted working
-copy supplies the suite's original files and fixtures at run time, so actual
-source-boundary checks inspect the original package. Its scratch outputs live
-there; the immutable source snapshot remains untouched. An obsolete lazy
+No consumer repository or active clone is written. The working root's original
+source files supply actual source-boundary checks and runtime fixtures. Only
+compiled source paths point at a separate adapted copy, preserving generated
+native fixture paths relative to the working root. Scratch outputs live there;
+the immutable source snapshot remains untouched. An obsolete lazy
 planner-artifact lookup is replaced with its canonical script invocation only
 in the build fixture, preserving dependency pins and test/SDK wiring.
 
 `runner.zig` invokes the actual imported test functions, serially, inside
-reactor tasks. Each test gets a fresh runtime at the unchanged 1 MiB stack
+reactor tasks. A constant shakedown Layer forwards the suite's compile-time
+Io aliases to the current runtime; its forwarding frames are included in the
+diagnostic watermarks. Each test gets a fresh runtime at the unchanged 1 MiB stack
 reservation, zero workers, owned offload, and stack painting enabled. Standard
 Threaded test infrastructure remains for std helpers; native fuzz entry points,
 allocator leak checks and error logs remain checks. Every test reports status,

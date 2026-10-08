@@ -85,6 +85,9 @@ pub fn Records(comptime Waiter: type) type {
             /// event says), less what reads have taken since; null where
             /// the poller does not say.
             available: ?u64 = null,
+            /// A terminal read event remains ready through the final bytes
+            /// and EOF; cleared when the descriptor is replaced.
+            read_ended: bool = false,
             /// Whether the descriptor is a byte stream, once asked.
             stream: ?bool = null,
             /// A listening socket the backend switched to non-blocking mode.

@@ -165,6 +165,7 @@ pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
         .key = key,
         .read = failed or bits & (linux.EPOLL.IN | linux.EPOLL.RDHUP | linux.EPOLL.PRI) != 0,
         .write = failed or bits & linux.EPOLL.OUT != 0,
+        .read_ended = bits & (linux.EPOLL.HUP | linux.EPOLL.RDHUP) != 0,
     } };
 }
 

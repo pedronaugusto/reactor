@@ -56,6 +56,8 @@ pub const Decoded = union(enum) {
         refused: ?Direction = null,
         /// Bytes there to read, where the poller says (kqueue).
         available: ?u64 = null,
+        /// The read side ended: queued bytes are followed by EOF.
+        read_ended: bool = false,
     },
 };
 
@@ -350,6 +352,9 @@ pub fn Readiness(comptime Poller: type) type {
         /// true when it drained it.
         fn advance(self: *Self, r: *Records.Record, direction: Direction, p: calls.Progress) bool {
             _ = self;
+            // A terminal edge covers the remaining bytes and every later
+            // EOF read. Clearing it after a short read would wait forever.
+            if (direction == .read and r.read_ended) return false;
             const drained = switch (p) {
                 .other => false,
                 .short_write => true,
@@ -533,6 +538,10 @@ pub fn Readiness(comptime Poller: type) type {
                     _ = self.endAll(index);
                     r.registered = .{};
                     r.listener = false;
+                    r.ready = .both;
+                    r.available = null;
+                    r.stream = null;
+                    r.read_ended = false;
                     r.generation +%= 1;
                     r.epoch = epoch;
                 }
@@ -631,6 +640,7 @@ pub fn Readiness(comptime Poller: type) type {
                     if (e.read) {
                         r.ready = r.ready.with(.{ .read = true });
                         r.available = e.available;
+                        r.read_ended = r.read_ended or e.read_ended;
                     }
                     if (e.write) r.ready = r.ready.with(.{ .write = true });
                     if (r.idle()) {

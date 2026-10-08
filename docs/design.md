@@ -39,6 +39,10 @@ the caller. SEND_ZC retains both primary and notification ownership, including
 notification-first delivery and the ordinary-send retry. Registered files and
 buffers are detached only after the kernel has relinquished their references.
 
+Readiness records retain terminal read edges through the final bytes and EOF.
+A close epoch invalidates that hint along with cached readiness and stream
+kind before a descriptor number is reused.
+
 Initialization unwinds each acquisition with `errdefer`. Tables, stacks and
 lane closure/scratch slots are reserved there. The caller must finish or
 cancel its tasks before runtime teardown. Test-only allocation failures use

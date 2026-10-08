@@ -469,3 +469,23 @@ test "r6: a native child drains empty and nonempty stdout and stderr before wait
     var task = try runtime.io().concurrent(capturedChild, .{runtime.io()});
     try task.await(runtime.io());
 }
+
+test "r6: repeated native measured runtime lifetimes reclaim every task" {
+    try skipWithoutFibers();
+    for (0..32) |_| {
+        var r: Runtime = undefined;
+        try r.init(std.heap.page_allocator, .{ .workers = 0, .max_tasks = 32, .measure_stacks = true });
+        defer r.deinit();
+        try r.start();
+        const io = r.io();
+        var result = try io.concurrent(addOne, .{41});
+        try testing.expectEqual(@as(u32, 42), result.await(io));
+        var count: u32 = 0;
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        for (0..8) |_| try group.concurrent(io, sleeper, .{ io, @as(i64, 1), &count });
+        try group.await(io);
+        try testing.expectEqual(@as(u32, 8), count);
+        try testing.expect(r.stats().stack_high_water.? > 0);
+    }
+}

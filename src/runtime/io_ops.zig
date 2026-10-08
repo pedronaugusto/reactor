@@ -410,7 +410,8 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
 
 // Child processes. On IOCP a wait is the process handle's wait packet,
 // then std's own wait, which finds the process ended; Linux and kqueue
-// systems use their process watches. Missing watches use the wait lane. std's cleanup closes the child's pipes itself:
+// systems use their process watches. Missing watches use the wait lane.
+// POSIX pipes close through this runtime before their numbers can be reused:
 // their bindings are forgotten first.
 
 pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {

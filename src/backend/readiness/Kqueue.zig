@@ -220,6 +220,7 @@ pub fn decode(e: *const Event) readiness.Decoded {
             .key = e.udata,
             .read = direction == .read,
             .write = direction == .write,
+            .read_ended = direction == .read and e.flags & c.EV.EOF != 0,
             // A socket's or a pipe's read filter counts the bytes there; at
             // its end the count says nothing of what a read returns.
             .available = if (direction == .read and e.flags & c.EV.EOF == 0 and e.data > 0) @intCast(e.data) else null,
