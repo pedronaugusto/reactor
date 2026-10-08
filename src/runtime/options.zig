@@ -14,7 +14,7 @@ pub const Files = enum {
     /// io_uring: ring operations, calls with no ring operation on a lane.
     /// epoll, kqueue, IOCP: std's own calls on the worker, which the monitor
     /// rescues by handing its processor on should one block; on a lane
-    /// where there is no handoff (no monitor, `per_core`, the home thread).
+    /// where there is no handoff (no monitor or `per_core`).
     auto,
     /// Every file call on a lane: no worker ever waits on a disk.
     pool,
@@ -53,7 +53,7 @@ pub const Options = struct {
     pin_workers: bool = false,
     /// The monitor thread: stall reports, and on epoll, kqueue and IOCP under
     /// `stealing`, handoff of a worker stuck in a blocking call. null: on
-    /// when there are workers and the backend is epoll or kqueue.
+    /// when there are workers and the backend is epoll, kqueue or IOCP.
     monitor: ?bool = null,
     /// Spare threads handoff may start, on demand. null: workers / 2, at
     /// least one.

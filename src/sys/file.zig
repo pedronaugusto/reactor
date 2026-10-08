@@ -16,9 +16,9 @@ const pwrite = if (posix.lfs64_abi) posix.system.pwrite64 else posix.system.pwri
 const max_rw = 0x7ffff000;
 
 /// Into `data`'s buffers from `offset` on; fewer bytes than asked is no
-/// error. Windows has no runtime yet: nothing here runs there.
+/// error. Windows positional calls use IOCP or borrowed std calls.
 pub fn readAt(fd: posix.fd_t, data: []const []u8, offset: u64) (Io.File.ReadPositionalError || Io.Cancelable)!usize {
-    if (comptime builtin.os.tag == .windows) unreachable; // unreachable: no runtime is built where tasks cannot run
+    if (comptime builtin.os.tag == .windows) unreachable; // unreachable: this POSIX helper is not used on Windows
     var iovecs: [Threaded.max_iovecs_len]posix.iovec = undefined;
     var n: usize = 0;
     for (data) |d| {
@@ -50,7 +50,7 @@ pub fn readAt(fd: posix.fd_t, data: []const []u8, offset: u64) (Io.File.ReadPosi
 
 /// `bytes` at `offset`; fewer bytes than given is no error.
 pub fn writeAt(fd: posix.fd_t, bytes: []const u8, offset: u64) (Io.File.WritePositionalError || Io.Cancelable)!usize {
-    if (comptime builtin.os.tag == .windows) unreachable; // unreachable: no runtime is built where tasks cannot run
+    if (comptime builtin.os.tag == .windows) unreachable; // unreachable: this POSIX helper is not used on Windows
     while (true) {
         const rc = pwrite(fd, bytes.ptr, @min(bytes.len, max_rw), @bitCast(offset));
         return switch (posix.errno(rc)) {

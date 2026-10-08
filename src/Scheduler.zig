@@ -368,23 +368,24 @@ pub const Processor = struct {
         }
         var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
         const back = fiber.switchTo(&s);
-        p.afterSwitchMode(watched, t, back);
+        p.afterSwitchMode(watched, true, t, back);
     }
 
     /// What the scheduler does once `t` has switched back to it: `t`'s stack
     /// is still now, so `t` may be published to whoever will resume it.
     pub fn afterSwitch(p: *Processor, t: *Task, back: *const fiber.Switch) void {
-        if (p.scheduler.monitor != null) return p.afterSwitchMode(true, t, back);
-        return p.afterSwitchMode(false, t, back);
+        if (p.scheduler.monitor != null) return p.afterSwitchMode(true, false, t, back);
+        return p.afterSwitchMode(false, false, t, back);
     }
 
-    inline fn afterSwitchMode(p: *Processor, comptime watched: bool, t: *Task, back: *const fiber.Switch) void {
+    inline fn afterSwitchMode(p: *Processor, comptime watched: bool, comptime was_running: bool, t: *Task, back: *const fiber.Switch) void {
         const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
         const action = message.action;
         // A spare owns the processor after handoff: touch no mutable state.
         if (watched) {
             if (action == .relocate) return relocated(p.scheduler, t);
-            p.passes.store(p.passes.load(.monotonic) +% 1, .release);
+            // The first home entry parks the root without runTask starting it.
+            if (was_running) p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
         p.current = null;
         if (t.kind == .root) p.away.store(false, .monotonic);
@@ -515,6 +516,7 @@ pub const Processor = struct {
     /// The calling thread takes this processor over.
     fn adopt(p: *Processor) void {
         p.loop.adopt();
+        p.on_home_thread = std.Thread.getCurrentId() == p.scheduler.home_thread;
         p.current = null;
         const passes = p.passes.load(.monotonic);
         if (passes & 1 == 1) p.passes.store(passes +% 1, .release);
@@ -524,14 +526,7 @@ pub const Processor = struct {
 
 processors: []Processor,
 root: *Task,
-/// The thread that built the runtime: the root runs there alone.
-home_thread: std.Thread.Id,
 stacks: Stacks,
-/// Samples the processors, hands on those stuck in blocking calls, records
-/// stalls; null when the options leave it off.
-monitor: ?Monitor = null,
-/// Threads waiting for a processor (handoff only).
-spares: Spares = undefined,
 records: Records,
 scheduling: Scheduling,
 budget_ops: u16,
@@ -553,6 +548,14 @@ stopping: std.atomic.Value(bool) = .init(false),
 placement: std.atomic.Value(u32) = .init(0),
 steals: std.atomic.Value(u64) = .init(0),
 forced_yields: std.atomic.Value(u64) = .init(0),
+
+/// The thread that built the runtime: the root runs there alone.
+home_thread: std.Thread.Id,
+/// Samples the processors, hands on those stuck in blocking calls, records
+/// stalls; null when the options leave it off.
+monitor: ?*Monitor = null,
+/// Threads waiting for a processor (handoff only).
+spares: Spares = undefined,
 
 /// The system's own `Io`, for the few waits a thread outside any task
 /// makes on a kernel futex.
@@ -746,7 +749,7 @@ pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
     } else {
         _ = s.idle_count.fetchSub(1, .seq_cst);
         // The monitor parks while every processor waits: one is back.
-        if (s.monitor) |*m| if (m.parked.load(.seq_cst)) m.poke();
+        if (s.monitor) |m| if (m.parked.load(.seq_cst)) m.poke();
     }
 }
 
@@ -778,7 +781,7 @@ pub const Blocking = struct {
 /// the scheduler.
 pub fn enterBlocking() ?Blocking {
     const p = held orelse return null;
-    const m = if (p.scheduler.monitor) |*m| m else return null;
+    const m = if (p.scheduler.monitor) |m| m else return null;
     if (!m.handoff) return null;
     const t = p.current orelse return null;
     if (t.pins > 0 or (t.home and t.kind != .root)) return null;

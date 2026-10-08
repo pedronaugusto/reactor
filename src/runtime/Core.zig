@@ -169,12 +169,16 @@ fn initMonitor(c: *Core, workers: u16) InitError!void {
     const cap: u16 = if (handoff) c.options.spares orelse @max(workers / 2, 1) else 0;
     c.scheduler.spares = try .init(c.gpa, c.processors.len, cap);
     errdefer c.scheduler.spares.deinit(c.gpa);
-    c.scheduler.monitor = try .init(c.gpa, c.processors.len, handoff, c.options.handoff_after, c.options.report_after);
+    const monitor = try c.gpa.create(Scheduler.Monitor);
+    errdefer c.gpa.destroy(monitor);
+    monitor.* = try .init(c.gpa, c.processors.len, handoff, c.options.handoff_after, c.options.report_after);
+    c.scheduler.monitor = monitor;
 }
 
 fn deinitMonitor(c: *Core) void {
-    if (c.scheduler.monitor) |*m| {
+    if (c.scheduler.monitor) |m| {
         m.deinit(c.gpa);
+        c.gpa.destroy(m);
         c.scheduler.spares.deinit(c.gpa);
         c.scheduler.monitor = null;
     }
@@ -212,7 +216,7 @@ pub fn start(c: *Core) StartError!void {
     for (c.processors[1..]) |*p| {
         p.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
     }
-    if (c.scheduler.monitor) |*m| {
+    if (c.scheduler.monitor) |m| {
         m.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
     }
     c.started = true;
@@ -243,7 +247,7 @@ pub fn stop(c: *Core) void {
     assert(c.scheduler.stacks.in_use.load(.acquire) == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
-    if (c.scheduler.monitor) |*m| {
+    if (c.scheduler.monitor) |m| {
         m.stop();
         // Spares, and workers waiting as spares, see the stop.
         c.scheduler.spares.stop();

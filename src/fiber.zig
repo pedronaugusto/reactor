@@ -380,8 +380,6 @@ inline fn switchRiscv(s: *const Switch) *const Switch {
         });
 }
 
-/// The context that starts `entry(arg, message)` on the stack ending at
-/// `top` (16-aligned) when first switched to. Uses the top 48 bytes.
 /// A stack a context can start on.
 pub const Stack = struct {
     /// One past the highest usable byte; 16-aligned.
@@ -392,6 +390,8 @@ pub const Stack = struct {
     bottom: usize,
 };
 
+/// The context that starts `entry(arg, message)` on the stack ending at
+/// `top` (16-aligned) when first switched to. Uses the top 48 bytes.
 pub fn initial(stack: Stack, top: usize, entry: Entry, arg: *anyopaque) Context {
     const saved = initialRegisters(top, entry, arg);
     const registers: NativeContext = if (is_windows) .{ .registers = saved, .bounds = .{ .base = stack.top, .limit = stack.limit, .deallocation = stack.bottom } } else saved;

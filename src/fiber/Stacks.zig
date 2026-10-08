@@ -57,7 +57,7 @@ count: u32,
 in_use: std.atomic.Value(u32) = .init(0),
 /// Windows: per stack, the lowest committed byte, 0 until first handed
 /// out. Only the stack's holder touches its entry.
-limits: []usize = &.{},
+limits: if (is_windows) []usize else void = if (is_windows) &.{} else {},
 
 pub fn init(s: *Stacks, gpa: Allocator, options: Options) InitError!void {
     const page = memory.pageSize();

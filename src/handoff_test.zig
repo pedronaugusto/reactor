@@ -137,9 +137,13 @@ test "the root stuck in a blocking file call lends the home processor to a spare
     try testing.expect(r.stats().handoffs >= 6);
 }
 
-fn spin(clock_io: Io, ms: u64) void {
+fn spinUntilStall(r: *Runtime) !void {
+    const clock_io = Io.Threaded.global_single_threaded.io();
     const start = Io.Clock.awake.now(clock_io);
-    while (start.durationTo(Io.Clock.awake.now(clock_io)).nanoseconds < ms * std.time.ns_per_ms) std.atomic.spinLoopHint();
+    while (r.stats().stalls == 0) {
+        if (start.durationTo(Io.Clock.awake.now(clock_io)).nanoseconds > 2 * std.time.ns_per_s) return error.StallNotRecorded;
+        std.atomic.spinLoopHint();
+    }
 }
 
 test "a task that holds its processor past report_after without switching out is recorded as a stall" {
@@ -153,8 +157,8 @@ test "a task that holds its processor past report_after without switching out is
     defer r.deinit();
     try r.start();
     const io = r.io();
-    var task = try io.concurrent(spin, .{ Io.Threaded.global_single_threaded.io(), 40 });
-    task.await(io);
+    var task = try io.concurrent(spinUntilStall, .{&r});
+    try task.await(io);
     try testing.expect(r.stats().stalls >= 1);
 }
 
