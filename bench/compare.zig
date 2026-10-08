@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     try checked(gpa, io, &.{ "git", "fetch", "--no-tags", "https://github.com/pedronaugusto/reactor.git", ownership_baseline }, base_dir);
     try checked(gpa, io, &.{ "git", "reset", "--hard", before_source }, base_dir);
     try checked(gpa, io, &.{ "git", "checkout", "--detach", before_source }, base_dir);
+    if (args.len == 3 and std.mem.eql(u8, args[2], "--offloads")) return offloadBefore(gpa, io, w, zig);
     if (args.len == 3 and std.mem.eql(u8, args[2], "--regressions")) {
         try before(gpa, io, w, zig);
         return;
@@ -198,6 +199,22 @@ pub fn main(init: std.process.Init) !void {
             try measure(gpa, io, w, round, "ordinary-ring", ".", a);
         }
     }
+}
+
+fn offloadBefore(gpa: std.mem.Allocator, io: Io, writer: *Io.Writer, zig: []const u8) !void {
+    const directory = Io.Dir.cwd();
+    try focusTests(gpa, io);
+    const source = try directory.readFileAlloc(io, "src/offload_test.zig", gpa, .unlimited);
+    defer gpa.free(source);
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/offload_test.zig", .data = source });
+    const roots = try directory.readFileAlloc(io, base_dir ++ "/src/tests.zig", gpa, .unlimited);
+    defer gpa.free(roots);
+    const updated = try std.mem.concat(gpa, u8, &.{ roots, "\ntest { _ = @import(\"offload_test.zig\"); }\n" });
+    defer gpa.free(updated);
+    try directory.writeFile(io, .{ .sub_path = base_dir ++ "/src/tests.zig", .data = updated });
+    try expectBefore(gpa, io, writer, zig, "r6: raw offload refusal survives", "expected error.ConcurrencyUnavailable, found void");
+    try expectBefore(gpa, io, writer, zig, "r6: accepted raw offloads from outside", "TestUnexpectedResult");
+    try expectBefore(gpa, io, writer, zig, "r6: a foreign raw offload", "TestExpectedEqual");
 }
 
 fn installTests(gpa: std.mem.Allocator, io: Io) !void {

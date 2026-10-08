@@ -46,7 +46,43 @@ pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args:
 
 /// A refused raw call never ran; all result shapes report the refusal.
 pub fn fallible(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
-    return perform(Result(@TypeOf(func)), true, s, lanes, lane, func, args);
+    const owner = if (Scheduler.processor()) |p| p.scheduler else s;
+    if (Scheduler.current() == null and !lanes.inlined()) return fromThread(lanes, lane, func, args);
+    return perform(Result(@TypeOf(func)), true, owner, lanes, lane, func, args);
+}
+
+/// A caller outside the fiber scheduler still submits raw work to its lane.
+/// Its stack remains pinned through completion and executor group retirement.
+fn fromThread(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
+    const Call = struct {
+        const Self = @This();
+        job: Lanes.Job,
+        func: @TypeOf(func),
+        args: @TypeOf(args),
+        result: Result(@TypeOf(func)) = undefined,
+        finished: Io.Event = .unset,
+
+        fn run(job: *Lanes.Job) void {
+            const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the waiting caller owns the record
+            c.result = @call(.auto, c.func, c.args);
+        }
+        fn done(job: *Lanes.Job) void {
+            const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the caller retains it through executor retirement
+            c.finished.set(Scheduler.system());
+        }
+    };
+    var c: Call = .{
+        .job = .{ .run = Call.run, .done = Call.done, .lane = lane },
+        .func = func,
+        .args = args,
+    };
+    lanes.submit(&c.job);
+    c.finished.waitUncancelable(Scheduler.system());
+    // Completion precedes the executor releasing its group token. No
+    // cancelable wait may abandon the caller's frame in this interval.
+    while (c.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
+    if (c.job.rejected) return error.ConcurrencyUnavailable;
+    return c.result;
 }
 
 fn perform(comptime R: type, comptime raw: bool, s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {

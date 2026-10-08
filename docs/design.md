@@ -68,8 +68,9 @@ or unavailable capability is counted as target success.
 
 ## Final review and open work
 
-Owner decision db221e5 makes speed and size targets reporting obligations;
-correctness and green CI determine landing. Missing or missed targets remain
+Rival speed and size targets remain reporting obligations. The owner restored
+the rule that regressions against reactor's previous main must be fixed before
+landing; correctness and green CI remain required. Missing rival targets remain
 open in the mission. Shared-machine timing uses paired, interleaved ratios
 with spread. Native x86 rows stay open until hardware is available.
 
@@ -111,7 +112,11 @@ Owner decision db221e5 requires refusal errors for offloads, including void
 functions, with no inline fallback. `blocking` now adds `Canceled` and
 `ConcurrencyUnavailable` to every function result. `blockingHook.call` has
 the same fallible surface. A rejected submission returns before user code
-runs. Original user errors and successful results remain intact. A queued
+runs. Outside threads submit to the same lane and retain their frames until
+the executor releases its group; they wait without fiber cancellation. A
+foreign-runtime task resumes through its own scheduler, while execution and
+lane cancellation stay with the target runtime. Original user errors and
+successful results remain intact. A queued
 void call can be canceled without running; accepted calls retain their storage
 until all execution and cancellation owners let go. Hook adoption is a separate
 consumer batch.
@@ -136,8 +141,9 @@ void/narrow std.Io operations and cancellation, or routing refusing injected
 executors only through the fallible raw surface. Either requires an explicit
 injected-executor contract, reserved capacity covering live and retiring control
 jobs, and no allocation or inline fallback after initialization. The owner
-choice on this seam remains pending; this revision implements the fallible
-raw part only.
+choice requires guaranteed cancellation and kill capacity reserved at
+admission, where refusal can be returned as an error. This revision implements
+the fallible raw part; the reserved-capacity implementation remains required.
 
 Verification for the chosen remainder must force saturation, refusal and
 completion/cancellation races while poisoning released contexts, on native

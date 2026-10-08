@@ -71,6 +71,11 @@ pub fn build(b: *std.Build) !void {
     evidence.setCwd(b.path("."));
     evidence.has_side_effects = true;
     b.step("later-evidence", "Run interleaved ReleaseFast A/B evidence without a performance gate").dependOn(&evidence.step);
+    const offloads = b.addRunArtifact(compare);
+    offloads.addArgs(&.{ b.graph.zig_exe, "--offloads" });
+    offloads.setCwd(b.path("."));
+    offloads.has_side_effects = true;
+    b.step("r6-offload-before", "Verify raw offload regressions against published main").dependOn(&offloads.step);
     const regressions = b.addRunArtifact(compare);
     regressions.addArgs(&.{ b.graph.zig_exe, "--regressions" });
     regressions.setCwd(b.path("."));
