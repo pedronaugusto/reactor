@@ -178,3 +178,39 @@ test "admission: retiring groups hold capacity and full admission never runs inl
     try testing.expectEqual(@as(u64, 0), lanes.stats(.general).@"inline");
     try testing.expectEqual(@as(u32, 0), lanes.reserved);
 }
+
+fn workerCount(threaded: *Io.Threaded) usize {
+    var next = threaded.worker_threads.load(.acquire);
+    var count_: usize = 0;
+    while (next) |thread| {
+        count_ += 1;
+        next = thread.next;
+    }
+    return count_;
+}
+const Prepared = struct {
+    job: Lanes.Job = .{ .lane = .general, .run = run, .done = done },
+    finished: Io.Event = .unset,
+    fn run(_: *Lanes.Job) void {}
+    fn done(job: *Lanes.Job) void {
+        const call: *Prepared = @alignCast(@fieldParentPtr("job", job)); // safe: the test retains this frame through retirement
+        call.finished.set(testing.io);
+    }
+};
+test "admission: startup prepares all owned workers and sequential calls reuse them" {
+    var lanes: Lanes = undefined;
+    try lanes.init(testing.allocator, .{ .owned = .{ .sync = 1, .lookup = 1, .wait = 1, .general = 1 } }, .{});
+    defer lanes.deinit(testing.allocator);
+    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 0), workerCount(threaded));
+    try lanes.prepare();
+    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 5), workerCount(threaded));
+    for (0..32) |_| {
+        var call: Prepared = .{};
+        lanes.submit(&call.job);
+        call.finished.waitUncancelable(testing.io);
+        while (call.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
+        lanes.retire(&call.job);
+    }
+    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 5), workerCount(threaded));
+    try testing.expectEqual(@as(u32, 0), lanes.reserved);
+}

@@ -20,6 +20,7 @@ test "V6 SEH unwinds finally and finds its handler after a fiber suspension" {
     var runtime: Runtime = undefined;
     try runtime.init(testing.allocator, .{ .workers = 0, .max_tasks = 8 });
     defer runtime.deinit();
+    try runtime.start();
     var future = try runtime.io().concurrent(run, .{runtime.io()});
     try future.await(runtime.io());
 }

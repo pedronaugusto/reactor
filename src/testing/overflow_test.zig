@@ -30,6 +30,7 @@ test "R1 guard overflow terminates the isolated child" {
         var r: Runtime = undefined;
         try r.init(testing.allocator, .{ .workers = 0, .stack_size = 64 << 10, .max_tasks = 2, .offload = .none });
         defer r.deinit();
+        try r.start();
         var future = try r.io().concurrent(overflow, .{});
         var buffer: [32]u8 = undefined;
         var out = Io.File.stdout().writerStreaming(testing.io, &buffer);

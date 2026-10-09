@@ -94,6 +94,8 @@ const State = struct {
     admitted: u32 = 0,
     limit: u32,
     launch: Io.Mutex = .init,
+    dormant: []Warm = &.{},
+    activated: usize = 0,
     head: [2]?*Job = .{ null, null },
     tail: [2]?*Job = .{ null, null },
     latency_runs: u8 = 0,
@@ -105,6 +107,8 @@ const State = struct {
 mode: std.meta.Tag(Config),
 /// The executors: owned instances, the injected one, or none.
 threaded: [count]Io.Threaded = undefined,
+warm_groups: [count]Io.Group = @splat(.init),
+warm_entries: []Warm,
 injected: Io = undefined,
 /// std's code borrowed on the workers and for inline calls.
 borrowed: Io.Threaded,
@@ -128,7 +132,10 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
         .owned => |o| o.scratch_bytes,
         else => 256 << 10,
     };
-    const scratch = try SlotPool.initSized(gpa, total + 16, bytes);
+    var scratch = try SlotPool.initSized(gpa, total + 16, bytes);
+    errdefer scratch.deinit(gpa);
+    const warm_entries = try gpa.alloc(Warm, if (config == .owned) 2 * total + 3 * count else 0);
+    for (warm_entries) |*entry| entry.* = .{};
     l.* = .{
         .mode = config,
         .borrowed = .init(.failing, .{ .async_limit = .nothing, .concurrent_limit = .nothing, .environ = env.environ, .argv0 = env.argv0 }),
@@ -137,9 +144,18 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
         // call that has ended but whose thread has not yet let go of it.
         .pool = pool,
         .scratch = scratch,
+        .warm_entries = warm_entries,
     };
     l.borrowed.allocator = l.allocator();
     for (&l.states, caps) |*s, c| s.* = .{ .cap = c, .limit = env.max_jobs };
+    if (config == .owned) {
+        var offset: usize = 0;
+        for (&l.states) |*state| {
+            const n = 2 * @as(usize, state.cap) + 3;
+            state.dormant = warm_entries[offset..][0..n];
+            offset += n;
+        }
+    }
     if (config == .injected) l.capacity = config.injected.capacity;
     switch (config) {
         // The lane's cap bounds its calls; std's own limit would also count
@@ -161,6 +177,8 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
 pub fn deinit(l: *Lanes, gpa: Allocator) void {
     for (l.states) |state| assert(state.admitted == 0);
     if (l.mode == .owned) {
+        for (l.warm_entries) |*entry| entry.gate.set(system());
+        for (&l.warm_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // unreachable: shutdown is outside a cancelable executor task
         // std's instances restore the signal handlers they saw: last first.
         var i: usize = count;
         while (i > 0) {
@@ -171,6 +189,7 @@ pub fn deinit(l: *Lanes, gpa: Allocator) void {
     l.borrowed.deinit();
     l.pool.deinit(gpa);
     l.scratch.deinit(gpa);
+    gpa.free(l.warm_entries);
     l.* = undefined;
 }
 
@@ -217,9 +236,9 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
     switch (l.mode) {
         .none => {},
         .injected => if (l.capacity < 4) return error.SystemResources,
-        .owned => for (&l.states, &l.threaded) |*state, *threaded| {
+        .owned => for (&l.states, &l.threaded, &l.warm_groups) |*state, *threaded, *group| {
             if (state.cap == 0) return error.SystemResources;
-            try warm(threaded, 2 * @as(u32, state.cap) + 3);
+            try warm(threaded, state, group);
         },
     }
     l.started = true;
@@ -227,32 +246,32 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
 
 const Warm = struct {
     gate: Io.Event = .unset,
-    entered: std.atomic.Value(u32) = .init(0),
+    entered: std.atomic.Value(bool) = .init(false),
     fn run(context: *const anyopaque) void {
         const pointer: *const *Warm = @ptrCast(@alignCast(context)); // safe: warm copies a pointer to its retained barrier
         const barrier = pointer.*;
-        _ = barrier.entered.fetchAdd(1, .release);
+        barrier.entered.store(true, .release);
         barrier.gate.waitUncancelable(system());
     }
 };
-fn warm(threaded: *Io.Threaded, count_: u32) error{SystemResources}!void {
-    var barrier: Warm = .{};
-    var group: Io.Group = .init;
-    const pointer = &barrier;
+/// All workers exist at startup. Unused workers wait separately from the
+/// executor's ready pool, preserving warm-thread reuse for sequential calls.
+fn warm(threaded: *Io.Threaded, state: *State, group: *Io.Group) error{SystemResources}!void {
     const io = threaded.io();
-    defer {
-        barrier.gate.set(system());
-        group.await(io) catch unreachable; // unreachable: startup is not a cancelable executor job
-        while (true) {
-            threaded.mutex.lockUncancelable(system());
-            const idle = threaded.busy_count == 0;
-            threaded.mutex.unlock(system());
-            if (idle) break;
-            std.atomic.spinLoopHint();
-        }
+    for (state.dormant) |*entry| {
+        const pointer = entry;
+        io.vtable.groupConcurrent(io.userdata, group, std.mem.asBytes(&pointer), .of(@TypeOf(pointer)), Warm.run) catch return error.SystemResources;
     }
-    for (0..count_) |_| io.vtable.groupConcurrent(io.userdata, &group, std.mem.asBytes(&pointer), .of(@TypeOf(pointer)), Warm.run) catch return error.SystemResources;
-    while (barrier.entered.load(.acquire) != count_) std.atomic.spinLoopHint();
+    for (state.dormant) |*entry| while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
+    state.dormant[0].gate.set(system());
+    state.activated = 1;
+    while (true) {
+        threaded.mutex.lockUncancelable(system());
+        const available = threaded.busy_count < state.dormant.len;
+        threaded.mutex.unlock(system());
+        if (available) return;
+        std.atomic.spinLoopHint();
+    }
 }
 
 /// Reserve execution and cancellation together, before publishing a call.
@@ -407,11 +426,17 @@ fn launch(l: *Lanes, lane: Lane) void {
     if (l.mode != .owned) return;
     const threaded = &l.threaded[@backingInt(lane)];
     const prepared = 2 * @as(usize, state.cap) + 3;
+    var activated = false;
     while (true) {
         threaded.mutex.lockUncancelable(system());
         const available = threaded.busy_count < prepared;
         threaded.mutex.unlock(system());
         if (available) return;
+        if (!activated and state.activated < state.dormant.len) {
+            activated = true;
+            state.dormant[state.activated].gate.set(system());
+            state.activated += 1;
+        }
         std.atomic.spinLoopHint();
     }
 }

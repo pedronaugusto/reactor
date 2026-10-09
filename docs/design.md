@@ -123,8 +123,10 @@ both its execution group and its individual cancellation group have retired.
 Detached resolver requests retain their reservation and storage until reuse
 or shutdown. Queue admission is bounded by the configured task and lookup
 bounds. Owned executors use fixed closure and scratch pools, and warmed
-workers; submission waits for retiring worker bookkeeping rather than
-creating a thread after startup.
+workers. Workers not yet needed park separately from the executor ready
+pool, preserving warm-thread reuse for sequential calls. Admission activates
+a prepared worker when concurrency requires it; submission waits for
+retiring worker bookkeeping rather than creating a thread after startup.
 
 An injected executor supplies an `Io` and declares capacity exclusive to the
 runtime. Its guarantee covers submitted execution and cancellation groups,

@@ -41,6 +41,7 @@ fn unregister(io: Io, item: Item) void {
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
     ready: Io.Event = .unset,
+    awaiting: bool = false,
     io: Io,
     action: union(enum) { register: []u8, unregister: u16 },
     result: Buffers.Error!u16 = undefined,
@@ -53,13 +54,15 @@ const Command = struct {
             .register => |memory| command.result = ring.buffers.register(&ring.ring, memory),
             .unregister => |index| ring.buffers.unregister(&ring.ring, index),
         }
-        command.ready.set(command.io);
+        // Direct setup before start has no waiter and must not enter std.Io.
+        if (command.awaiting) command.ready.set(command.io);
     }
 
     fn execute(command: *Command, owner: *Scheduler.Processor) void {
         if (comptime builtin.os.tag != .linux) unreachable; // unreachable: registration is Linux only
         const core = native.runtimeOf(command.io).?;
         if (Scheduler.processor() == owner or (!core.started.load(.acquire) and !owner.loop.backend.io_uring.enabled)) run(&command.errand, owner) else {
+            command.awaiting = true;
             owner.send(&command.errand);
             command.ready.waitUncancelable(command.io);
         }

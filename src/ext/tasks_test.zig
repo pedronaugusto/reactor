@@ -45,9 +45,12 @@ test "latency tasks run ahead while normal work gets a turn after eight" {
 }
 
 test "injected latency tasks give globally queued normal work a turn after eight" {
-    var runtime: reactor.Runtime = undefined;
-    try runtime.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .offload = .none });
-    defer runtime.deinit();
+    var driver: Driver = undefined;
+    try driver.init(testing.allocator, 2, .{ .max_tasks = 16, .offload = .none });
+    defer driver.deinit();
+    // Exercise the global queue deterministically, driven only by the home loop.
+    driver.runtime.core.scheduler.scheduling = .stealing;
+    const runtime = &driver.runtime;
     const Context = struct {
         const Self = @This();
         io: std.Io,
@@ -69,7 +72,7 @@ test "injected latency tasks give globally queued normal work a turn after eight
         }
     };
     var c: Context = .{ .io = runtime.io() };
-    // Enqueue outside every scheduler while workers have not started.
+    // Enqueue outside every scheduler before the host drives its started loop.
     const thread = try std.Thread.spawn(.{}, Context.enqueue, .{&c});
     thread.join();
     try testing.expect(!c.failed);
