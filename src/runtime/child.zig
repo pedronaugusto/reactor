@@ -16,7 +16,7 @@ const perform = @import("../ops/perform.zig");
 const process = @import("../sys/process.zig");
 
 pub fn childWait(userdata: ?*anyopaque, child: *Child) Child.WaitError!Child.Term {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (r.backendKind() == null or Scheduler.processor() == null) return onLane(r, child);
     if (builtin.os.tag == .windows) {
         _ = readiness.first(&r.scheduler, &.{.{ .object = child.id.? }}, null) catch |err| switch (err) {

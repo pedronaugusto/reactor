@@ -36,7 +36,10 @@ pub fn init(r: *Runtime, gpa: Allocator, o: Options) InitError!void {
     return r.core.init(gpa, o, .native, &slots.vtable);
 }
 
-/// Spawns the workers the options name. Lanes start threads on demand.
+/// Creates scheduler workers and prepares lane execution/control capacity.
+/// Failure is returned before fixed std.Io operations are permitted. Calling
+/// those operations before successful startup is a precondition violation,
+/// checked in safe builds. A failed startup must be deinitialized.
 pub fn start(r: *Runtime) StartError!void {
     return r.core.start();
 }

@@ -141,7 +141,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         made += 1;
     }
 
-    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0 });
+    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = options.max_tasks + options.max_lookups + 1 });
     errdefer c.lanes.deinit(gpa);
 
     try c.initMonitor(workers);
@@ -220,8 +220,10 @@ fn schedulerEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) no
 
 pub fn start(c: *Core) StartError!void {
     assert(!c.started.load(.acquire));
+    try c.lanes.prepare();
     // Publish startup before adoption: native setup must go to each owner.
     c.started.store(true, .release);
+    errdefer c.stop();
     // TSan’s thread-local storage needs more than the small normal OS stack.
     for (c.processors[1..]) |*p| {
         p.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, Processor.work, .{p}) catch return error.SystemResources;
@@ -291,6 +293,13 @@ pub fn io(c: *Core) Io {
 /// The core an `Io.userdata` is.
 pub fn of(userdata: ?*anyopaque) *Core {
     return @ptrCast(@alignCast(userdata.?)); // safe: only `io` hands the vtable out, with a `Core`
+}
+
+/// Fixed std.Io signatures require a successfully started runtime.
+pub fn running(userdata: ?*anyopaque) *Core {
+    const core = of(userdata);
+    assert(core.started.load(.acquire));
+    return core;
 }
 
 /// The kernel mechanism under this runtime; null for a test's own backend.

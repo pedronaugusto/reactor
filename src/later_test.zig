@@ -20,6 +20,8 @@ fn native(r: *Runtime, backend: Loop.Backend) !void {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
+    errdefer r.deinit();
+    try r.start();
 }
 fn ms(value: i64) Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(value), .clock = .awake } };
@@ -153,6 +155,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     var r: Runtime = undefined;
     try native(&r, .io_uring);
     defer r.deinit();
+    try r.start();
     var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
@@ -580,6 +583,7 @@ test "later: diagnostic overall depth includes returned frames and survives task
         else => return err,
     };
     defer r.deinit();
+    try r.start();
     var future = try r.io().concurrent(measured, .{r.io()});
     try future.await(r.io());
     const snapshot = r.stats();
@@ -691,6 +695,7 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
         else => return err,
     };
     defer r.deinit();
+    try r.start();
     var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,

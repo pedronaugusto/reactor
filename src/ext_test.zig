@@ -438,7 +438,7 @@ test "r6: refused void value and narrow offloads return an error without running
     try skipWithoutFibers();
     var refusing: RefusingOffload = .init(testing.io, 0);
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = refusing.io() } });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
     defer t.deinit();
     const io = t.io();
     try checkOffloadRefusal(io);
@@ -456,7 +456,7 @@ test "r6: a refused blocking hook returns an error without touching its context"
     try skipWithoutFibers();
     var refusing: RefusingOffload = .init(testing.io, 0);
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = refusing.io() } });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
     defer t.deinit();
     var ran = false;
     const hook = reactor.blockingHook(t.io());

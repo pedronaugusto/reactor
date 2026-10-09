@@ -147,7 +147,7 @@ pub const vtable: Io.VTable = .{
 // Tasks.
 
 fn crashHandler(userdata: ?*anyopaque) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     // The crashing task may call the Io again while the panic is printed:
     // nothing it waits on may be cancelled under it.
     if (Scheduler.current()) |t| {
@@ -167,7 +167,7 @@ fn crashHandler(userdata: ?*anyopaque) void {
 }
 
 fn async(userdata: ?*anyopaque, result: []u8, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void) ?*Io.AnyFuture {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const t = tasks.concurrent(&r.scheduler, result.len, result_alignment, context, context_alignment, start, @returnAddress()) catch {
         start(context.ptr, result.ptr);
         return null;
@@ -176,7 +176,7 @@ fn async(userdata: ?*anyopaque, result: []u8, result_alignment: Alignment, conte
 }
 
 fn concurrent(userdata: ?*anyopaque, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     return @ptrCast(try tasks.concurrent(&r.scheduler, result_len, result_alignment, context, context_alignment, start, @returnAddress())); // safe: a future is its task
 }
 
@@ -186,62 +186,62 @@ fn taskOf(future: *Io.AnyFuture) *Task {
 
 fn await(userdata: ?*anyopaque, future: *Io.AnyFuture, result: []u8, result_alignment: Alignment) void {
     _ = result_alignment;
-    tasks.await(&Core.of(userdata).scheduler, taskOf(future), result);
+    tasks.await(&Core.running(userdata).scheduler, taskOf(future), result);
 }
 
 fn cancel(userdata: ?*anyopaque, future: *Io.AnyFuture, result: []u8, result_alignment: Alignment) void {
     _ = result_alignment;
-    tasks.cancel(&Core.of(userdata).scheduler, taskOf(future), result);
+    tasks.cancel(&Core.running(userdata).scheduler, taskOf(future), result);
 }
 
 fn groupAsync(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque) void) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     tasks.groupConcurrent(&r.scheduler, group, context, context_alignment, start, @returnAddress()) catch start(context.ptr);
 }
 
 fn groupConcurrent(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     return tasks.groupConcurrent(&r.scheduler, group, context, context_alignment, start, @returnAddress());
 }
 
 fn groupAwait(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) Io.Cancelable!void {
     _ = token;
-    return tasks.groupAwait(&Core.of(userdata).scheduler, group);
+    return tasks.groupAwait(&Core.running(userdata).scheduler, group);
 }
 
 fn groupCancel(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
     _ = token;
-    tasks.groupCancel(&Core.of(userdata).scheduler, group);
+    tasks.groupCancel(&Core.running(userdata).scheduler, group);
 }
 
 fn recancel(userdata: ?*anyopaque) void {
-    _ = userdata;
+    _ = Core.running(userdata);
     tasks.recancel();
 }
 
 fn swapCancelProtection(userdata: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
-    _ = userdata;
+    _ = Core.running(userdata);
     return tasks.swapCancelProtection(new);
 }
 
 fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
-    return tasks.checkCancel(&Core.of(userdata).scheduler);
+    return tasks.checkCancel(&Core.running(userdata).scheduler);
 }
 
 // Futexes.
 
 fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     return futex.wait(&r.scheduler, &r.futex, ptr, expected, timeout, true);
 }
 
 fn futexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     futex.wait(&r.scheduler, &r.futex, ptr, expected, .none, false) catch unreachable; // unreachable: not cancelable
 }
 
 fn futexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {
-    futex.wake(&Core.of(userdata).futex, ptr, max_waiters);
+    futex.wake(&Core.running(userdata).futex, ptr, max_waiters);
 }
 
 // Batches.
@@ -254,13 +254,13 @@ fn outsideOnPorts(r: *Core) bool {
 }
 
 fn batchAwaitAsync(userdata: ?*anyopaque, b: *Io.Batch) Io.Cancelable!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideOnPorts(r)) return batch.awaitEach(r.io(), b);
     return batch.awaitAsync(&r.scheduler, r.lanes.borrowedIo(), b);
 }
 
 fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideOnPorts(r)) {
         // Each operation runs to its end: no deadline can be kept.
         if (timeout != .none) return error.ConcurrencyUnavailable;
@@ -270,19 +270,19 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
 }
 
 fn batchCancel(userdata: ?*anyopaque, b: *Io.Batch) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     batch.cancel(&r.scheduler, r.lanes.borrowedIo(), b);
 }
 
 // Time.
 
 fn now(userdata: ?*anyopaque, c: Io.Clock) Io.Timestamp {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     return r.processors[0].loop.clock.now(c);
 }
 
 fn clockResolution(userdata: ?*anyopaque, c: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     return switch (r.processors[0].loop.clock) {
         .system => clock.resolution(c),
         .virtual => .fromNanoseconds(1),
@@ -290,7 +290,7 @@ fn clockResolution(userdata: ?*anyopaque, c: Io.Clock) Io.Clock.ResolutionError!
 }
 
 fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const p = Scheduler.processor() orelse return r.lanes.borrowedIo().vtable.sleep(r.lanes.borrowedIo().userdata, timeout);
     const deadline = perform.deadline(p, timeout) orelse return futexWaitForever(r);
     switch (deadline.clock) {
@@ -315,7 +315,7 @@ fn futexWaitForever(r: *Core) Io.Cancelable!void {
 // Randomness: a CSPRNG per processor, seeded from the system's.
 
 fn random(userdata: ?*anyopaque, buffer: []u8) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const borrowed = r.lanes.borrowedIo();
     const p = Scheduler.processor() orelse return borrowed.vtable.random(borrowed.userdata, buffer);
     const csprng = &r.csprngs[p.index];
@@ -336,7 +336,7 @@ fn holderId() usize {
 }
 
 fn lockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const me = holderId();
     if (@atomicLoad(usize, &r.stderr.holder, .acquire) != me) {
         try r.stderr.mutex.lock(r.io());
@@ -347,7 +347,7 @@ fn lockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.L
 }
 
 fn tryLockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const me = holderId();
     if (@atomicLoad(usize, &r.stderr.holder, .acquire) != me) {
         if (!r.stderr.mutex.tryLock()) return null;
@@ -371,7 +371,7 @@ fn lockedStderr(r: *Core, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr
 }
 
 fn unlockStderr(userdata: ?*anyopaque) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const s = &r.stderr;
     if (s.writer.err == null) s.writer.interface.flush() catch |err| switch (err) {
         // The file writer keeps the cause in `err`, read next.

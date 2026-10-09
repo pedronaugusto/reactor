@@ -13,6 +13,7 @@ test "a positional read of a write-only file reports its missing read capability
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
+    try runtime.start();
     defer runtime.deinit();
     const io = runtime.io();
     var tmp = testing.tmpDir(.{});

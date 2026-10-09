@@ -70,7 +70,7 @@ test "r6: raw offload refusal survives a caller outside every runtime" {
     if (!fiber.supported) return error.SkipZigTest;
     var refusing: Refusing = .init(testing.io, 0);
     var target: Threads = undefined;
-    try target.init(testing.allocator, .{ .workers = 0, .max_tasks = 8, .offload = .{ .injected = refusing.io() } });
+    try target.init(testing.allocator, .{ .workers = 0, .max_tasks = 8, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
     defer target.deinit();
     var c: Outside = .{ .io = target.io() };
     const thread = try std.Thread.spawn(.{}, Outside.refusal, .{&c});

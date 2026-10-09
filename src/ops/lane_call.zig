@@ -41,25 +41,31 @@ pub fn Result(comptime F: type) type {
 
 /// Fixed std.Io slots keep their specified result and cancellation shape.
 pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
-    return perform(ReturnOf(@TypeOf(func)), false, s, lanes, lane, func, args);
+    return perform(ReturnOf(@TypeOf(func)), false, false, s, lanes, lane, func, args);
+}
+
+/// Termination has capacity independent of occupied ordinary wait slots.
+pub fn control(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
+    return perform(ReturnOf(@TypeOf(func)), false, true, s, lanes, lane, func, args);
 }
 
 /// A refused raw call never ran; all result shapes report the refusal.
 pub fn fallible(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
+    if (!lanes.started) return error.ConcurrencyUnavailable;
     const owner = if (Scheduler.processor()) |p| p.scheduler else s;
-    if (Scheduler.current() == null and !lanes.inlined()) return fromThread(lanes, lane, func, args);
-    return perform(Result(@TypeOf(func)), true, owner, lanes, lane, func, args);
+    if (Scheduler.current() == null and !lanes.inlined()) return fromThread(Result(@TypeOf(func)), true, false, lanes, lane, func, args);
+    return perform(Result(@TypeOf(func)), true, false, owner, lanes, lane, func, args);
 }
 
 /// A caller outside the fiber scheduler still submits raw work to its lane.
 /// Its stack remains pinned through completion and executor group retirement.
-fn fromThread(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
+fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
     const Call = struct {
         const Self = @This();
         job: Lanes.Job,
         func: @TypeOf(func),
         args: @TypeOf(args),
-        result: Result(@TypeOf(func)) = undefined,
+        result: R = undefined,
         finished: Io.Event = .unset,
 
         fn run(job: *Lanes.Job) void {
@@ -72,22 +78,31 @@ fn fromThread(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Res
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane },
+        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ },
         .func = func,
         .args = args,
     };
+    while (!lanes.admit(&c.job)) {
+        if (comptime raw) return error.ConcurrencyUnavailable;
+        std.Thread.yield() catch std.atomic.spinLoopHint();
+    }
     lanes.submit(&c.job);
     c.finished.waitUncancelable(Scheduler.system());
     // Completion precedes the executor releasing its group token. No
     // cancelable wait may abandon the caller's frame in this interval.
     while (c.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
-    if (c.job.rejected) return error.ConcurrencyUnavailable;
+    lanes.retire(&c.job);
+    if (c.job.rejected) {
+        if (comptime raw) return error.ConcurrencyUnavailable;
+        @panic("reactor: admitted executor violated its capacity guarantee");
+    }
     return c.result;
 }
 
-fn perform(comptime R: type, comptime raw: bool, s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
-    const t = Scheduler.current() orelse return direct(lanes, lane, func, args);
+fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
+    if (comptime !raw) std.debug.assert(lanes.started);
     if (lanes.inlined()) return direct(lanes, lane, func, args);
+    const t = Scheduler.current() orelse return fromThread(R, raw, control_, lanes, lane, func, args);
     const previous_lane = t.lane;
     t.lane = lane;
     defer t.lane = previous_lane;
@@ -127,21 +142,30 @@ fn perform(comptime R: type, comptime raw: bool, s: *Scheduler, lanes: *Lanes, l
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.policy.priority },
+        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.policy.priority, .control = control_ },
         .func = func,
         .args = args,
         .task = t,
         .scheduler = s,
         .lanes = lanes,
     };
-    if (comptime cancelable(R)) t.enterWait(&c.hook) catch return error.Canceled;
+    while (!lanes.admit(&c.job)) {
+        if (comptime raw) return error.ConcurrencyUnavailable;
+        if (comptime cancelable(R)) if (t.takeCancel()) return error.Canceled;
+        Scheduler.yield();
+    }
+    defer lanes.retire(&c.job);
+    if (comptime cancelable(R)) t.enterWait(&c.hook) catch {
+        c.job.pending.store(0, .release);
+        return error.Canceled;
+    };
     Scheduler.park(.{ .func = Call.submit, .context = &c });
     t.leaveWait();
     // The executor lets go of the job's group just after the call returns.
     while (c.job.held()) Scheduler.yield();
     if (c.job.rejected) {
         if (comptime raw) return error.ConcurrencyUnavailable;
-        return unavailable(R);
+        @panic("reactor: admitted executor violated its capacity guarantee");
     }
     if (comptime cancelable(R)) {
         if (c.job.dropped) return t.acknowledge();
@@ -181,21 +205,4 @@ pub fn borrow(func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
         if (Scheduler.current()) |t| if (t.takeCancel()) return error.Canceled;
     }
     return @call(.auto, func, args);
-}
-
-/// A void or narrow result cannot invent a successful result for a call
-/// that never ran. Resource failures are explicit, including injected
-/// executors that violate their ability to accept cancellation jobs.
-fn unavailable(comptime R: type) R {
-    if (comptime @typeInfo(R) == .error_union) {
-        const names = @typeInfo(@typeInfo(R).error_union.error_set).error_set.error_names orelse return error.SystemResources;
-        inline for (names) |name| {
-            if (comptime std.mem.eql(u8, name, "SystemResources")) return error.SystemResources;
-        }
-        inline for (names) |name| {
-            if (comptime std.mem.eql(u8, name, "Unexpected")) return error.Unexpected;
-            if (comptime std.mem.eql(u8, name, "ConcurrencyUnavailable")) return error.ConcurrencyUnavailable;
-        }
-    }
-    @panic("reactor: lane executor refused a call whose result cannot report resource exhaustion");
 }

@@ -13,6 +13,8 @@ fn init(r: *Runtime) !void {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
+    errdefer r.deinit();
+    try r.start();
 }
 
 test "R1 native child wait uses no inline wait lane" {
@@ -178,6 +180,11 @@ const CrossRuntime = struct {
             return;
         };
         defer r.deinit();
+        r.start() catch |err| {
+            c.failure = err;
+            c.published.set(testing.io);
+            return;
+        };
         c.processor = Scheduler.processor().?;
         c.io = r.io();
         c.expected = owner();

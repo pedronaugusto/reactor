@@ -79,6 +79,7 @@ pub fn main(init: std.process.Init) !void {
     var runtime: reactor.Runtime = undefined;
     try runtime.init(init.gpa, .{ .workers = 0, .max_tasks = 64, .stack_size = 512 << 10, .offload = .none });
     defer runtime.deinit();
+    try runtime.start();
     const count: usize = if (stack) 2000 else 200;
     if (stack) try verifyDepth(init.gpa, &runtime);
     const before = Io.Clock.awake.now(init.io);

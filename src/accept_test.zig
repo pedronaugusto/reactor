@@ -78,6 +78,7 @@ test "a ring keeps at most eight accepted sockets between accepts" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
+    try runtime.start();
     defer runtime.deinit();
     const io = runtime.io();
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
@@ -121,6 +122,7 @@ test "accepting a burst keeps every connected peer" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
+    try runtime.start();
     defer runtime.deinit();
     const io = runtime.io();
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });

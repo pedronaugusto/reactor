@@ -26,6 +26,17 @@ pub fn init(d: *Driver, gpa: Allocator, seed: u64, options: Runtime.Options) !vo
 
 /// `init` with the runtime's allocator apart from the fake's.
 pub fn initWith(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
+    try d.build(fake_gpa, gpa, seed, options);
+    errdefer d.runtime.deinit();
+    try d.runtime.start();
+}
+
+/// Build a stopped driver to exercise the runtime startup boundary.
+pub fn initUnstarted(d: *Driver, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
+    return d.build(gpa, gpa, seed, options);
+}
+
+fn build(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
     d.virtual = .{};
     d.fake = .init(fake_gpa, .{ .seeded = .{ .seed = seed, .virtual = &d.virtual } });
     errdefer d.fake.deinit();

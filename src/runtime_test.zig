@@ -325,7 +325,7 @@ test "an injected executor carries every lane call" {
     defer threaded.deinit();
     var counting: Counting = .init(threaded.io(), .init(0));
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = counting.io() } });
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = counting.io(), .capacity = 128 } } });
     defer t.deinit();
     const io = t.io();
     for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, try blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));

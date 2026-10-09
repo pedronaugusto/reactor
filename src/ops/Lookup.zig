@@ -83,6 +83,7 @@ pub fn deinit(l: *Lookup, gpa: Allocator, lanes: *Lanes) void {
         while (r.finished.load(.acquire) == 0) system.futexWaitUncancelable(u32, &r.finished.raw, 0);
         r.job.group.await(lanes.executor(.lookup)) catch unreachable; // unreachable: shutdown runs outside a cancelable Threaded task
     }
+    for (l.records) |*r| lanes.retire(&r.job);
     gpa.free(l.records);
     l.* = undefined;
 }
@@ -94,6 +95,8 @@ fn acquire(l: *Lookup) ?*Record {
             r.occupied.store(false, .release);
             continue;
         }
+        if (r.job.admitted) r.lanes.retire(&r.job);
+        r.job = .{ .run = Record.run, .done = Record.done, .lane = .lookup, .pending = .init(0) };
         return r;
     }
     return null;
@@ -117,7 +120,12 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     r.published.store(false, .monotonic);
     r.notified.store(false, .monotonic);
     r.state.store(.pending, .monotonic);
-    try t.enterWait(&r.hook);
+    std.debug.assert(lanes.started);
+    if (!lanes.admit(&r.job)) return error.SystemResources;
+    t.enterWait(&r.hook) catch |err| {
+        lanes.retire(&r.job);
+        return err;
+    };
     r.finished.store(0, .release);
     r.job.pending.store(1, .monotonic);
     Scheduler.park(.{ .func = Record.submit, .context = r });

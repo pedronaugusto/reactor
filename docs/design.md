@@ -108,46 +108,35 @@ consumer edit. Default stack size and zero-copy defaults remain unchanged.
 The combined LATER/R6 phase is work in progress until its correctness review
 and exact final-head FAST and MERGE tiers pass and main is fast-forwarded.
 
-## Executor refusal
+## Executor capacity
 
-Owner decision db221e5 requires refusal errors for offloads, including void
-functions, with no inline fallback. `blocking` now adds `Canceled` and
-`ConcurrencyUnavailable` to every function result. `blockingHook.call` has
-the same fallible surface. A rejected submission returns before user code
-runs. Outside threads submit to the same lane and retain their frames until
-the executor releases its group; they wait without fiber cancellation. A
-foreign-runtime task resumes through its own scheduler, while execution and
-lane cancellation stay with the target runtime. Original user errors and
-successful results remain intact. A queued
-void call can be canceled without running; accepted calls retain their storage
-until all execution and cancellation owners let go. Hook adoption is a separate
-consumer batch.
+`init` reserves storage and starts no threads. `start` prepares the owned lane
+workers, including control capacity for cancellation, before publishing the
+runtime as started. A startup failure is returned to the application; that
+runtime must be deinitialized. Fixed `std.Io` operations require successful
+startup, checked in safe builds.
 
-### Remaining std.Io seam
+Admission reserves execution and cancellation together. A queued call has its
+own reservation; completing a call may serve the next queue member without
+releasing the completed call's reservation. The reservation survives until
+both its execution group and its individual cancellation group have retired.
+Detached resolver requests retain their reservation and storage until reuse
+or shutdown. Queue admission is bounded by the configured task and lookup
+bounds. Owned executors use fixed closure and scratch pools, and warmed
+workers; submission waits for retiring worker bookkeeping rather than
+creating a thread after startup.
 
-Zig's fixed `std.Io` signatures cannot be widened by an implementation.
-In particular, `childKill` returns void and CPU-clock `sleep` returns only
-`Canceled`. These operations can still reach an injected executor. There is
-no caller error channel for its ordinary refusal. Termination is the existing
-behavior and is not accepted as the completed contract.
+An injected executor supplies an `Io` and declares capacity exclusive to the
+runtime. Its guarantee covers submitted execution and cancellation groups,
+including retirement after callbacks return. Admission charges two units
+per call across all lanes, with two units kept for child termination. Termination bypasses occupied ordinary wait slots; its reservation also survives retirement. A capacity violation by the executor is a contract
+violation for a fixed signature or cancellation, rather than an ordinary
+late refusal. Hosts using a bounded executor must account for its retirement
+semantics when declaring capacity.
 
-Cancellation uses another job to invoke the accepted call's executor-specific
-`Group.cancel`. That job must also be accepted. Returning early on refusal
-would abandon live frames or an acquired result, and running it inline would
-violate the offload requirement. The ordinary lane cap does not bound retiring
-cancellation groups: a finished call can hand its slot to the next one while
-its cancellation control job still runs.
-
-The minimal alternatives are a separate guaranteed executor/capacity for fixed
-void/narrow std.Io operations and cancellation, or routing refusing injected
-executors only through the fallible raw surface. Either requires an explicit
-injected-executor contract, reserved capacity covering live and retiring control
-jobs, and no allocation or inline fallback after initialization. The owner
-choice requires guaranteed cancellation and kill capacity reserved at
-admission, where refusal can be returned as an error. This revision implements
-the fallible raw part; the reserved-capacity implementation remains required.
-
-Verification for the chosen remainder must force saturation, refusal and
-completion/cancellation races while poisoning released contexts, on native
-backends and under the thread sanitizer. Existing LATER/R1 lifetime and fault
-regressions remain required.
+Raw `blocking` and hook calls report `ConcurrencyUnavailable` at admission
+or executor refusal, without running user code. A fixed signature waits for
+admission capacity and retains its specified result type. The explicit
+`.none` profile borrows calls on the caller's thread and counts them; it
+creates no lane threads. Outside callers retain their stack through both
+executor groups. Foreign-runtime tasks resume on their own scheduler.

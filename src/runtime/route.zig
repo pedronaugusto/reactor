@@ -25,7 +25,7 @@ fn Return(comptime name: []const u8) type {
 pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
-            const r = Core.of(userdata);
+            const r = Core.running(userdata);
             const io = r.lanes.executor(lane);
             return lane_call.call(&r.scheduler, &r.lanes, lane, @field(io.vtable, name), .{io.userdata} ++ rest);
         }
@@ -40,7 +40,7 @@ pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotF
 pub fn files(comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
-            const r = Core.of(userdata);
+            const r = Core.running(userdata);
             if (native_files.call(name, r, rest)) |result| return result;
             if (r.options.files == .auto) {
                 const b = r.lanes.borrowedIo();
@@ -58,7 +58,7 @@ pub fn files(comptime name: []const u8) *const SlotFn(name) {
 pub fn borrowed(comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
-            const r = Core.of(userdata);
+            const r = Core.running(userdata);
             const io = r.lanes.borrowedIo();
             return lane_call.borrow(@field(io.vtable, name), .{io.userdata} ++ rest);
         }

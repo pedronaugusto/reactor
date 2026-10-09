@@ -90,7 +90,7 @@ fn deadlineOf(r: *Core, timeout: Io.Timeout) ?Io.Clock.Timestamp {
 }
 
 pub fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideBorrowed(r)) return borrowed(r, "operate", .{operation});
     switch (operation) {
         // On IOCP, device control on a handle opened for overlapped calls
@@ -156,7 +156,7 @@ fn positionalOnLoop(r: *Core, file: Io.File) bool {
 }
 
 pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (!positionalOnLoop(r, file)) {
         // The read itself inside the worker's blocking bracket: std's path
         // around the same call costs ~10% of a cached read.
@@ -200,7 +200,7 @@ fn cachedRead(fd: Io.File.Handle, buffer: []u8, offset: u64) ?usize {
 }
 
 pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) Io.File.WritePositionalError!usize {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (!positionalOnLoop(r, file)) return perFiles(r, "fileWritePositional", .{ file, header, data, splat, offset });
     // A positional write may be short: the first bytes there are.
     const bytes = first: {
@@ -221,7 +221,7 @@ pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const
 /// A sync is a ring operation on io_uring; elsewhere no kernel queue
 /// flushes (IOCP's flush is synchronous): the `sync` lane.
 pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const on_ring = r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
     if (!on_ring) return onLane(r, .sync, "fileSync", .{file});
     var o: Loop.Op = .{ .kind = .{ .sync = file.handle } };
@@ -234,7 +234,7 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 }
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (iocp(r)) {
         for (files) |f| closeBound(f.handle);
         return;
@@ -265,7 +265,7 @@ fn closeBound(handle: Io.File.Handle) void {
 }
 
 pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (iocp(r)) {
         for (sockets) |s| closeBound(s.handle);
         return;
@@ -341,7 +341,7 @@ const Abort = struct {
 };
 
 pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideBorrowed(r)) return borrowed(r, "netAccept", .{ server, options });
     // On Windows the options name the accepted socket's mode: a listener is
     // a stream socket there, and its connections are opened as stream
@@ -356,7 +356,7 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
 }
 
 pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideBorrowed(r)) return borrowed(r, "netConnectIp", .{ address, options });
     // On epoll and kqueue the socket connects in non-blocking mode, made so
     // at its creation, and is put back once connected.
@@ -393,7 +393,7 @@ fn narrow(comptime E: type, err: anytype) E {
 }
 
 pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Socket.Handle {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (outsideBorrowed(r)) return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
@@ -425,7 +425,7 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
 // their bindings are forgotten first.
 
 pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (builtin.os.tag != .windows) {
         const pipes = takePipes(child);
         defer closePipes(r, pipes);
@@ -449,14 +449,16 @@ pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.C
 }
 
 pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     if (builtin.os.tag != .windows) {
         const pipes = takePipes(child);
         defer closePipes(r, pipes);
-        return onLane(r, .wait, "childKill", .{child});
+        const executor = r.lanes.executor(.wait);
+        return lane_call.control(&r.scheduler, &r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
     }
     if (iocp(r)) forgetPipes(child);
-    onLane(r, .wait, "childKill", .{child});
+    const executor = r.lanes.executor(.wait);
+    lane_call.control(&r.scheduler, &r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
 }
 
 /// Transfer pipe cleanup from std's direct close to the runtime's close path.
@@ -527,7 +529,7 @@ fn keep(kept: *Kept, item: net.HostName.LookupResult) void {
 }
 
 pub fn netLookup(userdata: ?*anyopaque, host_name: net.HostName, resolved: *Io.Queue(net.HostName.LookupResult), options: net.HostName.LookupOptions) net.HostName.LookupError!void {
-    const r = Core.of(userdata);
+    const r = Core.running(userdata);
     const io = r.io();
     defer resolved.close(io);
     var kept: Kept = .{};

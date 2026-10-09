@@ -169,3 +169,12 @@ guard measurements justify a different default.
 ## Licence
 
 [MIT](LICENSE).
+
+`Runtime.init` starts no threads. Call fallible `Runtime.start` before using
+its `std.Io`; safe builds check this precondition. Startup prepares owned
+lane workers and cancellation capacity. An injected offload executor is
+`.{ .injected = .{ .io = host_io, .capacity = n } }`: `n` is capacity reserved
+exclusively for reactor, including retiring execution and cancellation jobs.
+Two units are reserved per admitted call, with two kept for child termination. Raw offloads refuse at admission;
+fixed-signature operations wait for admission capacity. A failed startup
+must be deinitialized.
