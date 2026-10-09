@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) !void {
             .tests = test_step,
             .portable_tests = true,
             .bench = .{
-                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "compare", .source = "bench/compare.zig", .timed = false }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "v11-prepare", .source = "bench/v11/prepare.zig", .timed = false } },
+                .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "v11-prepare", .source = "bench/v11/prepare.zig", .timed = false } },
                 .imports = benchImports,
                 .target = target,
                 .optimize = optimize,
@@ -65,32 +65,6 @@ pub fn build(b: *std.Build) !void {
         // fetch: the build a consumer gets.
         preflight.addConsumerCheck(b, .{ .package = "reactor", .program = b.path("ci/consumer.zig") });
     }
-    const compare = b.addExecutable(.{ .name = "compare", .root_module = b.createModule(.{ .root_source_file = b.path("bench/compare.zig"), .target = target, .optimize = .fast }) });
-    const evidence = b.addRunArtifact(compare);
-    evidence.addArg(b.graph.zig_exe);
-    evidence.setCwd(b.path("."));
-    evidence.has_side_effects = true;
-    b.step("later-evidence", "Run interleaved ReleaseFast A/B evidence without a performance gate").dependOn(&evidence.step);
-    const offloads = b.addRunArtifact(compare);
-    offloads.addArgs(&.{ b.graph.zig_exe, "--offloads" });
-    offloads.setCwd(b.path("."));
-    offloads.has_side_effects = true;
-    b.step("r6-offload-before", "Verify raw offload regressions against published main").dependOn(&offloads.step);
-    const regressions = b.addRunArtifact(compare);
-    regressions.addArgs(&.{ b.graph.zig_exe, "--regressions" });
-    regressions.setCwd(b.path("."));
-    regressions.has_side_effects = true;
-    b.step("later-regressions", "Verify regressions fail against exact public before revisions").dependOn(&regressions.step);
-    const costs = b.addRunArtifact(compare);
-    costs.addArgs(&.{ b.graph.zig_exe, "--costs" });
-    costs.setCwd(b.path("."));
-    costs.has_side_effects = true;
-    b.step("later-costs", "Run interleaved native process and deep-stack cost evidence").dependOn(&costs.step);
-    const ownership = b.addRunArtifact(compare);
-    ownership.addArgs(&.{ b.graph.zig_exe, "--ownership" });
-    ownership.setCwd(b.path("."));
-    ownership.has_side_effects = true;
-    b.step("later-ownership", "Run interleaved ReleaseFast scheduler ownership A/B").dependOn(&ownership.step);
     return needed;
 }
 

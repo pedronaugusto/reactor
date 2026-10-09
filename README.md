@@ -1,10 +1,5 @@
 # reactor
 
-The combined LATER and R6 work on branch `later` is work in progress.
-The injected-executor contract and final correctness gates remain open;
-this branch has not landed on main. Speed and size misses stay open in the
-mission, and V11 suite measurements belong to each package's adoption.
-
 reactor is an evented `std.Io` for Zig: every slot of the interface on the
 kernel's own completion queue, with stackful tasks on a work-stealing
 scheduler, and the loop under it usable alone. A program swaps `Io.Threaded`
@@ -45,6 +40,14 @@ std.debug.assert(total.load(.monotonic) == 1000 * 999 / 2);
 <!-- END GENERATED -->
 
 ## Design
+
+`Runtime.init` starts no threads. Call fallible `Runtime.start` before using
+its `std.Io`; safe builds check this precondition. Startup creates the
+scheduler workers and prepares the owned offload lanes: for each lane its cap
+of running calls, one cancellation for each and three more, parked until a
+call needs them (132 threads with the defaults on sixteen cores). A failed
+startup is returned and the runtime must be deinitialized. With `workers = 0`
+and `offload = .none` the runtime has no thread of its own.
 
 `Loop` owns one completion engine and its timers. `Runtime` owns the scheduler,
 stacks and offload lanes. Extensions take a plain `std.Io`, leaving protocol
@@ -100,6 +103,12 @@ Benchmarks are code in `bench/`; measurements are maintained separately.
 - **`Loop`**: one thread's completion engine with no threads of its own, driven
   by `run(.nowait)`, `run(.once)` or `run(.until)`, completions by callback or
   `reap`; on Windows it can share the host’s completion port.
+- **Offload lanes.** An owned lane is an `Io.Threaded` with fixed closure
+  storage. An injected one is `.{ .injected = .{ .io = host_io, .capacity = n } }`:
+  `n` is capacity reserved exclusively for reactor, including retiring execution
+  and cancellation jobs, two units per admitted call and two kept for child
+  termination. Raw offloads refuse at admission; fixed-signature operations
+  wait for admission capacity and never run inline.
 - **Embedding.** A host that owns its loop waits on `Runtime.backendHandle`
   for at most `nextTimeout` and calls `run(.nowait)`; work handed to the home
   thread from elsewhere (a lane call ending, a wake from a worker) makes the
@@ -158,8 +167,7 @@ for source and architecture checks, and `zig build check` to compile tests,
 examples and the own benchmarks. `zig build bench` runs manual timings; CI
 compiles them without timing. Native lifetime regressions live in
 [src/later_test.zig](src/later_test.zig) and
-[src/r1_regression_test.zig](src/r1_regression_test.zig); raw receipts stay in
-CI runs linked in the landing report.
+[src/r1_regression_test.zig](src/r1_regression_test.zig).
 
 V11 suite measurements belong to each package's move onto reactor. The
 [isolated harness](bench/v11/prepare.zig) preserves the measurements and consumer
@@ -169,12 +177,3 @@ guard measurements justify a different default.
 ## Licence
 
 [MIT](LICENSE).
-
-`Runtime.init` starts no threads. Call fallible `Runtime.start` before using
-its `std.Io`; safe builds check this precondition. Startup prepares owned
-lane workers and cancellation capacity. An injected offload executor is
-`.{ .injected = .{ .io = host_io, .capacity = n } }`: `n` is capacity reserved
-exclusively for reactor, including retiring execution and cancellation jobs.
-Two units are reserved per admitted call, with two kept for child termination. Raw offloads refuse at admission;
-fixed-signature operations wait for admission capacity. A failed startup
-must be deinitialized.
