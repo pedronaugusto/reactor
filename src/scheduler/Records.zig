@@ -30,6 +30,8 @@ pub const Record = struct {
 };
 
 items: []Record,
+/// The deepest park of every task that has ended or been trimmed.
+retained: std.atomic.Value(usize) = .init(0),
 
 pub fn init(gpa: std.mem.Allocator, count: u32) std.mem.Allocator.Error!Records {
     const items = try gpa.alloc(Record, count);
@@ -56,8 +58,10 @@ pub inline fn publish(records: *Records, task: *Task, processor: u16, state: Sta
     record.summary.store(@bitCast(summary), .monotonic);
 }
 
-pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usize) void {
-    const record = &records.items[task.stack orelse return];
+/// Notes a park `bytes` deep and returns the deepest park of this task since
+/// its stack was last trimmed.
+pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usize) usize {
+    const record = &records.items[task.stack.?];
     var summary: Summary = @bitCast(record.summary.load(.monotonic));
     summary.state = .waiting;
     summary.processor = processor;
@@ -66,10 +70,36 @@ pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usiz
     // Stack watermarks saturate at 64 GiB, far above a task's usual mapping.
     summary.high_water = @max(summary.high_water, @min(bytes, std.math.maxInt(u36)));
     record.summary.store(@bitCast(summary), .monotonic);
+    return summary.high_water;
 }
 
+/// The task is forgotten: its deepest park stays in `deepest`.
 pub inline fn release(records: *Records, task: *Task) void {
-    records.items[task.stack.?].summary.store(@bitCast(Summary{}), .monotonic);
+    const record = &records.items[task.stack.?];
+    const summary: Summary = @bitCast(record.summary.load(.monotonic));
+    if (summary.high_water > records.retained.load(.monotonic)) records.retain(summary.high_water);
+    record.summary.store(@bitCast(Summary{}), .monotonic);
+}
+
+/// Pages below `resident` bytes from the top of the task's stack were given
+/// back: its deepest park counts from there.
+pub fn trimmed(records: *Records, task: *Task, resident: usize) void {
+    const record = &records.items[task.stack.?];
+    var summary: Summary = @bitCast(record.summary.load(.monotonic));
+    records.retain(summary.high_water);
+    summary.high_water = @min(summary.high_water, @min(resident, std.math.maxInt(u36)));
+    record.summary.store(@bitCast(summary), .monotonic);
+}
+
+fn retain(records: *Records, bytes: usize) void {
+    _ = records.retained.fetchMax(bytes, .monotonic);
+}
+
+/// The deepest park any task has made, ended or live.
+pub fn deepest(records: *const Records) usize {
+    var deepest_: usize = records.retained.load(.monotonic);
+    for (records.items) |*record| deepest_ = @max(deepest_, record.highWater());
+    return deepest_;
 }
 
 /// A streaming observation; tasks may change state while it is printed.

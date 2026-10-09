@@ -57,6 +57,10 @@ pub fn holds(s: *const Scheduler, index: u16, fd: Io.File.Handle) bool {
     return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
 }
 
+/// How much deeper than its current park a task must once have been parked
+/// for the pages it touched then to be worth giving back.
+const trim_gap = 64 << 10;
+
 /// How long a processor with nothing to do looks for work before it
 /// waits in the kernel.
 const spin_ns = 20 * std.time.ns_per_us;
@@ -91,26 +95,20 @@ pub const Processor = struct {
     pinned: Fifo = .{},
     latency: RunQueue = .{},
     latency_pinned: Fifo = .{},
-    latency_ready: bool = false,
-    latency_runs: u8 = 0,
-    parked_high_water: std.atomic.Value(usize) = .init(0),
+    /// Zero while no latency work has reached this processor: the common
+    /// case takes the queue path that never looks at priorities.
+    latency_state: LatencyState = .{},
     stack_high_water: std.atomic.Value(usize) = .init(0),
-    inbox: Inbox(Task, "next") = .{},
-    cancels: Inbox(Task, "cancel_next") = .{},
-    errands: Inbox(Errand, "next") = .{},
+    /// Group members of this processor between leaving their group and
+    /// giving their stack back; written by the owner alone.
+    retiring: std.atomic.Value(u32) = .init(0),
+    /// What other threads write, on cache lines of their own.
+    remote: Remote = .{},
     /// How many operations this processor's kernel queue holds on each
     /// descriptor (hashed); `Scheduler.holders` says which processors hold
     /// any.
     held: [descriptor_slots]u16 = @splat(0),
     tick: u32 = 0,
-    /// Set while the processor may be waiting in the kernel: a producer that
-    /// sees it wakes the loop.
-    sleeping: std.atomic.Value(bool) = .init(false),
-    /// Set from the root's return to its host (`Runtime.run`) until the
-    /// root parks again: the scheduler is not looking and the host may be
-    /// waiting on the loop's handle, so a producer wakes the loop as for
-    /// `sleeping`.
-    away: std.atomic.Value(bool) = .init(false),
     /// The root's `run(mode)` the home processor is serving.
     serving: ?Serving = null,
     thread: ?std.Thread = null,
@@ -123,9 +121,45 @@ pub const Processor = struct {
     /// (the processor was handed to another thread meanwhile) or 3 (the
     /// home processor, given back to the home thread).
     blocking: std.atomic.Value(u32) = .init(0),
-    /// The home processor, held by another thread: the home thread wants
-    /// it back for the root.
-    home_wants: std.atomic.Value(bool) = .init(false),
+
+    /// The inboxes and flags other threads touch. Every wake reads the flags
+    /// and every remote push writes an inbox, so the owner's own state must
+    /// never share their lines: a producer's write would otherwise evict the
+    /// lines a task switch reads.
+    const Remote = struct {
+        inbox: Inbox(Task, "next") = .{},
+        cancels: Inbox(Task, "cancel_next") = .{},
+        errands: Inbox(Errand, "next") = .{},
+        /// Set while the processor may be waiting in the kernel: a producer
+        /// that sees it wakes the loop.
+        sleeping: std.atomic.Value(bool) = .init(false),
+        /// Set from the root's return to its host (`Runtime.run`) until the
+        /// root parks again: the scheduler is not looking and the host may
+        /// be waiting on the loop's handle, so a producer wakes the loop as
+        /// for `sleeping`.
+        away: std.atomic.Value(bool) = .init(false),
+        /// The home processor, held by another thread: the home thread
+        /// wants it back for the root.
+        home_wants: std.atomic.Value(bool) = .init(false),
+        /// Aligns and pads the whole to cache lines.
+        line: [0]u8 align(std.atomic.cache_line) = .{},
+
+        comptime {
+            assert(@alignOf(Remote) == std.atomic.cache_line and @sizeOf(Remote) % std.atomic.cache_line == 0);
+        }
+    };
+
+    const LatencyState = packed struct(u16) {
+        /// The latency queues may hold a task.
+        ready: bool = false,
+        /// Latency tasks run since a normal one had its turn.
+        runs: u8 = 0,
+        _: u7 = 0,
+
+        fn idle(state: LatencyState) bool {
+            return @as(u16, @bitCast(state)) == 0;
+        }
+    };
 
     /// A task queue only the owner touches.
     pub const Fifo = struct {
@@ -156,6 +190,9 @@ pub const Processor = struct {
     pub const Message = struct {
         switch_: fiber.Switch,
         action: Action,
+        /// A park whose stack holds pages a deeper park touched: once the
+        /// task is off it, the loop may arm its trim.
+        inspect: bool = false,
     };
 
     pub const Action = union(enum) {
@@ -201,32 +238,39 @@ pub const Processor = struct {
     pub fn pushLocal(p: *Processor, t: *Task, how: How) void {
         p.scheduler.records.publish(t, p.index, .ready);
         t.processor = p;
-        var pinned = t.policy.home or t.pins > 0;
-        if (pinned and t.execution.trim_pending) {
-            p.scheduler.trims.beforeRun(&p.loop, t);
-            pinned = t.policy.home or t.pins > 0;
-        }
-        if (t.policy.priority == .latency) {
-            p.latency_ready = true;
-            if (pinned) p.latency_pinned.push(t) else p.pushLatency(t);
-            p.scheduler.notify(p);
-            return;
-        }
-        if (pinned) {
-            p.pinned.push(t);
-            return;
-        }
+        if (t.pins != 0 or t.policy.routed()) return p.pushRouted(t);
         switch (how) {
             .spawned, .woken => if (p.scheduler.scheduling == .stealing) {
-                if (p.lifo) |previous| p.pushQueue(previous);
+                // A task in the LIFO slot cannot be stolen, so only one it
+                // displaces into the queue is work for an idle processor.
+                const displaced = p.lifo;
                 p.lifo = t;
-                p.scheduler.notify(p);
+                if (displaced) |previous| {
+                    p.pushQueue(previous);
+                    p.scheduler.notify(p);
+                }
                 return;
             },
             .completed, .yielded => {},
         }
         p.pushQueue(t);
         p.scheduler.notify(p);
+    }
+
+    /// A task that stays on this processor or runs with latency priority.
+    fn pushRouted(p: *Processor, t: *Task) void {
+        var pinned = t.policy.home or t.pins > 0;
+        if (pinned and t.execution.trim_pending) {
+            p.scheduler.trims.beforeRun(&p.loop, t);
+            pinned = t.policy.home or t.pins > 0;
+        }
+        if (t.policy.priority == .latency) {
+            p.latency_state.ready = true;
+            if (pinned) p.latency_pinned.push(t) else p.pushLatency(t);
+            p.scheduler.notify(p);
+            return;
+        }
+        if (pinned) p.pinned.push(t) else p.pushQueue(t);
     }
 
     fn pushQueue(p: *Processor, t: *Task) void {
@@ -241,7 +285,7 @@ pub const Processor = struct {
     }
 
     fn pushLatency(p: *Processor, t: *Task) void {
-        p.latency_ready = true;
+        p.latency_state.ready = true;
         if (p.latency.push(t)) return;
         var half: [run_queue.capacity / 2]*Task = undefined;
         if (p.latency.takeHalf(&half)) {
@@ -254,27 +298,27 @@ pub const Processor = struct {
     /// From any thread: `t` runs on this processor next time it looks.
     pub fn pushRemote(p: *Processor, t: *Task) void {
         p.scheduler.records.publish(t, p.index, .ready);
-        _ = p.inbox.push(t);
+        _ = p.remote.inbox.push(t);
         p.wakeIfIdle();
     }
 
     /// From any thread: `e` runs on this processor's thread.
     pub fn send(p: *Processor, e: *Errand) void {
-        _ = p.errands.push(e);
+        _ = p.remote.errands.push(e);
         p.wakeIfIdle();
     }
 
     /// After a push from another thread: a processor waiting in the kernel,
     /// or whose root is back in its host, is woken through its loop.
     fn wakeIfIdle(p: *Processor) void {
-        if (p.sleeping.load(.seq_cst) or p.away.load(.seq_cst)) wakeProcessor(p);
+        if (p.remote.sleeping.load(.seq_cst) or p.remote.away.load(.seq_cst)) wakeProcessor(p);
     }
 
     /// Whether this processor has a task to run or a message to serve: a
     /// host driving the home processor calls `run` again at once.
     pub fn hasWork(p: *const Processor) bool {
         return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or !p.latency.isEmpty() or !p.latency_pinned.isEmpty() or
-            !p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0;
+            !p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty() or p.scheduler.injectedLen() > 0;
     }
 
     /// The owner's: this processor's kernel queue now holds one more
@@ -294,7 +338,7 @@ pub const Processor = struct {
 
     /// From any thread: this processor checks `t`'s wait for a cancel.
     pub fn pushCancel(p: *Processor, t: *Task) void {
-        _ = p.cancels.push(t);
+        _ = p.remote.cancels.push(t);
         p.wakeIfIdle();
     }
 
@@ -309,7 +353,7 @@ pub const Processor = struct {
     // or thread-local reads at every task switch.
     fn scheduleMode(p: *Processor, comptime watched: bool) void {
         while (true) {
-            if (watched and p.index == 0 and p.home_wants.load(.seq_cst) and !p.on_home_thread) return p.giveBack();
+            if (watched and p.index == 0 and p.remote.home_wants.load(.seq_cst) and !p.on_home_thread) return p.giveBack();
             if (p.next()) |t| {
                 p.runTask(watched, t);
                 // The processor was handed on: this thread lets go of it.
@@ -330,23 +374,27 @@ pub const Processor = struct {
     inline fn next(p: *Processor) ?*Task {
         // Normal-only processors use the original queue path. Priority
         // accounting starts when local or injected latency work arrives.
-        if (!p.latency_ready and p.latency_runs == 0) return p.nextNormal();
+        if (p.latency_state.idle()) return p.nextNormal();
+        return p.nextByPriority();
+    }
+
+    fn nextByPriority(p: *Processor) ?*Task {
         // Eight latency tasks at most before offering normal work a turn.
-        if (p.latency_runs < 8) if (p.takeLatency()) |t| {
-            p.latency_runs += 1;
+        if (p.latency_state.runs < 8) if (p.takeLatency()) |t| {
+            p.latency_state.runs += 1;
             return t;
         };
         if (p.nextNormal()) |t| {
-            if (t.policy.priority == .normal) p.latency_runs = 0;
+            if (t.policy.priority == .normal) p.latency_state.runs = 0;
             return t;
         }
         return p.takeLatency();
     }
 
-    inline fn takeLatency(p: *Processor) ?*Task {
-        if (!p.latency_ready) return null;
+    fn takeLatency(p: *Processor) ?*Task {
+        if (!p.latency_state.ready) return null;
         const task = p.latency_pinned.pop() orelse p.latency.pop();
-        if (task == null) p.latency_ready = false;
+        if (task == null) p.latency_state.ready = false;
         return task;
     }
 
@@ -376,19 +424,19 @@ pub const Processor = struct {
     /// Moves remote wakes into the queues and serves cancel messages.
     fn drainInboxes(p: *Processor) bool {
         var any = false;
-        var woken = p.inbox.takeAll();
+        var woken = p.remote.inbox.takeAll();
         while (woken) |t| {
             woken = t.next;
             p.pushLocal(t, .completed);
             any = true;
         }
-        var errands = p.errands.takeAll();
+        var errands = p.remote.errands.takeAll();
         while (errands) |e| {
             errands = e.next;
             e.run(e, p);
             any = true;
         }
-        var cancels = p.cancels.takeAll();
+        var cancels = p.remote.cancels.takeAll();
         while (cancels) |t| {
             cancels = t.cancel_next;
             t.cancel_next = null;
@@ -440,9 +488,9 @@ pub const Processor = struct {
             // The first home entry parks the root without runTask starting it.
             if (was_running) p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
-        if (t.policy.measured or t.execution.deep_stack) p.inspectStack(t, action == .park);
+        if (message.inspect or t.policy.measured) p.inspectStack(t, message.inspect);
         p.current = null;
-        if (t.kind == .root) p.away.store(false, .monotonic);
+        if (t.kind == .root) p.remote.away.store(false, .monotonic);
         if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
@@ -454,17 +502,13 @@ pub const Processor = struct {
 
     /// Cold stack work uses only the owning, suspended task. Ordinary
     /// switches do not load shared diagnostic state or inspect trim records.
-    fn inspectStack(p: *Processor, t: *Task, parked: bool) void {
+    fn inspectStack(p: *Processor, t: *Task, trimmable: bool) void {
         const index = t.stack orelse return;
         if (t.policy.measured) {
             const depth = p.scheduler.stacks.highWater(index);
             if (depth > p.stack_high_water.load(.monotonic)) p.stack_high_water.store(depth, .monotonic);
-        } else if (builtin.os.tag != .windows and parked) {
-            const sp = fiber.stackPointer(&t.context);
-            const live = t.stack_top - sp;
-            if (p.scheduler.records.items[index].highWater() > live + (64 << 10)) {
-                p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.stacks, &p.scheduler.stack_trims, sp);
-            }
+        } else if (builtin.os.tag != .windows and trimmable) {
+            p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.records, &p.scheduler.stacks, &p.scheduler.shared.stack_trims, fiber.stackPointer(&t.context));
         }
     }
 
@@ -477,17 +521,17 @@ pub const Processor = struct {
 
     /// Waits in the kernel until a completion, a timer, or a wake.
     fn block(p: *Processor) void {
-        p.sleeping.store(true, .seq_cst);
-        defer p.sleeping.store(false, .monotonic);
+        p.remote.sleeping.store(true, .seq_cst);
+        defer p.remote.sleeping.store(false, .monotonic);
         // Publish idleness before checking the global queue. An injector
         // between the check and publication must still find someone to wake.
         p.scheduler.idle(p, true);
         defer p.scheduler.idle(p, false);
-        if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
+        if (!p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
         if (p.index != 0 and p.scheduler.stopping.load(.acquire)) return;
         // The home thread wants its processor back: its wake may have come
         // while this thread was still taking an earlier one.
-        if (p.index == 0 and p.home_wants.load(.seq_cst)) return;
+        if (p.index == 0 and p.remote.home_wants.load(.seq_cst)) return;
         const mode: Loop.RunMode = if (p.serving) |s| switch (s.mode) {
             .within, .until => |deadline| .{ .within = deadline },
             .nowait, .once => .once,
@@ -532,12 +576,12 @@ pub const Processor = struct {
             const victim = &all[(start + i) % all.len];
             if (victim == p) continue;
             if (victim.latency.stealInto(&p.latency)) |t| {
-                _ = p.scheduler.steals.fetchAdd(1, .monotonic);
+                _ = p.scheduler.shared.steals.fetchAdd(1, .monotonic);
                 p.pushLatency(t);
                 return true;
             }
             if (victim.local.stealInto(&p.local)) |t| {
-                _ = p.scheduler.steals.fetchAdd(1, .monotonic);
+                _ = p.scheduler.shared.steals.fetchAdd(1, .monotonic);
                 p.pushQueueFront(t);
                 return true;
             }
@@ -551,13 +595,13 @@ pub const Processor = struct {
     fn spin(p: *Processor) bool {
         const s = p.scheduler;
         if (s.processors.len < 2) return false;
-        if (s.searching.load(.monotonic) * 2 >= s.processors.len) return false;
-        _ = s.searching.fetchAdd(1, .acq_rel);
-        defer _ = s.searching.fetchSub(1, .acq_rel);
+        if (s.shared.searching.load(.monotonic) * 2 >= s.processors.len) return false;
+        _ = s.shared.searching.fetchAdd(1, .acq_rel);
+        defer _ = s.shared.searching.fetchSub(1, .acq_rel);
         const start = p.loop.clock.awake();
         var round: u32 = 0;
         while (true) : (round += 1) {
-            if (!p.inbox.isEmpty() or !p.cancels.isEmpty() or !p.errands.isEmpty() or s.injectedLen() > 0) return true;
+            if (!p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty() or s.injectedLen() > 0) return true;
             if (round % 16 == 0) {
                 // Its own completions first: free to ask for when the
                 // kernel flags them.
@@ -601,6 +645,30 @@ pub const Processor = struct {
     }
 };
 
+const Shared = struct {
+    inject_lock: Io.Mutex = .init,
+    inject_head: ?*Task = null,
+    inject_tail: ?*Task = null,
+    latency_head: ?*Task = null,
+    latency_tail: ?*Task = null,
+    inject_len: std.atomic.Value(u32) = .init(0),
+    /// Processors waiting in their kernel.
+    idle_count: std.atomic.Value(u32) = .init(0),
+    /// Processors spinning for work before they wait.
+    searching: std.atomic.Value(u32) = .init(0),
+    stack_trims: std.atomic.Value(u64) = .init(0),
+    /// Round robin for tasks started outside a processor under `per_core`.
+    placement: std.atomic.Value(u32) = .init(0),
+    steals: std.atomic.Value(u64) = .init(0),
+    forced_yields: std.atomic.Value(u64) = .init(0),
+    /// Aligns and pads the whole to cache lines.
+    line: [0]u8 align(std.atomic.cache_line) = .{},
+
+    comptime {
+        assert(@alignOf(Shared) == std.atomic.cache_line and @sizeOf(Shared) % std.atomic.cache_line == 0);
+    }
+};
+
 processors: []Processor,
 root: *Task,
 stacks: Stacks,
@@ -611,25 +679,14 @@ measure_stacks: bool = false,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
 budget_ns: u64,
-inject_lock: Io.Mutex = .init,
-inject_head: ?*Task = null,
-inject_tail: ?*Task = null,
-latency_head: ?*Task = null,
-latency_tail: ?*Task = null,
-inject_len: std.atomic.Value(u32) = .init(0),
-idle_count: std.atomic.Value(u32) = .init(0),
-stack_trims: std.atomic.Value(u64) = .init(0),
+/// Everything several processors write, on cache lines of their own: the
+/// read-mostly fields around it are read at every task switch.
+shared: Shared = .{},
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
 listener_lock: std.atomic.Value(bool) = .init(false),
 holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
-/// Processors spinning for work before they wait.
-searching: std.atomic.Value(u32) = .init(0),
 stopping: std.atomic.Value(bool) = .init(false),
-/// Round robin for tasks started outside a processor under `per_core`.
-placement: std.atomic.Value(u32) = .init(0),
-steals: std.atomic.Value(u64) = .init(0),
-forced_yields: std.atomic.Value(u64) = .init(0),
 
 /// The thread that built the runtime: the root runs there alone.
 home_thread: std.Thread.Id,
@@ -710,10 +767,9 @@ pub fn park(after: ?Processor.After) void {
     };
     if (t.stack != null) {
         const bytes = t.stack_top - @intFromPtr(&message); // safe: message is a live frame below this task's owned stack top
-        if (bytes > 64 << 10) t.execution.deep_stack = true;
-        p.scheduler.records.parked(t, p.index, bytes);
-        if (bytes > p.parked_high_water.load(.monotonic)) p.parked_high_water.store(bytes, .monotonic);
-    } // safe: message is a frame below this task's stack top
+        const deepest = p.scheduler.records.parked(t, p.index, bytes);
+        message.inspect = deepest > bytes + trim_gap;
+    }
     _ = fiber.switchTo(&message.switch_);
 }
 
@@ -757,7 +813,7 @@ pub fn spend(s: *Scheduler) void {
         }
         if (now - t.slice_start < s.budget_ns) return;
     }
-    _ = s.forced_yields.fetchAdd(1, .monotonic);
+    _ = s.shared.forced_yields.fetchAdd(1, .monotonic);
     yield();
 }
 
@@ -808,41 +864,41 @@ fn injectChain(s: *Scheduler, first: *Task, last: *Task, count: u32) void {
         if (task == last) break;
         task = next_task.?;
     }
-    s.inject_lock.lockUncancelable(system());
+    s.shared.inject_lock.lockUncancelable(system());
     if (heads[0]) |head| {
-        if (s.inject_tail) |tail| tail.next = head else s.inject_head = head;
-        s.inject_tail = tails[0];
+        if (s.shared.inject_tail) |tail| tail.next = head else s.shared.inject_head = head;
+        s.shared.inject_tail = tails[0];
     }
     if (heads[1]) |head| {
-        if (s.latency_tail) |tail| tail.next = head else s.latency_head = head;
-        s.latency_tail = tails[1];
+        if (s.shared.latency_tail) |tail| tail.next = head else s.shared.latency_head = head;
+        s.shared.latency_tail = tails[1];
     }
-    _ = s.inject_len.fetchAdd(count, .release);
-    s.inject_lock.unlock(system());
+    _ = s.shared.inject_len.fetchAdd(count, .release);
+    s.shared.inject_lock.unlock(system());
     s.wakeIdle();
 }
 
 pub fn injectedLen(s: *const Scheduler) u32 {
-    return s.inject_len.load(.acquire);
+    return s.shared.inject_len.load(.acquire);
 }
 
 /// One task from the global queue for `p`.
 pub fn takeInjected(s: *Scheduler, p: *Processor) ?*Task {
-    if (s.inject_len.load(.acquire) == 0) return null;
-    s.inject_lock.lockUncancelable(system());
-    defer s.inject_lock.unlock(system());
-    const latency = s.latency_head != null and (p.latency_runs < 8 or s.inject_head == null);
-    const t = (if (latency) s.latency_head else s.inject_head) orelse return null;
+    if (s.shared.inject_len.load(.acquire) == 0) return null;
+    s.shared.inject_lock.lockUncancelable(system());
+    defer s.shared.inject_lock.unlock(system());
+    const latency = s.shared.latency_head != null and (p.latency_state.runs < 8 or s.shared.inject_head == null);
+    const t = (if (latency) s.shared.latency_head else s.shared.inject_head) orelse return null;
     if (latency) {
-        p.latency_runs +|= 1;
-        s.latency_head = t.next;
-        if (s.latency_head == null) s.latency_tail = null;
+        p.latency_state.runs +|= 1;
+        s.shared.latency_head = t.next;
+        if (s.shared.latency_head == null) s.shared.latency_tail = null;
     } else {
-        s.inject_head = t.next;
-        if (s.inject_head == null) s.inject_tail = null;
+        s.shared.inject_head = t.next;
+        if (s.shared.inject_head == null) s.shared.inject_tail = null;
     }
     t.next = null;
-    _ = s.inject_len.fetchSub(1, .release);
+    _ = s.shared.inject_len.fetchSub(1, .release);
     return t;
 }
 
@@ -852,9 +908,9 @@ pub fn takeInjected(s: *Scheduler, p: *Processor) ?*Task {
 pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
     _ = p;
     if (waiting) {
-        _ = s.idle_count.fetchAdd(1, .seq_cst);
+        _ = s.shared.idle_count.fetchAdd(1, .seq_cst);
     } else {
-        _ = s.idle_count.fetchSub(1, .seq_cst);
+        _ = s.shared.idle_count.fetchSub(1, .seq_cst);
         // The monitor parks while every processor waits: one is back.
         if (s.monitor) |m| if (m.parked.load(.seq_cst)) m.poke();
     }
@@ -862,7 +918,7 @@ pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
 
 /// Whether every processor waits in its kernel.
 pub fn allIdle(s: *const Scheduler) bool {
-    return s.idle_count.load(.seq_cst) == s.processors.len;
+    return s.shared.idle_count.load(.seq_cst) == s.processors.len;
 }
 
 // Blocking calls and handoff.
@@ -906,7 +962,7 @@ pub fn leaveBlocking(b: *Blocking) void {
     if (b.processor.blocking.cmpxchgStrong(b.word, b.word & ~@as(u32, 3), .acquire, .monotonic) == null) return;
     if (b.task.kind == .root) {
         // The root never leaves its thread: the processor comes back.
-        b.processor.home_wants.store(true, .seq_cst);
+        b.processor.remote.home_wants.store(true, .seq_cst);
         wakeProcessor(b.processor);
         reclaim(b.processor);
         b.processor.sched_context = b.home;
@@ -928,7 +984,7 @@ pub fn reclaim(p: *Processor) void {
         if (word & 3 == 3) break;
         system().futexWaitUncancelable(u32, &p.blocking.raw, word);
     }
-    p.home_wants.store(false, .monotonic);
+    p.remote.home_wants.store(false, .monotonic);
     if (held == null) enter(p);
     p.adopt();
 }
@@ -981,9 +1037,9 @@ pub fn serveThread(s: *Scheduler, first: ?*Processor) void {
 /// it, if there is one.
 pub fn notify(s: *Scheduler, p: *Processor) void {
     if (s.scheduling != .stealing) return;
-    if (s.idle_count.load(.seq_cst) == 0) return;
+    if (s.shared.idle_count.load(.seq_cst) == 0) return;
     // A spinning processor will find it.
-    if (s.searching.load(.seq_cst) > 0) return;
+    if (s.shared.searching.load(.seq_cst) > 0) return;
     if (p.local.isEmpty() and p.latency.isEmpty() and p.lifo == null) return;
     s.wakeIdle();
 }
@@ -992,10 +1048,10 @@ fn wakeIdle(s: *Scheduler) void {
     // A host outside run() is waiting on the home loop's handle, rather
     // than counted as a processor waiting in its kernel.
     const home = &s.processors[0];
-    if (home.away.load(.seq_cst)) wakeProcessor(home);
-    if (s.idle_count.load(.seq_cst) == 0) return;
+    if (home.remote.away.load(.seq_cst)) wakeProcessor(home);
+    if (s.shared.idle_count.load(.seq_cst) == 0) return;
     for (s.processors) |*other| {
-        if (other.sleeping.load(.seq_cst)) {
+        if (other.remote.sleeping.load(.seq_cst)) {
             wakeProcessor(other);
             return;
         }
@@ -1055,6 +1111,13 @@ inline fn createAt(s: *Scheduler, index: u32, location: Stacks.Location, kind: T
     return .{ t, @ptrFromInt(extra_at) };
 }
 
+/// Waits until every group member that has left its group has given its
+/// stack back, so an awaiter that saw an empty group sees no stack in use
+/// by it. A member counts itself in before it leaves the group.
+pub fn awaitRetired(s: *Scheduler) void {
+    for (s.processors) |*p| while (p.retiring.load(.acquire) != 0) std.atomic.spinLoopHint();
+}
+
 /// Gives back the stack of a task that has ended and been forgotten.
 pub inline fn release(s: *Scheduler, t: *Task) void {
     const index = t.stack.?;
@@ -1074,7 +1137,7 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
         return p.pushLocal(t, .spawned);
     };
     if (s.scheduling == .per_core) {
-        const i = s.placement.fetchAdd(1, .monotonic) % s.processors.len;
+        const i = s.shared.placement.fetchAdd(1, .monotonic) % s.processors.len;
         const p = &s.processors[i];
         t.processor = p;
         return p.pushRemote(t);

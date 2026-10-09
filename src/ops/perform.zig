@@ -138,7 +138,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (options.cancelable) try t.enterWait(&w.hook);
     const fd = descriptorOf(o.kind);
     if (fd) |d| p.hold(d);
-    if (builtin.os.tag == .linux) o.deadline = options.deadline;
+    if (builtin.os.tag == .linux) o.linked = .of(options.deadline);
     const done = p.loop.start(o) catch {
         if (fd) |d| p.release(d);
         t.leaveWait();

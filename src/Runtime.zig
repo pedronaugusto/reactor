@@ -1,9 +1,10 @@
 //! N loops plus stackful tasks on a work-stealing scheduler: a complete
 //! `std.Io`. `init` builds everything and starts nothing; the thread that
 //! calls it is the home thread, where root code runs on its own stack and
-//! never migrates. `start` spawns the workers the options name; with
-//! `workers = 0` the runtime has no thread of its own and the host calls
-//! `run(mode)`, once per frame or when `backendHandle` is readable.
+//! never migrates. `start` spawns the workers the options name and prepares
+//! the owned offload lanes; with `workers = 0` and `offload = .none` the
+//! runtime has no thread of its own and the host calls `run(mode)`, once per
+//! frame or when `backendHandle` is readable.
 const Runtime = @This();
 
 const std = @import("std");
@@ -114,21 +115,19 @@ pub const Stats = struct {
 pub fn stats(r: *Runtime) Stats {
     var lanes: [Lanes.count]Lanes.Stats = undefined;
     for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
-    var parked: usize = 0;
     var overall: usize = 0;
     for (r.core.processors) |*processor| {
-        parked = @max(parked, processor.parked_high_water.load(.monotonic));
         overall = @max(overall, processor.stack_high_water.load(.monotonic));
     }
     return .{
-        .parked_high_water = parked,
+        .parked_high_water = r.core.scheduler.records.deepest(),
         .stack_high_water = if (r.core.options.measure_stacks) overall else null,
-        .stack_trims = r.core.scheduler.stack_trims.load(.monotonic),
+        .stack_trims = r.core.scheduler.shared.stack_trims.load(.monotonic),
         .workers = @intCast(r.core.processors.len - 1),
         .tasks = r.core.scheduler.stacks.inUse(.monotonic),
         .max_tasks = r.core.options.max_tasks,
-        .steals = r.core.scheduler.steals.load(.monotonic),
-        .forced_yields = r.core.scheduler.forced_yields.load(.monotonic),
+        .steals = r.core.scheduler.shared.steals.load(.monotonic),
+        .forced_yields = r.core.scheduler.shared.forced_yields.load(.monotonic),
         .lanes = lanes,
         .handoffs = if (r.core.scheduler.monitor) |m| m.handoffs.load(.monotonic) else 0,
         .stalls = if (r.core.scheduler.monitor) |m| m.stalls.load(.monotonic) else 0,

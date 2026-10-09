@@ -249,7 +249,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     // handed to it before this was set makes the handle ready now.
     const home = c.root.processor.?;
     const p: *Processor = @ptrCast(@alignCast(home)); // safe: the root's processor is the home one
-    p.away.store(true, .seq_cst);
+    p.remote.away.store(true, .seq_cst);
     if (p.hasWork()) p.loop.wake();
 }
 

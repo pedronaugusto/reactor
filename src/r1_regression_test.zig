@@ -152,6 +152,42 @@ test "R1 group await observes all member stacks released" {
     }
 }
 
+test "R1 group await waits for a member still returning its stack" {
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .workers = 1, .max_tasks = 8, .stack_size = 512 << 10 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    try runtime.start();
+    const io = runtime.io();
+    // A member counts itself in before it leaves its group and out after its
+    // stack is back; stand in for one that is between the two.
+    const processor = &runtime.core.processors[1];
+    processor.retiring.store(1, .release);
+    const Release = struct {
+        fn run(p: *Scheduler.Processor, released: *std.atomic.Value(bool)) void {
+            testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+            released.store(true, .release);
+            p.retiring.store(0, .release);
+        }
+    };
+    var released: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(.{}, Release.run, .{ processor, &released });
+    defer thread.join();
+    // A member that outlives the await's first look, so the runtime's own
+    // await runs rather than std's shortcut for an empty group.
+    const Nap = struct {
+        fn run(i: Io) Io.Cancelable!void {
+            try i.sleep(.fromMilliseconds(2), .awake);
+        }
+    };
+    var group: Io.Group = .init;
+    try group.concurrent(io, Nap.run, .{io});
+    try group.await(io);
+    try testing.expect(released.load(.acquire));
+}
+
 const CrossRuntime = struct {
     mode: enum { wake, spawn },
     scheduling: Scheduler.Scheduling = .stealing,
@@ -212,7 +248,7 @@ const CrossRuntime = struct {
         switch (c.mode) {
             .wake => {
                 // Destination waiter and root are both off-stack before waking.
-                while (!c.processor.sleeping.load(.seq_cst)) std.atomic.spinLoopHint();
+                while (!c.processor.remote.sleeping.load(.seq_cst)) std.atomic.spinLoopHint();
                 c.event.set(c.io);
             },
             .spawn => c.future = try c.io.concurrent(owner, .{}),

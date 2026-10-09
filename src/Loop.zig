@@ -85,7 +85,21 @@ pub const Op = struct {
 
     /// Absolute deadline, linked in the kernel where supported. Other
     /// backends are timed by the runtime's wheel.
-    deadline: if (builtin.os.tag == .linux) ?Io.Clock.Timestamp else void = if (builtin.os.tag == .linux) null else {},
+    linked: if (builtin.os.tag == .linux) Linked else void = if (builtin.os.tag == .linux) .{} else {},
+
+    /// A deadline in the Op's own bytes: sixteen of them, where an optional
+    /// timestamp would take forty-eight in every operation.
+    pub const Linked = struct {
+        /// Nanoseconds on `clock`, saturating; read only when `set`.
+        ns: i64 = 0,
+        clock: Io.Clock = .awake,
+        set: bool = false,
+
+        pub fn of(at: ?Io.Clock.Timestamp) Linked {
+            const t = at orelse return .{};
+            return .{ .ns = std.math.lossyCast(i64, t.raw.nanoseconds), .clock = t.clock, .set = true };
+        }
+    };
 
     pub const Kind = op.Kind;
     pub const Result = op.Result;

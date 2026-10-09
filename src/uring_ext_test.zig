@@ -402,7 +402,7 @@ test "kernel submit reaps a timed out read before its buffer is poisoned" {
     var buffer: [8]u8 = undefined;
     try testing.expectError(error.Timeout, reactor.kernel.submit(r.io(), rawRead, RawRead{ .fd = fds[0], .buffer = &buffer }, ms(1)));
     @memset(&buffer, 0xa5);
-    try testing.expectEqual(@as(usize, 8), posix.system.write(fds[1], "latebyte", 8));
+    try testing.expect(posix.system.write(fds[1], "latebyte", 8) == 8);
     try r.io().sleep(.fromMilliseconds(1), .awake);
     try testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xa5)), &buffer);
 }

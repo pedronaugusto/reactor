@@ -5,6 +5,11 @@
 //! where a steal in progress began. They differ only while a stealer copies
 //! tasks out, and a second stealer waits for that to finish. The tail is
 //! written by the owner alone.
+//!
+//! Head, tail and slots each start on a cache line of their own. Thieves read
+//! a victim's queues while it runs, so a line they share with anything the
+//! owner writes on every task switch would bounce between cores; the fields
+//! the owner writes stay off every line a thief reads.
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -26,9 +31,9 @@ pub fn RunQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        head: std.atomic.Value(u64) = .init(0),
-        tail: std.atomic.Value(u32) = .init(0),
-        buffer: [capacity]std.atomic.Value(?*T) = @splat(.init(null)),
+        head: std.atomic.Value(u64) align(std.atomic.cache_line) = .init(0),
+        tail: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
+        buffer: [capacity]std.atomic.Value(?*T) align(std.atomic.cache_line) = @splat(.init(null)),
 
         /// The tasks queued, as the owner sees them.
         pub fn len(q: *const Self) u32 {

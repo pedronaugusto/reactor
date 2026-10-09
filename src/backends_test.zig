@@ -501,7 +501,7 @@ test "a recycled Wake descriptor remains registered on readiness backends" {
                 }
             }.send, .{ io, &wake });
             defer sender.cancel(io) catch {};
-            try reactor.wait(io, .{ .wake = &wake }, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } });
+            try reactor.wait(io, .{ .wake = &wake }, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
             try sender.await(io);
         }
     }

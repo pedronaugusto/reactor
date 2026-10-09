@@ -80,7 +80,7 @@ fn run(r: *Core, o: *Loop.Op, options: perform.Options) perform.Error!void {
 /// the workers in turn, or the home processor when there are none.
 fn elsewhere(r: *Core) *Processor {
     if (r.processors.len == 1) return &r.processors[0];
-    const n = r.scheduler.placement.fetchAdd(1, .monotonic);
+    const n = r.scheduler.shared.placement.fetchAdd(1, .monotonic);
     return &r.processors[1 + n % (r.processors.len - 1)];
 }
 

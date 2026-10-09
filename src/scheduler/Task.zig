@@ -76,11 +76,15 @@ pub const Policy = packed struct(u3) {
     home: bool = false,
     priority: Priority = .normal,
     measured: bool = false,
+
+    /// Whether the task leaves the ordinary path: it stays on its processor
+    /// or runs with latency priority. One test of the byte.
+    pub inline fn routed(policy: Policy) bool {
+        return @as(u3, @bitCast(policy)) & 0b011 != 0;
+    }
 };
-pub const Execution = packed struct(u4) {
+pub const Execution = packed struct(u3) {
     protection: Protection = .{},
-    /// A sampled park reached a depth worth trimming.
-    deep_stack: bool = false,
     /// Its loop owns a trim timer until resume.
     trim_pending: bool = false,
 };

@@ -373,9 +373,12 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     try testing.expect(target.backend.io_uring.ring.cq.head.* != head);
     try testing.expect(!target.backend.io_uring.wake_pending.load(.acquire));
     // A failed source CQE must clear coalescing and use the retained
-    // target's eventfd. Corrupt only our still-unsubmitted request.
+    // target's eventfd. The message is submitted at once, so aim it at a
+    // descriptor that is not a ring.
+    const target_fd = target.backend.io_uring.ring.fd;
+    target.backend.io_uring.ring.fd = -1;
     loop_internal.wakeFrom(&target, &source);
-    ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].fd = -1;
+    target.backend.io_uring.ring.fd = target_fd;
     for (0..100) |_| {
         _ = try source.run(.nowait);
         if (target.backend.io_uring.wake_pending.load(.acquire)) break;
@@ -403,6 +406,38 @@ fn pressureLoop() !Loop {
     try loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 128, .submission_entries = 2 });
     return loop;
 }
+test "later: a spawner that never returns to its loop still wakes a sleeping worker" {
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    try r.start();
+    const io = r.io();
+    // The worker spins briefly, then sleeps in its kernel.
+    try io.sleep(.fromMilliseconds(30), .awake);
+    const Mark = struct {
+        fn run(flag: *std.atomic.Value(u32)) Io.Cancelable!void {
+            flag.store(1, .release);
+        }
+    };
+    var ran: std.atomic.Value(u32) = .init(0);
+    var group: Io.Group = .init;
+    // The second spawn pushes the first out of the LIFO slot into the
+    // queue another processor can take.
+    try group.concurrent(io, Mark.run, .{&ran});
+    try group.concurrent(io, Mark.run, .{&ran});
+    // Hold this processor with no cancelation point: only a wake sent at
+    // once reaches the worker, not one waiting for the next poll.
+    const system = testing.io;
+    const until = Io.Clock.awake.now(system).nanoseconds + 2 * std.time.ns_per_s;
+    while (ran.load(.acquire) == 0 and Io.Clock.awake.now(system).nanoseconds < until) std.atomic.spinLoopHint();
+    const woken = ran.load(.acquire) != 0;
+    try group.await(io);
+    try testing.expect(woken);
+}
+
 test "later: full SQ and CQ drain ownership without invoking callbacks during submit" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // A host may return an initialized empty loop by value before entry.
@@ -440,12 +475,44 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
     try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
 }
 
-test "later: native linked deadline drains timer and read before releasing the frame" {
+test "later: native linked connect deadline drains timer and socket before releasing the frame" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try native(&r, .io_uring);
     defer r.deinit();
     if (!r.core.processors[0].loop.backend.io_uring.features.linked_timeout) return error.SkipZigTest;
+    const io = r.io();
+    // A listener nobody accepts from drops the SYN once its queue is full,
+    // so the next connect waits out its deadline in the kernel.
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .kernel_backlog = 0 });
+    defer server.deinit(io);
+    var held: [4]?Io.net.Stream = @splat(null);
+    defer for (held) |slot| if (slot) |stream| stream.close(io);
+    var expired = false;
+    for (&held) |*slot| {
+        const connected = reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(50) }) catch |err| switch (err) {
+            error.Timeout => {
+                expired = true;
+                break;
+            },
+            else => return err,
+        };
+        slot.* = connected.stream;
+    }
+    if (!expired) return error.SkipZigTest;
+    try testing.expectEqual(@as(u32, 0), r.core.processors[0].loop.in_flight);
+    // The ring is whole afterwards: a connect with room in the queue works.
+    const peer = try server.accept(io);
+    peer.close(io);
+    const later = try reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(1000) });
+    later.stream.close(io);
+}
+
+test "later: a read under a deadline drains timer and read before releasing the frame" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try native(&r, .io_uring);
+    defer r.deinit();
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(r.io(), .{});
     defer server.deinit(r.io());
     const stream = try server.socket.address.connect(r.io(), .{ .mode = .stream });

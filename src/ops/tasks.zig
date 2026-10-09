@@ -190,18 +190,22 @@ fn memberEntry(t: *Task) noreturn {
 /// awaiter told if it was the last.
 fn memberDone(context: *anyopaque, t: *Task) void {
     _ = context;
-    const s = schedulerOf(t);
+    const p: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+    const s = p.scheduler;
     const g = t.group.?;
+    // Counted from before it leaves the group until its stack is back, so an
+    // awaiter that finds the group empty can wait for the stacks without
+    // every member holding the group's lock for the release.
+    p.retiring.store(p.retiring.load(.monotonic) +% 1, .release);
     var st = lockGroup(g);
     if (t.group_prev) |prev| prev.group_next = t.group_next else g.token.store(t.group_next, .release);
     if (t.group_next) |next| next.group_prev = t.group_prev;
     const last = head(g) == null;
     const a = if (last) st.awaiterPtr() else null;
     if (last) st = st.withAwaiter(null);
-    // Empty is observable only after every member has returned its stack.
-    // Awaiters that see an empty group may immediately stop the runtime.
-    s.release(t);
     unlockGroup(g, st);
+    s.release(t);
+    p.retiring.store(p.retiring.load(.monotonic) -% 1, .release);
     if (a) |awaiter| wakeAwaiter(s, awaiter);
 }
 
@@ -238,26 +242,29 @@ fn registerGroupAwaiter(context: *anyopaque, t: *Task) void {
 /// Waits until `g` has no members. Cancelable: a cancel is passed to every
 /// member, and the wait still lasts until they have all ended.
 pub fn groupAwait(s: *Scheduler, g: *Io.Group) Io.Cancelable!void {
-    _ = s;
-    const t = Scheduler.current() orelse return waitGroupThread(g);
+    const t = Scheduler.current() orelse {
+        waitGroupThread(g);
+        return s.awaitRetired();
+    };
     var w: GroupWait = .{ .group = g };
     t.enterWait(&w.hook) catch {
         // A cancel was already due: pass it on and wait for the members.
         cancelMembers(g);
         waitGroup(g, t);
+        s.awaitRetired();
         return error.Canceled;
     };
     waitGroup(g, t);
+    s.awaitRetired();
     t.leaveWait();
     if (w.fired) return t.acknowledge();
 }
 
 /// Cancels every member, then waits until all have ended.
 pub fn groupCancel(s: *Scheduler, g: *Io.Group) void {
-    _ = s;
     cancelMembers(g);
-    const t = Scheduler.current() orelse return waitGroupThread(g);
-    waitGroup(g, t);
+    if (Scheduler.current()) |t| waitGroup(g, t) else waitGroupThread(g);
+    s.awaitRetired();
 }
 
 fn waitGroup(g: *Io.Group, t: *Task) void {

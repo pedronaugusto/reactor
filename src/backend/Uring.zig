@@ -319,10 +319,14 @@ pub fn consumePublished(u: *Uring) void {
 }
 
 pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
-    const linked = u.features.linked_timeout and o.deadline != null and switch (o.kind) {
-        .connect, .io, .read_at, .write_at, .sync, .wait, .raw => true,
-        else => false,
-    };
+    // The kernel's linked timeout is two more entries and a timer in the
+    // kernel for each operation, and most operations finish before their
+    // deadline: a read under a deadline lost 60% of its rate on a two-thread
+    // runtime in the lima VM and 4% on a hosted runner against the wheel,
+    // which arms and disarms in userspace. A connect is one operation per
+    // connection and the one that most often sits out its deadline, so it
+    // alone is linked.
+    const linked = u.features.linked_timeout and o.linked.set and o.kind == .connect;
     if (linked) u.reserveEntries(2);
     const ud = userData(@intFromPtr(o), .op); // safe: read back as the `Op` in `complete`
     switch (o.kind) {
@@ -405,8 +409,8 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
     if (linked) {
         const primary = &u.ring.sq.sqes[(u.ring.sq.sqe_tail -% 1) & u.ring.sq.mask];
         primary.flags |= linux.IOSQE_IO_LINK;
-        const at = o.deadline.?;
-        o.state.uring.timespec = timespecOf(at.raw.nanoseconds);
+        const at = o.linked;
+        o.state.uring.timespec = timespecOf(at.ns);
         o.state.uring.timeout_pending = true;
         const sqe = u.entry();
         sqe.prep_link_timeout(&o.state.uring.timespec, linux.IORING_TIMEOUT_ABS | @as(u32, switch (at.clock) {
@@ -858,10 +862,15 @@ fn timespecOf(ns: i96) linux.kernel_timespec {
 
 /// Only the source owner calls this. Failed messages fall back when their
 /// CQE is reaped; neither ring's mutable queues are touched cross-thread.
+/// The message is submitted at once: a source that does not return to its
+/// loop (a task spawning in a loop, or computing) would otherwise leave the
+/// sleeping target asleep with work waiting for it.
 pub fn messageWake(source: *Uring, target: *Uring) bool {
     if (!source.features.msg_ring) return false;
     if (target.message_pending.swap(true, .acq_rel)) return true;
     const sqe = source.entry();
     sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = userData(0, .auxiliary), .len = 0, .user_data = userData(@intFromPtr(target), .ignore) }); // safe: target outlives source polling and worker shutdown
+    // A refused submission stays queued for the source's next poll.
+    source.enter(.nowait) catch return true;
     return true;
 }
