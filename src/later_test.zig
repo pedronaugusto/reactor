@@ -155,7 +155,6 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     var r: Runtime = undefined;
     try native(&r, .io_uring);
     defer r.deinit();
-    try r.start();
     var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
