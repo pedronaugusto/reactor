@@ -293,7 +293,7 @@ pub fn recancel() void {
 
 pub fn swapCancelProtection(new: Io.CancelProtection) Io.CancelProtection {
     const t = Scheduler.current() orelse return .unblocked;
-    const old = t.protection.user;
-    t.protection.user = new;
+    const old = t.execution.protection.user;
+    t.execution.protection.user = new;
     return old;
 }

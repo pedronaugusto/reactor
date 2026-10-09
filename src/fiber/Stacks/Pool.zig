@@ -113,7 +113,7 @@ pub fn deinit(s: *Pool, gpa: Allocator) void {
 }
 
 /// A free stack's index, or null when every stack is in use.
-pub fn take(s: *Pool) ?u32 {
+pub inline fn take(s: *Pool) ?u32 {
     var raw = s.free.load(.acquire);
     while (true) {
         const f: Free = @bitCast(raw);
@@ -136,7 +136,7 @@ pub fn take(s: *Pool) ?u32 {
 /// Windows: commits a stack's top pages and the guard below them, the
 /// first time it is handed out.
 fn prepare(s: *Pool, index: u32) error{SystemResources}!void {
-    const page = memory.pageSize();
+    const page = (s.stride - s.size);
     const low = s.top(index) - initial_commit;
     try memory.commit(pages(low - page, low), true);
     try memory.commit(pages(low, s.top(index)), false);
@@ -149,11 +149,11 @@ fn pages(from: usize, to: usize) []align(memory.page_size_min) u8 {
 }
 
 /// The stack `index` as a context starts on it.
-pub fn stack(s: *const Pool, index: u32) fiber.Stack {
+pub inline fn stack(s: *const Pool, index: u32) fiber.Stack {
     return .{
         .top = s.top(index),
         .limit = if (is_windows) s.limits[index] else s.bottom(index),
-        .bottom = s.bottom(index) - memory.pageSize(),
+        .bottom = s.bottom(index) - (s.stride - s.size),
     };
 }
 
@@ -161,9 +161,9 @@ pub fn stack(s: *const Pool, index: u32) fiber.Stack {
 /// task writes there (the task's record and its copied context, written by
 /// the thread creating it): Windows grows a stack only for the thread
 /// running on it. False when `low` is past what the stack can commit.
-pub fn reach(s: *Pool, index: u32, low: usize) bool {
+pub inline fn reach(s: *Pool, index: u32, low: usize) bool {
     if (!is_windows) return true;
-    const page = memory.pageSize();
+    const page = (s.stride - s.size);
     const limit = s.limits[index];
     const want = std.mem.alignBackward(usize, low, page);
     if (want >= limit) return true;
@@ -176,13 +176,13 @@ pub fn reach(s: *Pool, index: u32, low: usize) bool {
 
 /// Windows: a task on stack `index` ended with the stack committed down to
 /// `limit`; the next task there starts with that much.
-pub fn ended(s: *Pool, index: u32, limit: usize) void {
+pub inline fn ended(s: *Pool, index: u32, limit: usize) void {
     if (!is_windows) return;
     s.limits[index] = @min(s.limits[index], limit);
 }
 
 /// Returns a stack no task runs on any more.
-pub fn give(s: *Pool, index: u32) void {
+pub inline fn give(s: *Pool, index: u32) void {
     s.push(index);
     // Zero publishes the last release after it stopped touching this pool.
     _ = s.in_use.fetchSub(1, .release);
@@ -199,19 +199,19 @@ fn push(s: *Pool, index: u32) void {
 }
 
 /// One past the highest usable byte of stack `index`; 16-aligned.
-pub fn top(s: *const Pool, index: u32) usize {
+pub inline fn top(s: *const Pool, index: u32) usize {
     return s.bottom(index) + s.size;
 }
 
 /// The lowest usable byte of stack `index`, just above its guard.
-pub fn bottom(s: *const Pool, index: u32) usize {
+pub inline fn bottom(s: *const Pool, index: u32) usize {
     const slab = s.slabs[index / per_slab];
-    return @intFromPtr(slab.ptr) + (index % per_slab) * s.stride + memory.pageSize(); // safe: an address, for laying out the stack
+    return @intFromPtr(slab.ptr) + (index % per_slab) * s.stride + (s.stride - s.size); // safe: an address, for laying out the stack
 }
 
 /// Gives the pages of stack `index` below `keep_from` back to the system.
 pub fn trim(s: *const Pool, index: u32, keep_from: usize) void {
-    const page = memory.pageSize();
+    const page = (s.stride - s.size);
     const low = s.bottom(index);
     const high = std.mem.alignBackward(usize, keep_from, page);
     if (high <= low) return;

@@ -54,7 +54,7 @@ pub fn deinit(s: *Stacks, gpa: std.mem.Allocator) void {
     s.* = undefined;
 }
 
-pub fn take(s: *Stacks) ?u32 {
+pub inline fn take(s: *Stacks) ?u32 {
     const index = s.default_pool.take() orelse return null;
     if (s.pools.len > 0) _ = s.total_in_use.fetchAdd(1, .monotonic);
     return index;
@@ -88,7 +88,7 @@ pub fn takeSized(s: *Stacks, bytes: ?usize) ?u32 {
 }
 
 pub const Location = struct { pool: *Pool, index: u32 };
-pub fn locate(s: *Stacks, index: u32) Location {
+pub inline fn locate(s: *Stacks, index: u32) Location {
     if (index < s.default_pool.count) return .{ .pool = &s.default_pool, .index = index };
     var remaining = index - s.default_pool.count;
     for (s.pools) |*pool| {
@@ -117,11 +117,11 @@ pub fn reach(s: *Stacks, index: u32, low: usize) bool {
     const l = s.locate(index);
     return l.pool.reach(l.index, low);
 }
-pub fn ended(s: *Stacks, index: u32, limit: usize) void {
+pub inline fn ended(s: *Stacks, index: u32, limit: usize) void {
     const l = s.locate(index);
     l.pool.ended(l.index, limit);
 }
-pub fn give(s: *Stacks, index: u32) void {
+pub inline fn give(s: *Stacks, index: u32) void {
     const l = s.locate(index);
     l.pool.give(l.index);
     if (s.pools.len > 0) _ = s.total_in_use.fetchSub(1, .release);

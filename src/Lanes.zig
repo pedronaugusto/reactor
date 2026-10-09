@@ -23,7 +23,7 @@ const SlotPool = @import("lanes/SlotPool.zig");
 
 pub const Lane = enum(u2) { sync, lookup, wait, general };
 pub const count = 4;
-pub const Priority = enum { normal, latency };
+pub const Priority = enum(u1) { normal, latency };
 
 pub const Config = union(enum) {
     owned: Owned,

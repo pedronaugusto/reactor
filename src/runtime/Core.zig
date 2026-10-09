@@ -91,7 +91,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .vtable = vtable,
         .scheduler = undefined,
         .processors = try gpa.alloc(Processor, count),
-        .root = .{ .kind = .root, .home = true },
+        .root = .{ .kind = .root, .policy = .{ .home = true } },
         .lanes = undefined,
         .lookup = undefined,
         .jobs = undefined,
@@ -112,7 +112,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     errdefer stacks.deinit(gpa);
     var records = try Records.init(gpa, options.max_tasks);
     errdefer records.deinit(gpa);
-    var trims = try Trims.init(gpa, options.max_tasks);
+    var trims = try Trims.init(gpa, options.max_tasks, count);
     errdefer trims.deinit(gpa);
     c.scheduler = .{
         .processors = c.processors,
@@ -273,9 +273,9 @@ pub fn deinit(c: *Core) void {
     c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
     fiber.deinit(&c.processors[0].sched_context);
+    c.scheduler.trims.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
     memory.release(c.home_stack);
-    c.scheduler.trims.deinit(c.gpa);
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);

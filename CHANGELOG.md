@@ -22,6 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Restore the previous task record size, skip priority accounting on normal-only processors, and share one idle trim timer per loop. Short parks and immediate stack reuse keep their pages warm.
+
 - Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and execute accepted work on the lane. Foreign-runtime callers resume on their own scheduler.
 
 - Failed IP and Unix connects invalidate cached readiness before closing an unpublished socket.

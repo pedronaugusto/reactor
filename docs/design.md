@@ -75,8 +75,11 @@ open in the mission. Shared-machine timing uses paired, interleaved ratios
 with spread. Native x86 rows stay open until hardware is available.
 
 Unused pages are discarded only after a task has been parked for a full
-second. An init-reserved timer pins the task to its owning loop until resume;
-the loop cancels the timer before the stack can run or be released. Ended
+second. Each owning loop has one init-reserved timer and a list of idle
+candidates. A candidate pins the task there until resume; resumption unlinks
+it before its stack can run or be released. The timer may outlast its last
+candidate and is canceled before loop teardown. Quick reuse does not repeatedly
+arm and cancel timers. Ended
 stacks remain warm in the free pool, avoiding repeated discard/refault on
 immediate reuse. Retained free-stack pages are a resource cost until reuse or
 runtime teardown. Diagnostic painting still disables trimming.

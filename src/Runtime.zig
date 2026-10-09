@@ -100,7 +100,7 @@ pub const Stats = struct {
     handoffs: u64,
     /// Tasks that held their processor past `report_after`.
     stalls: u64,
-    /// Deep parked or ended stacks whose unused pages were discarded.
+    /// Deep idle parked stacks whose unused pages were discarded.
     stack_trims: u64,
     /// Deepest task frame observed at a park, retained after task release.
     parked_high_water: usize,

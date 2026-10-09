@@ -30,17 +30,14 @@ cancel_next: ?*Task = null,
 stack: ?u32 = null,
 /// The immutable upper bound, also used for parked stack watermarks.
 stack_top: usize = 0,
-/// Deepest sampled use since pages were last discarded. Owned by the task.
-resident_water: usize = 0,
-/// An idle trim timer pins this parked task to its owning loop.
-trim_pending: bool = false,
 kind: Kind,
-/// Latency-sensitive tasks receive a bounded share ahead of normal work.
-priority: Priority = .normal,
+/// Immutable after publication: foreign wakes can read this byte without
+/// racing the task's mutable execution hints.
+policy: Policy = .{},
+/// Owned by the running task, or by its pinned loop while parked.
+execution: Execution = .{},
 /// The processor it runs or last ran on (an opaque `*Processor`).
 processor: ?*anyopaque = null,
-/// Never leaves `processor`: the root, and every task under `per_core`.
-home: bool = false,
 /// Held on `processor` for now: a timer of its own armed there, or a
 /// batch with operations in that processor's kernel queue.
 pins: u16 = 0,
@@ -51,7 +48,6 @@ budget: u16 = 0,
 /// 0 until its first cancelation point that did not wait.
 slice_start: u64 = 0,
 cancel: std.atomic.Value(u32) = .init(0),
-protection: Protection = .{},
 /// The hook of the cancelable wait it is parked in; guarded by `locked`.
 wait: ?*Hook = null,
 /// Futures: 0 while running, `finished` once done, else the `*Awaiter`
@@ -74,6 +70,20 @@ lane: ?Lanes.Lane = null,
 pub const Priority = Lanes.Priority;
 
 pub const Kind = enum(u8) { root, future, member };
+
+pub const Policy = packed struct(u3) {
+    /// The root and per-core tasks stay on their processor.
+    home: bool = false,
+    priority: Priority = .normal,
+    measured: bool = false,
+};
+pub const Execution = packed struct(u4) {
+    protection: Protection = .{},
+    /// A sampled park reached a depth worth trimming.
+    deep_stack: bool = false,
+    /// Its loop owns a trim timer until resume.
+    trim_pending: bool = false,
+};
 
 pub const Start = union(enum) {
     none,
@@ -140,9 +150,9 @@ pub fn requestCancel(t: *Task) void {
 /// A cancelation point that does not wait: true when it fires, and then
 /// the request is acknowledged.
 pub fn takeCancel(t: *Task) bool {
-    if (!t.protection.open()) return false;
+    if (!t.execution.protection.open()) return false;
     if (!t.cancelRequested()) return false;
-    t.protection.acknowledged = true;
+    t.execution.protection.acknowledged = true;
     return true;
 }
 
@@ -150,11 +160,11 @@ pub fn takeCancel(t: *Task) bool {
 /// due, in which case it is acknowledged and the wait must not start.
 /// `null` hook: the wait is not cancelable (protection blocks it).
 pub fn enterWait(t: *Task, hook: *Hook) error{Canceled}!void {
-    if (!t.protection.open()) return;
+    if (!t.execution.protection.open()) return;
     t.lock();
     defer t.unlock();
     if (t.cancelRequested()) {
-        t.protection.acknowledged = true;
+        t.execution.protection.acknowledged = true;
         return error.Canceled;
     }
     t.wait = hook;
@@ -178,10 +188,10 @@ pub fn acknowledge(t: *Task) error{Canceled} {
 /// seen it.
 pub fn acknowledged(t: *Task) void {
     assert(t.cancelRequested());
-    t.protection.acknowledged = true;
+    t.execution.protection.acknowledged = true;
 }
 
 pub fn recancel(t: *Task) void {
-    assert(t.protection.acknowledged);
-    t.protection.acknowledged = false;
+    assert(t.execution.protection.acknowledged);
+    t.execution.protection.acknowledged = false;
 }

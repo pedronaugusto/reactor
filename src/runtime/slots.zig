@@ -151,7 +151,7 @@ fn crashHandler(userdata: ?*anyopaque) void {
     // The crashing task may call the Io again while the panic is printed:
     // nothing it waits on may be cancelled under it.
     if (Scheduler.current()) |t| {
-        t.protection = .{ .user = .blocked, .acknowledged = true };
+        t.execution.protection = .{ .user = .blocked, .acknowledged = true };
         var buffer: [256]u8 = undefined;
         const summary = std.mem.print(&buffer, "reactor: worker={d} task=0x{x} start=0x{x} operation={s} lane={s}\n", .{
             Scheduler.processor().?.index,

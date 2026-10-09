@@ -127,7 +127,7 @@ fn perform(comptime R: type, comptime raw: bool, s: *Scheduler, lanes: *Lanes, l
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.priority },
+        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.policy.priority },
         .func = func,
         .args = args,
         .task = t,

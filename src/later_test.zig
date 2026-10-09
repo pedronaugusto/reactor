@@ -828,7 +828,7 @@ test "later: idle trimming preserves live bytes and skips short shallow parks" {
     }
 }
 
-test "later: waking an idle trim candidate removes its timer before stack reuse" {
+test "later: waking an idle trim candidate unlinks it before stack reuse" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var driver: Driver = undefined;
     try driver.init(testing.allocator, 7, .{ .max_tasks = 1, .stack_size = 512 << 10, .offload = .none });
@@ -840,10 +840,37 @@ test "later: waking an idle trim candidate removes its timer before stack reuse"
         driver.runtime.run(.nowait);
         try testing.expect(driver.runtime.core.processors[0].loop.in_flight >= 2);
         try testing.expectError(error.Canceled, task.cancel(driver.io()));
-        try testing.expectEqual(@as(u32, 0), driver.runtime.core.processors[0].loop.in_flight);
+        // The one shared idle timer may survive its removed candidate.
+        try testing.expectEqual(@as(u32, 1), driver.runtime.core.processors[0].loop.in_flight);
         driver.virtual.advance(.fromSeconds(2));
         driver.runtime.run(.nowait);
+        try testing.expectEqual(@as(u32, 0), driver.runtime.core.processors[0].loop.in_flight);
         try testing.expectEqual(@as(u64, 0), driver.runtime.stats().stack_trims);
+        try testing.expectEqual(@as(u32, 0), driver.runtime.stats().tasks);
+    }
+}
+
+test "later: shared idle trim survives head middle and tail candidate cancellation" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    for ([_]usize{ 0, 1, 3 }) |canceled| {
+        var driver: Driver = undefined;
+        try driver.init(testing.allocator, 7, .{ .max_tasks = 4, .stack_size = 512 << 10, .offload = .none });
+        defer driver.deinit();
+        var tasks: [4]Io.Future(@typeInfo(@TypeOf(shallowAfterDeep)).@"fn".return_type.?) = undefined;
+        for (&tasks) |*task| task.* = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), Io.Duration.fromMilliseconds(1500) });
+        driver.runtime.run(.nowait);
+        driver.virtual.advance(.fromMilliseconds(2));
+        driver.runtime.run(.nowait);
+        // Four live sleeps share exactly one idle timer.
+        try testing.expectEqual(@as(u32, 5), driver.runtime.core.processors[0].loop.in_flight);
+        try testing.expectError(error.Canceled, tasks[canceled].cancel(driver.io()));
+        driver.virtual.advance(.fromSeconds(2));
+        driver.runtime.run(.nowait);
+        for (&tasks, 0..) |*task, at| if (at != canceled) {
+            try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
+        };
+        try testing.expectEqual(@as(u64, 3), driver.runtime.stats().stack_trims);
+        try testing.expectEqual(@as(u32, 0), driver.runtime.core.processors[0].loop.in_flight);
         try testing.expectEqual(@as(u32, 0), driver.runtime.stats().tasks);
     }
 }

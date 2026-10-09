@@ -44,6 +44,41 @@ test "latency tasks run ahead while normal work gets a turn after eight" {
     try testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1 }, &order);
 }
 
+test "injected latency tasks give globally queued normal work a turn after eight" {
+    var runtime: reactor.Runtime = undefined;
+    try runtime.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .offload = .none });
+    defer runtime.deinit();
+    const Context = struct {
+        const Self = @This();
+        io: std.Io,
+        order: [11]u8 = undefined,
+        used: usize = 0,
+        normal: std.Io.Future(void) = undefined,
+        high: [10]std.Io.Future(void) = undefined,
+        failed: bool = false,
+
+        fn enqueue(c: *Self) void {
+            c.normal = c.io.concurrent(record, .{ &c.order, &c.used, @as(u8, 0) }) catch {
+                c.failed = true;
+                return;
+            };
+            for (&c.high) |*future| future.* = reactor.concurrentWith(c.io, .{ .priority = .latency }, record, .{ &c.order, &c.used, @as(u8, 1) }) catch {
+                c.failed = true;
+                return;
+            };
+        }
+    };
+    var c: Context = .{ .io = runtime.io() };
+    // Enqueue outside every scheduler while workers have not started.
+    const thread = try std.Thread.spawn(.{}, Context.enqueue, .{&c});
+    thread.join();
+    try testing.expect(!c.failed);
+    c.normal.await(c.io);
+    for (&c.high) |*future| future.await(c.io);
+    try testing.expectEqual(@as(usize, 11), c.used);
+    try testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1 }, &c.order);
+}
+
 test "foreign Io refuses options it cannot honor and supports defaults" {
     try testing.expectError(error.ConcurrencyUnavailable, reactor.concurrentWith(testing.io, .{ .stack_size = 1024 }, record, undefined));
     var order: [11]u8 = undefined;
