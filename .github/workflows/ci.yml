@@ -25,19 +25,19 @@ permissions:
 jobs:
   skip:
     if: github.event_name != 'push' && !inputs.status-only
-    uses: pedronaugusto/preflight/.github/workflows/skip.yml@b28046cc22055fcd32640117fc0e6965283a8ae5
+    uses: pedronaugusto/preflight/.github/workflows/skip.yml@387e188a9b8e9f0a157d528606cc2db4175db7de
     with:
       tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || 'merge' }}
-      preflight-ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+      preflight-ref: 387e188a9b8e9f0a157d528606cc2db4175db7de
       working-directory: "."
   gate:
     needs: skip
     if: always() && (github.event_name == 'push' || inputs.status-only || (needs.skip.result == 'success' && needs.skip.outputs.docs-only != 'true'))
-    uses: pedronaugusto/preflight/.github/workflows/zig.yml@b28046cc22055fcd32640117fc0e6965283a8ae5
+    uses: pedronaugusto/preflight/.github/workflows/zig.yml@387e188a9b8e9f0a157d528606cc2db4175db7de
     with:
       tier: ${{ github.event_name == 'workflow_dispatch' && inputs.tier || 'merge' }}
       working-directory: "."
-      preflight-ref: b28046cc22055fcd32640117fc0e6965283a8ae5
+      preflight-ref: 387e188a9b8e9f0a157d528606cc2db4175db7de
       attest: ${{ github.event_name == 'push' || inputs.status-only }}
       fast-matrix: >-
         {"include":[{"os":"ubuntu-latest","name":"Linux Debug","step":"preflight-fast","args":"-Doptimize=debug","shard":"","setup":true,"job_timeout":20,"cache_key":"fast-linux-debug-0","artifact":"","operation":"execute"}]}

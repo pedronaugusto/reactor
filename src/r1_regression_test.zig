@@ -167,7 +167,8 @@ test "R1 group await waits for a member still returning its stack" {
     processor.retiring.store(1, .release);
     const Release = struct {
         fn run(p: *Scheduler.Processor, released: *std.atomic.Value(bool)) void {
-            testing.io.sleep(.fromMilliseconds(20), .awake) catch {};
+            const until = Io.Clock.awake.now(testing.io).nanoseconds + 20 * std.time.ns_per_ms;
+            while (Io.Clock.awake.now(testing.io).nanoseconds < until) std.atomic.spinLoopHint();
             released.store(true, .release);
             p.retiring.store(0, .release);
         }

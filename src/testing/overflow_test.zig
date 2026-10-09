@@ -57,7 +57,7 @@ test "R1 guard overflow terminates the isolated child" {
     defer testing.allocator.free(weights);
     var selected: usize = 0;
     for (0..names.len) |i| {
-        const indices = try order.assign(testing.allocator, names, weights, .{ .index = i, .count = names.len });
+        const indices = try order.assign(testing.allocator, names, weights, .{ .index = .fromRaw(i), .count = .fromRaw(names.len) });
         defer testing.allocator.free(indices);
         if (std.mem.findScalar(usize, indices, target) != null) {
             selected = i;
