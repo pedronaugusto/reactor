@@ -18,7 +18,9 @@ const E = posix.E;
 const op = @import("../op.zig");
 const file = @import("../../sys/file.zig");
 
-pub const Direction = enum(u1) { read, write };
+/// The ways a descriptor is waited on. `priority` is the exceptional
+/// condition `poll` calls `POLLPRI`.
+pub const Direction = enum(u2) { read, write, priority };
 
 const bug = Threaded.errnoBug;
 
@@ -133,6 +135,7 @@ pub fn ready(fd: posix.fd_t, direction: Direction) bool {
     const events: i16 = switch (direction) {
         .read => posix.POLL.IN,
         .write => posix.POLL.OUT,
+        .priority => posix.POLL.PRI,
     };
     var fds = [1]posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
     while (true) {

@@ -51,6 +51,11 @@ pub const Waitable = union(enum) {
     readable: Io.File.Handle,
     /// The descriptor has room, or an error.
     writable: Io.File.Handle,
+    /// The descriptor has a priority event, which `poll` reports as
+    /// `POLLPRI`: urgent data on a stream socket, a change to a
+    /// `cgroup.events` or sysfs attribute file; or an error. io_uring and
+    /// epoll only: kqueue has no filter for it, and Windows no such event.
+    priority: Io.File.Handle,
     /// Windows: a waitable kernel object.
     object: if (builtin.os.tag == .windows) std.os.windows.HANDLE else noreturn,
 

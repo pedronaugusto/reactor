@@ -137,21 +137,27 @@ pub fn full(k: *const Kqueue) bool {
     return k.change_count + 2 > max_changes;
 }
 
-fn filterOf(direction: readiness.Direction) i32 {
+fn filterOf(direction: readiness.Direction) ?i32 {
     return switch (direction) {
         .read => c.EVFILT.READ,
         .write => c.EVFILT.WRITE,
+        // No filter says it apart from reads (urgent data is a flag of the
+        // read filter, which a plain read of the descriptor would share).
+        .priority => null,
     };
 }
 
 /// `fd` reports readiness `direction`'s way under `key`, from the next call.
-/// A number no descriptor has is unpollable, as one the kernel refuses is.
+/// A number no descriptor has is unpollable, as one the kernel refuses is,
+/// and so is a priority condition, which the caller then waits for in place.
 pub fn register(k: *Kqueue, fd: posix.fd_t, key: u64, have: readiness.Directions, direction: readiness.Direction) readiness.RegisterError!readiness.Directions {
     if (fd < 0) return error.Unpollable;
-    k.queue(change(@intCast(fd), filterOf(direction), c.EV.ADD | c.EV.CLEAR, 0, 0, key));
+    const filter = filterOf(direction) orelse return error.Unpollable;
+    k.queue(change(@intCast(fd), filter, c.EV.ADD | c.EV.CLEAR, 0, 0, key));
     return have.with(switch (direction) {
         .read => .{ .read = true },
         .write => .{ .write = true },
+        .priority => unreachable, // unreachable: it has no filter, so it returned above
     });
 }
 
@@ -216,7 +222,7 @@ pub fn decode(e: *const Event) readiness.Decoded {
     if (e.udata == ignore_key) return .ignore;
     if (e.udata == wake_key) return .wake;
     if (e.filter == c.EVFILT.TIMER) return .{ .clock = if (e.ident == clock_ident[0]) .real else .boot };
-    const direction: readiness.Direction = if (e.filter == c.EVFILT.WRITE) .write else .read;
+    const direction: readiness.Direction = if (e.filter == c.EVFILT.WRITE) .write else .read; // priority has no filter here
     if (e.flags & c.EV.ERROR != 0) {
         if (e.data == 0) return .ignore;
         return .{ .record = .{ .key = e.udata, .refused = direction } };

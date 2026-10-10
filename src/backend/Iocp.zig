@@ -321,6 +321,10 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
                 const status = windows.ntdll.NtDeviceIoControlFile(socket, null, null, context, &s.iosb, windows.IOCTL.AFD.POLL, info, @sizeOf(afd.PollInfo), info, @sizeOf(afd.PollInfo));
                 return b.settle(o, status);
             },
+            .priority => {
+                o.result = .{ .wait = error.Unsupported };
+                return true;
+            },
             .object => |object| {
                 const packet = try sys.createWaitPacket();
                 s.stage = .packet;

@@ -253,7 +253,7 @@ pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {
         .write_at => |w| w.file,
         .sync => |fd| fd,
         .wait => |w| switch (w) {
-            .readable, .writable => |fd| fd,
+            .readable, .writable, .priority => |fd| fd,
             .object => |h| if (builtin.os.tag == .windows) h else unreachable, // unreachable: only Windows has objects
         },
         .raw => |raw| switch (raw) {

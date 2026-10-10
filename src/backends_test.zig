@@ -15,6 +15,7 @@ const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
 const fiber = @import("fiber.zig");
 const reactor = @import("reactor.zig");
+const wait_ext = @import("ext/wait.zig");
 const kqueue_poller = @import("backend/readiness/Kqueue.zig");
 const epoll_poller = @import("backend/readiness/Epoll.zig");
 
@@ -583,6 +584,7 @@ fn expectReady(l: *Loop, w: Loop.Waitable) !void {
 }
 
 test "a wait on a descriptor that is not open is ready, as a poll says, and does not panic" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     for (all) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
@@ -599,6 +601,7 @@ test "a wait on a descriptor that is not open is ready, as a poll says, and does
 }
 
 test "a wait on a descriptor that is not open is ready on a runtime and on Threaded" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     try reactor.wait(testing.io, .{ .readable = -1 }, .none);
     try reactor.wait(testing.io, .{ .writable = -1 }, .none);
     for (all) |backend| {
@@ -633,4 +636,127 @@ fn isThisSystems(comptime name: []const u8) bool {
     return for (readiness) |b| {
         if (std.mem.eql(u8, @tagName(b), name)) break true;
     } else false;
+}
+
+fn waitPriority(io: Io, handle: net.Socket.Handle, timeout: Io.Timeout) reactor.WaitError!void {
+    return reactor.wait(io, .{ .priority = handle }, timeout);
+}
+
+fn sendOutOfBand(handle: net.Socket.Handle) !void {
+    const byte = "!";
+    const rc = posix.system.sendto(handle, byte, 1, posix.MSG.OOB, null, 0);
+    try testing.expectEqual(posix.E.SUCCESS, posix.errno(rc));
+}
+
+fn within(n: i64) Io.Timeout {
+    return .{ .duration = .{ .raw = .fromMilliseconds(n), .clock = .awake } };
+}
+
+/// A connected pair that closes as `Loop` wants descriptors closed.
+fn closePair(io: Io, pair: [2]net.Stream) void {
+    for (pair) |stream| {
+        Loop.closing(stream.socket.handle);
+        stream.close(io);
+    }
+}
+
+/// A priority wait on `io` ends for urgent data and for nothing else.
+fn expectPriorityWait(io: Io) !void {
+    const pair = try tcpPair(io);
+    defer closePair(io, pair);
+    const watched = pair[0].socket.handle;
+    var nothing = try io.concurrent(waitPriority, .{ io, watched, within(30) });
+    try testing.expectError(error.Timeout, nothing.await(io));
+    // Plain data makes the descriptor readable, not urgent.
+    var writer = pair[1].writer(io, &.{});
+    try writer.interface.writeAll("plain");
+    try writer.interface.flush();
+    var plain = try io.concurrent(waitPriority, .{ io, watched, within(30) });
+    try testing.expectError(error.Timeout, plain.await(io));
+    // Urgent data arriving while a task waits ends the wait.
+    var urgent = try io.concurrent(waitPriority, .{ io, watched, within(5000) });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try sendOutOfBand(pair[1].socket.handle);
+    try urgent.await(io);
+    // A cancel ends a wait that has nothing to report.
+    const quiet = try tcpPair(io);
+    defer closePair(io, quiet);
+    var canceled = try io.concurrent(waitPriority, .{ io, quiet[0].socket.handle, .none });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectError(error.Canceled, canceled.cancel(io));
+}
+
+test "a priority wait ends for urgent data only, on a runtime of each backend" {
+    if (!wait_ext.has_priority) return error.SkipZigTest;
+    for (all) |backend| {
+        for ([_]u16{ 0, 2 }) |workers| {
+            var r: Runtime = undefined;
+            try runtime(&r, backend, workers);
+            defer r.deinit();
+            try expectPriorityWait(r.io());
+        }
+    }
+}
+
+test "a priority wait on Threaded ends for urgent data only" {
+    if (!wait_ext.has_priority) return error.SkipZigTest;
+    const io = testing.io;
+    const pair = try tcpPair(io);
+    defer pair[0].close(io);
+    defer pair[1].close(io);
+    const watched = pair[0].socket.handle;
+    try testing.expectError(error.Timeout, reactor.wait(io, .{ .priority = watched }, within(30)));
+    var writer = pair[1].writer(io, &.{});
+    try writer.interface.writeAll("plain");
+    try writer.interface.flush();
+    try testing.expectError(error.Timeout, reactor.wait(io, .{ .priority = watched }, within(30)));
+    try sendOutOfBand(pair[1].socket.handle);
+    try reactor.wait(io, .{ .priority = watched }, within(5000));
+}
+
+test "a priority wait is unsupported where poll cannot report one" {
+    if (wait_ext.has_priority) return error.SkipZigTest;
+    const io = testing.io;
+    const pair = try tcpPair(io);
+    defer pair[0].close(io);
+    defer pair[1].close(io);
+    const watched: Io.File.Handle = pair[0].socket.handle;
+    try testing.expectError(error.Unsupported, reactor.wait(io, .{ .priority = watched }, .none));
+    // Among other members, and when it would have to look only.
+    try testing.expectError(error.Unsupported, reactor.waitAny(io, &.{ .{ .readable = watched }, .{ .priority = watched } }, within(0)));
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        var task = try r.io().concurrent(waitPriority, .{ r.io(), pair[0].socket.handle, .none });
+        try testing.expectError(error.Unsupported, task.await(r.io()));
+    }
+}
+
+test "a priority wait on the loop alone is a readiness operation where the kernel has a filter for it" {
+    for (all) |backend| {
+        var l: Loop = undefined;
+        try loopOf(&l, backend);
+        defer l.deinit(testing.allocator);
+        const io = testing.io;
+        const pair = try tcpPair(io);
+        defer closePair(io, pair);
+        var o: Loop.Op = .{ .kind = .{ .wait = .{ .priority = pair[0].socket.handle } } };
+        const done = try l.start(&o);
+        if (!done) {
+            // Nothing urgent yet; then the urgent byte arrives.
+            try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
+            try sendOutOfBand(pair[1].socket.handle);
+            const sys = Io.Threaded.global_single_threaded.io();
+            const deadline = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
+            try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = deadline }));
+            var out: [1]*Loop.Op = undefined;
+            _ = l.reap(&out);
+        }
+        if (backend == .kqueue or !wait_ext.has_priority) {
+            try testing.expectError(error.Unsupported, o.result.wait);
+        } else {
+            try o.result.wait;
+        }
+    }
 }

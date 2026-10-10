@@ -404,6 +404,12 @@ pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
             switch (w) {
                 .readable => |fd| sqe.prep_poll_add(fd, linux.POLL.IN),
                 .writable => |fd| sqe.prep_poll_add(fd, linux.POLL.OUT),
+                // On Linux 6.8 a poll for `POLLPRI` alone sleeps through a
+                // socket's urgent data, whose wake carries `IN | PRI |
+                // RDNORM | RDBAND`. Asking for `RDBAND` as well lets that
+                // wake in; no file reports it steadily, so the poll still
+                // ends on `PRI` and not on plain data.
+                .priority => |fd| sqe.prep_poll_add(fd, linux.POLL.PRI | linux.POLL.RDBAND),
                 .object => unreachable, // unreachable: Windows objects do not exist on Linux
             }
             sqe.user_data = ud;

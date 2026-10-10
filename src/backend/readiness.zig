@@ -52,6 +52,8 @@ pub const Decoded = union(enum) {
         key: u64,
         read: bool = false,
         write: bool = false,
+        /// A priority condition, or a failure.
+        priority: bool = false,
         /// The poller refused the registration of this direction.
         refused: ?Direction = null,
         /// Bytes there to read, where the poller says (kqueue).
@@ -329,6 +331,7 @@ pub fn Readiness(comptime Poller: type) type {
                     const fd, const direction: Direction = switch (what) {
                         .readable => |fd| .{ fd, .read },
                         .writable => |fd| .{ fd, .write },
+                        .priority => |fd| .{ fd, .priority },
                         .object => unreachable, // unreachable: Windows objects never reach a POSIX backend
                     };
                     if (calls.ready(fd, direction)) {
@@ -560,7 +563,7 @@ pub fn Readiness(comptime Poller: type) type {
         fn letGo(self: *Self, index: u32) SubmitError!void {
             const r = self.records.at(index);
             assert(r.idle());
-            if (r.epoch == closes.epoch(r.fd) and @as(u2, @bitCast(r.registered)) != 0) {
+            if (r.epoch == closes.epoch(r.fd) and !r.registered.none()) {
                 try self.room();
                 self.poller.deregister(r.fd, r.registered, .open);
             }
@@ -643,6 +646,7 @@ pub fn Readiness(comptime Poller: type) type {
                         r.read_ended = r.read_ended or e.read_ended;
                     }
                     if (e.write) r.ready = r.ready.with(.{ .write = true });
+                    if (e.priority) r.ready = r.ready.with(.{ .priority = true });
                     if (r.idle()) {
                         r.idle_events += 1;
                         // No room to deregister now: the next event tries again.
@@ -654,6 +658,7 @@ pub fn Readiness(comptime Poller: type) type {
                     r.idle_events = 0;
                     if (e.read) self.serve(index, .read, .attempt);
                     if (e.write) self.serve(index, .write, .attempt);
+                    if (e.priority) self.serve(index, .priority, .attempt);
                 },
             }
         }
@@ -722,6 +727,7 @@ fn directions(d: Direction) Directions {
     return switch (d) {
         .read => .{ .read = true },
         .write => .{ .write = true },
+        .priority => .{ .priority = true },
     };
 }
 

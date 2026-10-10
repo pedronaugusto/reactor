@@ -11,22 +11,29 @@ const posix = std.posix;
 pub const none = std.math.maxInt(u32);
 
 /// The directions a descriptor is registered for.
-pub const Directions = packed struct(u2) {
+pub const Directions = packed struct(u3) {
     read: bool = false,
     write: bool = false,
+    priority: bool = false,
 
+    /// What a call may find ready until one says otherwise.
     pub const both: Directions = .{ .read = true, .write = true };
+    pub const all: Directions = .{ .read = true, .write = true, .priority = true };
+
+    pub fn none(d: Directions) bool {
+        return @as(u3, @bitCast(d)) == 0;
+    }
 
     pub fn has(d: Directions, other: Directions) bool {
-        return @as(u2, @bitCast(d)) & @as(u2, @bitCast(other)) == @as(u2, @bitCast(other));
+        return @as(u3, @bitCast(d)) & @as(u3, @bitCast(other)) == @as(u3, @bitCast(other));
     }
 
     pub fn with(d: Directions, other: Directions) Directions {
-        return @bitCast(@as(u2, @bitCast(d)) | @as(u2, @bitCast(other)));
+        return @bitCast(@as(u3, @bitCast(d)) | @as(u3, @bitCast(other)));
     }
 
     pub fn without(d: Directions, other: Directions) Directions {
-        return @bitCast(@as(u2, @bitCast(d)) & ~@as(u2, @bitCast(other)));
+        return @bitCast(@as(u3, @bitCast(d)) & ~@as(u3, @bitCast(other)));
     }
 };
 
@@ -96,12 +103,13 @@ pub fn Records(comptime Waiter: type) type {
             /// lets go of the descriptor, which is waited on elsewhere now.
             idle_events: u8 = 0,
             /// Who waits, by direction.
-            waiters: [2]List(Waiter) = .{ .{}, .{} },
+            waiters: [3]List(Waiter) = .{ .{}, .{}, .{} },
             next_free: u32 = none,
             in_use: bool = false,
 
             pub fn idle(r: *const Record) bool {
-                return r.waiters[0].isEmpty() and r.waiters[1].isEmpty();
+                for (&r.waiters) |*list| if (!list.isEmpty()) return false;
+                return true;
             }
         };
 

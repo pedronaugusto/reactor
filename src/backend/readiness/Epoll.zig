@@ -1,5 +1,5 @@
-//! epoll as a readiness poller. A descriptor is registered once, for both
-//! directions and edge-triggered (`EPOLLET`), when it is first waited on;
+//! epoll as a readiness poller. A descriptor is registered once, for every
+//! direction (reads, writes, priority conditions) and edge-triggered (`EPOLLET`), when it is first waited on;
 //! a regular file or directory refuses (`EPERM`), and is then called in
 //! place. A wait with a timeout waits on a timerfd armed for it, exact to
 //! the nanosecond and free of the thread's timer slack. Wakes from other
@@ -76,21 +76,21 @@ pub fn full(e: *const Epoll) bool {
     return false;
 }
 
-/// `fd` reports readiness both ways under `key`, from now on.
+/// `fd` reports readiness every way under `key`, from now on.
 pub fn register(e: *Epoll, fd: linux.fd_t, key: u64, have: readiness.Directions, direction: readiness.Direction) readiness.RegisterError!readiness.Directions {
     _ = direction;
     if (fd < 0) return error.Unpollable;
     var event: linux.epoll_event = .{
-        .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP | linux.EPOLL.ET,
+        .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.PRI | linux.EPOLL.RDHUP | linux.EPOLL.ET,
         .data = .{ .u64 = key },
     };
-    // Registered both ways already: only the key changes (a record taken
+    // Registered every way already: only the key changes (a record taken
     // again for a descriptor whose earlier registration still stands).
-    const first: u32 = if (@as(u2, @bitCast(have)) == 0) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
+    const first: u32 = if (have.none()) linux.EPOLL.CTL_ADD else linux.EPOLL.CTL_MOD;
     var ctl = first;
     while (true) {
         switch (errno(linux.epoll_ctl(e.epfd, ctl, fd, &event))) {
-            .SUCCESS => return .both,
+            .SUCCESS => return .all,
             .EXIST => ctl = linux.EPOLL.CTL_MOD,
             .NOENT => ctl = linux.EPOLL.CTL_ADD,
             // Not a file (a regular one), or closed since the wait began: the
@@ -106,7 +106,7 @@ pub fn register(e: *Epoll, fd: linux.fd_t, key: u64, have: readiness.Directions,
 /// to close: a duplicate of it would keep the registration alive.
 pub fn deregister(e: *Epoll, fd: linux.fd_t, have: readiness.Directions, leaving: readiness.Leaving) void {
     _ = leaving;
-    if (@as(u2, @bitCast(have)) == 0) return;
+    if (have.none()) return;
     _ = linux.epoll_ctl(e.epfd, linux.EPOLL.CTL_DEL, fd, null);
 }
 
@@ -172,8 +172,9 @@ pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
     const failed = bits & (linux.EPOLL.ERR | linux.EPOLL.HUP) != 0;
     return .{ .record = .{
         .key = key,
-        .read = failed or bits & (linux.EPOLL.IN | linux.EPOLL.RDHUP | linux.EPOLL.PRI) != 0,
+        .read = failed or bits & (linux.EPOLL.IN | linux.EPOLL.RDHUP) != 0,
         .write = failed or bits & linux.EPOLL.OUT != 0,
+        .priority = failed or bits & linux.EPOLL.PRI != 0,
         .read_ended = bits & (linux.EPOLL.HUP | linux.EPOLL.RDHUP) != 0,
     } };
 }

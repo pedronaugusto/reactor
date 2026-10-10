@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const windows = std.os.windows;
 
+const backend = @import("../backend.zig");
 const Loop = @import("../Loop.zig");
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("../ops/perform.zig");
@@ -30,6 +31,12 @@ const is_windows = builtin.os.tag == .windows;
 /// The most members one wait takes.
 pub const max = 64;
 
+/// Whether this system can report a priority event: `poll` says `POLLPRI`.
+pub const has_priority = switch (builtin.os.tag) {
+    .windows, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => false,
+    else => true,
+};
+
 /// How long one wait on the calling thread lasts before it looks for a
 /// cancel, on an `Io` that is not a runtime.
 pub const slice: poll.Millis = .fromRaw(5);
@@ -39,6 +46,14 @@ pub const Waitable = union(enum) {
     /// kqueue, pipes, eventfd).
     readable: Io.File.Handle,
     writable: Io.File.Handle,
+    /// A priority event, which `poll` reports as `POLLPRI`: urgent data on
+    /// a stream socket, a change of a `cgroup.events` or sysfs attribute
+    /// file (read it, then wait: a change after that read is not lost).
+    /// A runtime waits for it on the task's loop on io_uring and epoll, and
+    /// on the `wait` lane under kqueue, which has no filter for it. Windows
+    /// has no such event and Darwin's `poll` cannot report it (its urgent
+    /// data is seen through `select` alone): a wait there is `Unsupported`.
+    priority: Io.File.Handle,
     /// A process has ended. It is not reaped.
     process: *const Process,
     /// Windows: any waitable object (event, process, thread, timer).
@@ -71,6 +86,7 @@ pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usi
 }
 
 fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
+    if (!has_priority) for (set) |m| if (m == .priority) return error.Unsupported;
     if (timeout.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) {
         return try once(io, set, poll.look) orelse error.Timeout;
     };
@@ -85,7 +101,7 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
     const core = native.runtimeOf(io) orelse return sliced(io, set, timeout.toDeadline(io));
     if (!native.taskRuntime(core)) return sliced(io, set, timeout.toDeadline(io));
     var members: [max]Loop.Waitable = undefined;
-    if (descriptors(set, &members)) {
+    if (descriptors(set, &members, core.backendKind())) {
         const p = Scheduler.processor().?;
         const index = readiness.first(&core.scheduler, members[0..set.len], perform.deadline(p, timeout)) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
@@ -101,8 +117,8 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
 }
 
 /// Each member as a descriptor the loop can wait on; false when one is
-/// not.
-fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
+/// not, which `kind`, the loop's backend, decides for a priority event.
+fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable, kind: ?backend.Kind) bool {
     if (is_windows) {
         // Separate wait packets could consume several auto-reset events or
         // semaphore counts. A kernel wait-any consumes only its winner.
@@ -110,6 +126,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
         for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
             .readable => |h| .{ .readable = h },
             .writable => |h| .{ .writable = h },
+            .priority => unreachable, // unreachable: `waitFirst` refused it, as Windows has no priority events
             .process => |p| .{ .object = p.watch },
             .wake => |w| .{ .object = w.notify.handle },
             .object => |h| .{ .object = h },
@@ -119,6 +136,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
     for (set, out[0..set.len]) |m, *d| d.* = switch (m) {
         .readable => |h| .{ .readable = h },
         .writable => |h| .{ .writable = h },
+        .priority => |h| if (kind == .kqueue) return false else .{ .priority = h },
         .process => |p| switch (p.watch) {
             .descriptor => |h| .{ .readable = h },
             .ended, .asking => return false,
@@ -162,6 +180,7 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
         const entry: poll.Entry = switch (m) {
             .readable => |h| .{ .handle = h, .interest = .readable },
             .writable => |h| .{ .handle = h, .interest = .writable },
+            .priority => |h| .{ .handle = h, .interest = .priority },
             .process => |p| switch (p.watch) {
                 .descriptor => |h| .{ .handle = h, .interest = .readable },
                 .ended => {
@@ -200,6 +219,7 @@ fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usi
     var sockets = false;
     for (set, 0..) |m, i| switch (m) {
         .readable, .writable => sockets = true,
+        .priority => unreachable, // unreachable: `waitFirst` refused it, as Windows has no priority events
         .process => |p| {
             handles[n] = p.watch;
             map[n] = i;
@@ -219,6 +239,7 @@ fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usi
     if (sockets) for (set, 0..) |m, i| switch (m) {
         .readable => |h| if (try socketReady(io, h, .readable)) return i,
         .writable => |h| if (try socketReady(io, h, .writable)) return i,
+        .priority => unreachable, // unreachable: `waitFirst` refused it, as Windows has no priority events
         .process => |p| if (win32.WaitForSingleObject(p.watch, 0) == win32.wait_object_0) return i,
         .object => |h| if (win32.WaitForSingleObject(h, 0) == win32.wait_object_0) return i,
         .wake => |w| if (win32.WaitForSingleObject(w.notify.handle, 0) == win32.wait_object_0) return i,
@@ -233,7 +254,7 @@ fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usi
 }
 
 /// Whether a Windows socket is ready now: AFD's own poll, with no wait.
-fn socketReady(io: Io, socket: windows.HANDLE, interest: poll.Interest) WaitError!bool {
+fn socketReady(io: Io, socket: windows.HANDLE, interest: enum { readable, writable }) WaitError!bool {
     var info: win32.AfdPollInfo = .{ .Timeout = 0, .Handles = .{.{
         .Handle = socket,
         .Events = switch (interest) {

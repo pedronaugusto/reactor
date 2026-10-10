@@ -11,7 +11,7 @@ const win32 = @import("win32.zig");
 /// The most members one wait takes.
 pub const max = 64;
 
-pub const Interest = enum { readable, writable };
+pub const Interest = enum { readable, writable, priority };
 
 pub const Entry = struct { handle: Io.File.Handle, interest: Interest };
 
@@ -36,6 +36,7 @@ pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
         .events = switch (e.interest) {
             .readable => posix.POLL.IN,
             .writable => posix.POLL.OUT,
+            .priority => posix.POLL.PRI,
         },
         .revents = 0,
     };

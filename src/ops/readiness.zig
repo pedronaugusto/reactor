@@ -83,7 +83,7 @@ const Waiter = struct {
 
 fn handleOf(w: Loop.Waitable) Io.File.Handle {
     return switch (w) {
-        .readable, .writable => |h| h,
+        .readable, .writable, .priority => |h| h,
         .object => |h| if (builtin.os.tag == .windows) h else unreachable, // unreachable: only Windows has objects
     };
 }
