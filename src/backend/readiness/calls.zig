@@ -19,6 +19,7 @@ const E = posix.E;
 
 const op = @import("../op.zig");
 const file = @import("../../sys/file.zig");
+const sys_poll = @import("../../sys/poll.zig");
 
 /// The ways a descriptor is waited on. `priority` is the exceptional
 /// condition `poll` calls `POLLPRI`.
@@ -134,6 +135,12 @@ pub fn isStream(fd: posix.fd_t) bool {
 /// open, a number no descriptor has included, which `poll` itself skips.
 pub fn ready(fd: posix.fd_t, direction: Direction) bool {
     if (fd < 0) return true;
+    // Darwin's `poll` waits off the CPU when nothing is ready: `select`.
+    if (comptime builtin.os.tag.isDarwin()) if (direction != .priority) {
+        const interest: sys_poll.Interest = if (direction == .read) .readable else .writable;
+        const answer = sys_poll.descriptors(&.{.{ .handle = fd, .interest = interest }}, sys_poll.look) catch return true;
+        return answer != null;
+    };
     const events: i16 = switch (direction) {
         .read => posix.POLL.IN,
         .write => posix.POLL.OUT,

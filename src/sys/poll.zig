@@ -2,6 +2,7 @@
 //! (`WaitForMultipleObjects`), waited for on the calling thread for at most
 //! a given time: what the extensions' waits fall back to on an `Io` that is
 //! not a runtime.
+const builtin = @import("builtin");
 const std = @import("std");
 const aegis = @import("aegis");
 const posix = std.posix;
@@ -30,6 +31,7 @@ pub const look: Millis = .fromRaw(0);
 pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
     std.debug.assert(entries.len <= max);
     for (entries, 0..) |e, i| if (e.handle < 0) return i;
+    if (comptime darwin) if (wait.compare(look) == .eq) if (selected(entries)) |ready| return ready;
     var fds: [max]posix.pollfd = undefined;
     for (entries, fds[0..entries.len]) |e, *f| f.* = .{
         .fd = e.handle,
@@ -51,6 +53,55 @@ pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
     if (rc == 0) return null;
     for (fds[0..entries.len], 0..) |f, i| if (f.revents != 0) return i;
     return null;
+}
+
+const darwin = builtin.os.tag.isDarwin();
+
+/// The descriptors `select` takes in its default sets.
+const select_limit = 1024;
+
+extern "c" fn select(nfds: c_int, readfds: ?*[select_limit / 32]u32, writefds: ?*[select_limit / 32]u32, errorfds: ?*[select_limit / 32]u32, timeout: ?*posix.timeval) c_int;
+
+/// A look on Darwin through `select`, whose `poll(2)` waits off the CPU for
+/// ~6 us when nothing is ready, even with no timeout (`select` answers in
+/// ~0.2). Null when `select` cannot answer it alike: a priority interest,
+/// a descriptor past its sets, or one that is not open (`poll` reports
+/// that one alone, as ready; `select` fails the whole call).
+fn selected(entries: []const Entry) ?(Error!?usize) {
+    var read_set: [select_limit / 32]u32 = @splat(0);
+    var write_set: [select_limit / 32]u32 = @splat(0);
+    var top: posix.fd_t = 0;
+    for (entries) |e| {
+        if (e.handle >= select_limit) return null;
+        const word: usize = @intCast(@divFloor(e.handle, 32));
+        const bit = @as(u32, 1) << @intCast(@mod(e.handle, 32));
+        switch (e.interest) {
+            .readable => read_set[word] |= bit,
+            .writable => write_set[word] |= bit,
+            .priority => return null,
+        }
+        top = @max(top, e.handle);
+    }
+    var zero: posix.timeval = .{ .sec = 0, .usec = 0 };
+    const rc = select(top + 1, &read_set, &write_set, null, &zero);
+    if (rc < 0) return switch (posix.errno(rc)) {
+        .INTR => null,
+        .BADF, .INVAL => null,
+        .AGAIN, .NOMEM => error.SystemResources,
+        else => |err| posix.unexpectedErrno(err),
+    };
+    if (rc == 0) return @as(?usize, null);
+    for (entries, 0..) |e, i| {
+        const word: usize = @intCast(@divFloor(e.handle, 32));
+        const bit = @as(u32, 1) << @intCast(@mod(e.handle, 32));
+        const set = switch (e.interest) {
+            .readable => read_set,
+            .writable => write_set,
+            .priority => unreachable, // unreachable: refused above
+        };
+        if (set[word] & bit != 0) return i;
+    }
+    return @as(?usize, null);
 }
 
 /// The lowest index of a signaled object within `wait`; null
