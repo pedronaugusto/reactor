@@ -35,7 +35,7 @@
     "docs": "Design and lifetime contracts referenced by README for consumers integrating an embedded loop."
   },
   "glint": {
-    "rules": [
+    "rules": [{"id": "P001", "level": "gate"}, {"id": "P003", "level": "gate"}, 
       {
         "id": "A001",
         "level": "report"
