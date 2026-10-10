@@ -49,7 +49,9 @@ pub fn build(b: *std.Build) !void {
     // dependency only the tests import. Its error is returned last, so one
     // configure pass asks for it and for preflight together.
     var needed: error{LazyDependencyNeeded}!void = {};
-    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize })) |shakedown| {
+    // Bound to reactor's own aegis, so the tests link one.
+    if (b.dependencyLazy("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer })) |shakedown| {
+        if (b.lazyImport(@This(), "shakedown")) |doubles| doubles.useAegis(shakedown, aegis) else needed = error.LazyDependencyNeeded;
         test_module.addImport("shakedown", shakedown.module("shakedown"));
     } else |err| needed = err;
     // CI wiring. preflight is lazy and only the root build asks for it.

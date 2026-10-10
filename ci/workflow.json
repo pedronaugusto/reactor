@@ -1,4 +1,6 @@
 {
+  "land": true,
+  "attest": true,
   "package": "reactor",
   "compile_step": "check",
   "targets": [
