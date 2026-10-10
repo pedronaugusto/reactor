@@ -58,6 +58,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `wait` and `waitAny` on an `Io` that is not a runtime (`Io.Threaded`) wait through that `Io`'s concurrent batch, one `poll` it can interrupt for a cancel, instead of in 5 ms slices: a wait blocked for 2 s woke ~340 times and now wakes once. Slices remain for members that are not descriptors (priority events, a process with no watch descriptor, Windows objects) and for an `Io` without concurrent batches.
 - A processor whose queue holds one task no longer keeps it from an idle processor when tasks that cannot leave (the root, a task holding a deadline) also wait there. A root writing to a task that read ran with it on one thread, turn about: 1 GiB over loopback in 64 KiB writes went from 7.6 to 9.0 GiB/s on io_uring (lima VM, three workers; `Io.Threaded` 10.9) and from 6.6 to 7.5 on kqueue.
 - On io_uring a socket write is tried as a call first, as the readiness backends do, and goes to the ring only when the send buffer is full (not under SQPOLL, nor where a zero-copy send applies). 64 MiB between two tasks over loopback: 6.0 ms, now 5.0 ms (`Io.Threaded` 4.8 ms).
 - A processor between tasks with one task to run next no longer wakes an idle one for it: the processor woken could only take that task away. On io_uring one connection's 64-byte round trips went from 184k to 262k a second, reads under deadlines from 193k to 250k, pooled receives from 172k to 247k (lima VM, seven workers).

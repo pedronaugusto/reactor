@@ -135,8 +135,10 @@ counted by `reactor.fallbacks()`.
   `priority` condition such as urgent data or a `cgroup.events` change), a
   `Process` ending, a `Wake`, a Windows object. On a runtime each member is an
   operation of the task's own loop, so the wait is a cancelation point and
-  holds no thread; elsewhere the calling thread waits in 5 ms slices between
-  cancel checks. A descriptor that is not open is ready: the call that follows
+  holds no thread; elsewhere the calling thread waits through that `Io`'s
+  concurrent batch (on `Io.Threaded`, one `poll` a cancel interrupts), or in
+  5 ms slices between cancel checks for members that are not descriptors and
+  an `Io` without concurrent batches. A descriptor that is not open is ready: the call that follows
   reports it. `priority` is `Unsupported` on Darwin and Windows.
 - **`Wake`**: a wake-up any thread (or a signal handler) can send.
 - **`Process`**: a child that a wait reports once it has ended, without
