@@ -330,7 +330,7 @@ pub fn attempt(operation: Io.Operation) ?Io.Operation.Result {
             // One piece and no control messages: `send`, which copies no
             // message header in.
             const rc = if (count == 1 and w.control.len == 0)
-                linux.sendto(w.socket_handle, @ptrCast(iovecs[0].base), iovecs[0].len, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL, null, 0)
+                linux.sendto(w.socket_handle, iovecs[0].base, iovecs[0].len, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL, null, 0)
             else
                 linux.sendmsg(w.socket_handle, &msg, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
             const e = linux.errno(rc);
