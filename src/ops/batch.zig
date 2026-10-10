@@ -66,6 +66,7 @@ const Until = enum { any, empty };
 
 const Waiter = struct {
     hook: Task.Hook = .{ .cancel = cancelHook },
+    message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
     scheduler: *Scheduler,
@@ -83,10 +84,10 @@ const Waiter = struct {
     }
 
     /// From any thread; acts on the batch's processor.
-    fn cancelHook(hook: *Task.Hook, t: *Task) void {
+    fn cancelHook(hook: *Task.Hook, _: *Task) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("hook", hook)); // safe: the field belongs to this record
         if (Scheduler.processor() == w.processor) return w.wake(.canceled);
-        w.processor.pushCancel(t);
+        w.processor.pushCancel(&w.message);
     }
 
     fn timedOut(d: *perform.Deadline) void {
@@ -175,7 +176,7 @@ fn drainAll(s: *Scheduler, batch: *Io.Batch, where: enum { to_submitted, to_unus
 fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!enum { completed, timed_out } {
     const p = Scheduler.processor().?;
     const t = p.current.?;
-    var w: Waiter = .{ .task = t, .processor = p, .scheduler = s, .batch = batch, .until = until };
+    var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .batch = batch, .until = until };
     if (until == .any) try t.enterWait(&w.hook);
     var owner = Owner.of(batch);
     const saved = owner;
@@ -192,7 +193,7 @@ fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Times
     }
     if (!w.woken) Scheduler.park(null);
     w.deadline.disarm();
-    t.leaveWait();
+    Scheduler.leaveWait(t);
     // The task owns the batch again, unless nothing is pending any more
     // (the completions have let go of the task already).
     if (batch.pending.head == .none) {

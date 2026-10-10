@@ -28,6 +28,7 @@ pub const Options = struct {
 
 const Waiter = struct {
     hook: Task.Hook = .{ .cancel = cancelHook },
+    message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
     scheduler: *Scheduler,
@@ -37,13 +38,13 @@ const Waiter = struct {
     timed_out: bool = false,
     deadline: Deadline = .{ .fire = expired },
 
-    fn cancelHook(hook: *Task.Hook, t: *Task) void {
+    fn cancelHook(hook: *Task.Hook, _: *Task) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("hook", hook)); // safe: the field belongs to this record
         if (Scheduler.processor() == w.processor) {
             w.requested = true;
             w.processor.loop.cancel(w.o);
         } else {
-            w.processor.pushCancel(t);
+            w.processor.pushCancel(&w.message);
         }
     }
 
@@ -132,7 +133,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     const previous_operation = t.operation;
     t.operation = std.meta.activeTag(o.kind);
     defer t.operation = previous_operation;
-    var w: Waiter = .{ .task = t, .processor = p, .scheduler = s, .o = o };
+    var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .o = o };
     o.callback = Waiter.done;
     o.user_data = @intFromPtr(&w); // safe: read back by the callback while this frame waits
     if (options.cancelable) try t.enterWait(&w.hook);
@@ -141,14 +142,14 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     if (builtin.os.tag == .linux) o.linked = .of(options.deadline);
     const done = p.loop.start(o) catch {
         if (fd) |d| p.release(d);
-        t.leaveWait();
+        Scheduler.leaveWait(t);
         return error.SystemResources;
     };
     if (done) {
         // Made at once (a readiness backend's call the descriptor was
         // ready for): no park, but the task's budget pays for it.
         if (fd) |d| p.release(d);
-        t.leaveWait();
+        Scheduler.leaveWait(t);
         s.spend();
         return;
     }
@@ -161,7 +162,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     };
     Scheduler.park(null);
     w.deadline.disarm();
-    t.leaveWait();
+    Scheduler.leaveWait(t);
     if (!canceledResult(o)) return;
     if (w.requested) return t.acknowledge();
     if (w.timed_out or o.state.uring.timed_out) return error.Timeout;
@@ -175,10 +176,10 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
     const previous = t.operation;
     t.operation = .accept;
     defer t.operation = previous;
-    var request: RemoteAccept = .{ .task = t, .processor = p, .scheduler = s, .op = o };
+    var request: RemoteAccept = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .op = o };
     try t.enterWait(&request.hook);
     Scheduler.park(.{ .func = RemoteAccept.publish, .context = &request });
-    t.leaveWait();
+    Scheduler.leaveWait(t);
     if (request.failure) |err| {
         if (err == error.Canceled) return t.acknowledge();
         return err;
@@ -189,6 +190,7 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
 const RemoteAccept = struct {
     errand: Scheduler.Errand = .{ .run = submit },
     hook: Task.Hook = .{ .cancel = cancel },
+    message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
     scheduler: *Scheduler,
@@ -226,9 +228,9 @@ const RemoteAccept = struct {
         request.scheduler.ready(request.task, .completed);
     }
 
-    fn cancel(h: *Task.Hook, t: *Task) void {
+    fn cancel(h: *Task.Hook, _: *Task) void {
         const request: *RemoteAccept = @alignCast(@fieldParentPtr("hook", h)); // safe: embedded hook
-        if (Scheduler.processor() != request.processor) return request.processor.pushCancel(t);
+        if (Scheduler.processor() != request.processor) return request.processor.pushCancel(&request.message);
         request.requested = true;
         if (request.submitted) request.processor.loop.cancel(request.op);
     }

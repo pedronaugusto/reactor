@@ -22,6 +22,7 @@ pub const Error = error{ Canceled, Timeout, SystemResources } || Loop.Waitable.E
 
 const Waiter = struct {
     hook: Task.Hook = .{ .cancel = cancelHook },
+    message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
     scheduler: *Scheduler,
@@ -45,9 +46,9 @@ const Waiter = struct {
         for (w.ops) |*o| w.processor.loop.cancel(o);
     }
 
-    fn cancelHook(hook: *Task.Hook, t: *Task) void {
+    fn cancelHook(hook: *Task.Hook, _: *Task) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("hook", hook)); // safe: the field belongs to this record
-        if (Scheduler.processor() != w.processor) return w.processor.pushCancel(t);
+        if (Scheduler.processor() != w.processor) return w.processor.pushCancel(&w.message);
         w.requested = true;
         w.endAll();
     }
@@ -97,7 +98,7 @@ pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.
     const p = Scheduler.processor().?;
     const t = p.current.?;
     var ops: [max]Loop.Op = undefined;
-    var w: Waiter = .{ .task = t, .processor = p, .scheduler = s, .ops = ops[0..members.len] };
+    var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .ops = ops[0..members.len] };
     try t.enterWait(&w.hook);
     // Every completion comes back to this processor, which resumes the task.
     t.pins += 1;
@@ -124,7 +125,7 @@ pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.
     }
     w.deadline.disarm();
     t.pins -= 1;
-    t.leaveWait();
+    Scheduler.leaveWait(t);
     if (w.first) |i| return i;
     if (w.failure) |e| return e;
     if (w.requested) return t.acknowledge();

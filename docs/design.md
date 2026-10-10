@@ -56,7 +56,10 @@ field its owner wrote at every switch cost a spawn-and-await about 8%.
 
 Completion wins a cancellation race: completed bytes, sockets and process
 results are preserved; a pending cancel is acknowledged at the next eligible
-point. Timeouts cancel and drain every operation before returning storage to
+point. A cancel from another thread reaches the processor holding the wait as a
+message in the wait's own record, in the waiting task's frame; the task does
+not leave the wait until the processor has served the message, so a message
+never names a record that has been released. Timeouts cancel and drain every operation before returning storage to
 the caller. SEND_ZC retains both primary and notification ownership, including
 notification-first delivery and the ordinary-send retry. Registered files and
 buffers are detached only after the kernel has relinquished their references.
