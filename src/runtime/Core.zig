@@ -84,7 +84,7 @@ pub const Construction = union(enum) {
 /// thread. The calling thread becomes the home thread. `c` must not move.
 pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtable: *const Io.VTable) InitError!void {
     if (comptime !fiber.supported) return error.BackendUnavailable;
-    const workers: u16 = options.workers orelse @intCast(std.math.clamp((std.Thread.getCpuCount() catch 1) -| 1, 0, 255));
+    const workers: u16 = options.workers orelse options_.defaultWorkers(builtin.os.tag, std.Thread.getCpuCount() catch 1);
     // The home processor and one for each worker: the count is the caller's, to its top.
     const count = (aegis.int.Checked(u16).init(workers).add(1) catch return error.SystemResources).raw();
     c.* = .{

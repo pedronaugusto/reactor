@@ -107,6 +107,10 @@ Zero-copy send is off by default: hosted loopback measurements found no
 payload size where it paid. SQPOLL owns an extra kernel thread, and an unsupported explicit request
 fails.
 
+## Workers
+
+A runtime started without `workers` runs the logical CPUs less one, and on Darwin a quarter of them. The kernel's loopback path there costs more per message with more threads in it (a thread for each socket plateaus at ~165k 64-byte round trips a second however many there are; system time per message on 15 workers was twice that on 4), so tasks that talk to each other through sockets run faster on a few workers, while arithmetic-only tasks scale to every CPU. The quarter is measured on one machine (Apple M3 Max, 16 CPUs): 2 to 4 workers were best for sockets, 15 for arithmetic.
+
 ## Startup and executor capacity
 
 `init` reserves storage and starts no threads. `start` creates the scheduler

@@ -25,11 +25,27 @@ pub const Offload = Lanes.Config;
 
 pub const StackClass = @import("../fiber/Stacks.zig").Class;
 
+/// The workers a runtime starts when `Options.workers` is null: the logical
+/// CPUs less the home thread's, and on Darwin a quarter of them (at least
+/// one). Darwin's kernel spends more time on each loopback message the more
+/// threads are in it (a raw thread per socket plateaus at ~165k 64-byte round
+/// trips a second however many there are, and a runtime on 4 workers of 16
+/// CPUs reaches 225k where 15 reach 155k), and tasks that talk to each other
+/// through the kernel gain nothing from more threads than that; work that is
+/// all arithmetic still scales to every CPU, so a host that wants that sets
+/// `workers`.
+pub fn defaultWorkers(os: std.Target.Os.Tag, cpus: usize) u16 {
+    const all = cpus -| 1;
+    const wanted = if (os.isDarwin()) @max(cpus / 4, 1) else all;
+    return @intCast(@min(wanted, all, 255));
+}
+
 pub const Options = struct {
     backend: Backend = .auto,
-    /// Worker threads `start` spawns beside the home thread. null: logical
-    /// CPUs - 1. 0: none; tasks run on the home thread whenever it waits in
-    /// the `Io` or calls `run`.
+    /// Worker threads `start` spawns beside the home thread. null: the
+    /// logical CPUs less one, and on Darwin a quarter of them (at least
+    /// one), for the reason `defaultWorkers` gives. 0: none; tasks run on the
+    /// home thread whenever it waits in the `Io` or calls `run`.
     workers: ?u16 = null,
     scheduling: Scheduling = .stealing,
     /// A task that has not parked for this many cancelation points yields

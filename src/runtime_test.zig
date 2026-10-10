@@ -19,7 +19,21 @@ fn skipWithoutFibers() !void {
 const Runtime = @import("Runtime.zig");
 const blocking = @import("ext/blocking.zig").blocking;
 
+const options = @import("runtime/options.zig");
+
 const small: Runtime.Options = .{ .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none };
+
+test "default workers: a quarter of the CPUs on Darwin, all but the home thread elsewhere" {
+    try testing.expectEqual(@as(u16, 0), options.defaultWorkers(.macos, 1));
+    try testing.expectEqual(@as(u16, 1), options.defaultWorkers(.macos, 2));
+    try testing.expectEqual(@as(u16, 2), options.defaultWorkers(.macos, 8));
+    try testing.expectEqual(@as(u16, 4), options.defaultWorkers(.macos, 16));
+    try testing.expectEqual(@as(u16, 8), options.defaultWorkers(.macos, 32));
+    try testing.expectEqual(@as(u16, 0), options.defaultWorkers(.linux, 1));
+    try testing.expectEqual(@as(u16, 7), options.defaultWorkers(.linux, 8));
+    try testing.expectEqual(@as(u16, 255), options.defaultWorkers(.linux, 4096));
+    try testing.expectEqual(@as(u16, 15), options.defaultWorkers(.windows, 16));
+}
 
 test "a sleep on the driver moves virtual time by exactly its length" {
     try skipWithoutFibers();

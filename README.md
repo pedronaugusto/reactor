@@ -74,11 +74,14 @@ at every tested size. `sqpoll` explicitly requests a kernel polling thread;
 an unsupported request returns an error. Both options are Linux-specific.
 
 `workers` defaults to the logical CPUs less one, which work that computes
-needs. Tasks that do little but wake one another, such as a client and a
-server in one runtime trading small messages, run faster on fewer: each
-exchange then crosses threads that sleep. On macOS with 15 workers such a
-benchmark ran slower than on 2 to 4; on Linux's io_uring it scaled to 4 and
-held there.
+needs, and on macOS to a quarter of them, at least one. Tasks that do little
+but wake one another, such as a client and a server in one runtime trading
+small messages, run faster on fewer threads: each exchange then crosses
+threads that sleep, and macOS's loopback costs the kernel more per message
+the more threads are in it (on 16 CPUs, 32 connections of 64-byte round trips
+ran 155k a second on 15 workers and 225k on 4). On Linux's io_uring such a
+benchmark scaled to 4 workers and held there. A host whose tasks are mostly
+arithmetic on macOS sets `workers` to the CPUs it has.
 
 `measure_stacks` enables diagnostic painting for overall touched depth.
 `stats().parked_high_water` is retained across task release;
