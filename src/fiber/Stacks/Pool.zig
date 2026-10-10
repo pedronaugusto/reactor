@@ -70,7 +70,7 @@ pub fn init(s: *Pool, gpa: Allocator, options: Options) InitError!void {
     // The size is the caller's: one past the address space cannot be reserved, so it is
     // refused before it is rounded, and the stride and every slab are sized with checks.
     const wanted = @max(options.size.raw(), 4 * page);
-    const size = std.mem.alignBackward(usize, std.math.add(usize, wanted, page - 1) catch return error.SystemResources, page);
+    const size = std.mem.alignBackward(usize, (aegis.int.Checked(usize).init(wanted).add(page - 1) catch return error.SystemResources).raw(), page);
     const with_guard = Bytes.fromRaw(size).add(Bytes.fromRaw(page)) catch return error.SystemResources;
     const slab_count = std.math.divCeil(usize, options.count, per_slab) catch unreachable; // unreachable: the divisor is a nonzero constant
     const regions = guardRegionsWork(page);
