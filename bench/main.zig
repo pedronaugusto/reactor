@@ -2,6 +2,7 @@
 //! [-- --io threaded] [-- --only <workload>]`.
 //!
 //! - spawn: `concurrent` + `await` of an empty task; a group of 10,000.
+//! - compute: 4096 tasks of about 50 microseconds of arithmetic, in a group.
 //! - wake: two tasks handing a futex word back and forth, on one worker and
 //!   across workers.
 //! - timers: a million loop timers armed, 99% cancelled before they fire;
@@ -18,6 +19,9 @@
 //! - stream: 64 MiB over loopback TCP between two tasks, written in 64 KiB
 //!   pieces and read through `Io.Reader` (a 64 KiB buffer): whole buffers,
 //!   and 4 KiB slices.
+//!
+//! `--messages N` sets the echo's messages and `--mib N` the bulk transfer's
+//! size.
 //!
 //! `--io threaded` runs the `Io` workloads on std's `Io.Threaded` instead,
 //! for the same numbers on the interface's baseline; `--backend epoll`
@@ -58,6 +62,7 @@ const Config = struct {
     sqpoll: bool = false,
     bytes: usize = 64 << 10,
     mib: usize = 16,
+    messages: usize = 200_000,
     msg_ring_off: bool = false,
     linked_timeout_off: bool = false,
     fixed_files_off: bool = false,
@@ -97,10 +102,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--registered")) c.registered = true else if (std.mem.eql(u8, arg, "--sqpoll")) c.sqpoll = true else if (std.mem.eql(u8, arg, "--msg-ring-off")) c.msg_ring_off = true else if (std.mem.eql(u8, arg, "--zero-copy-min")) {
             i += 1;
             c.zero_copy_min = if (std.mem.eql(u8, args[i], "off")) null else try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--messages")) {
+            i += 1;
+            c.messages = try std.fmt.parseInt(usize, args[i], 10);
+            if (c.messages < 32) return error.InvalidSize;
         } else if (std.mem.eql(u8, arg, "--mib")) {
             i += 1;
             c.mib = try std.fmt.parseInt(usize, args[i], 10);
-            if (c.mib == 0 or c.mib > 4096) return error.InvalidSize;
+            if (c.mib == 0 or c.mib > 65536) return error.InvalidSize;
         } else if (std.mem.eql(u8, arg, "--bytes")) {
             i += 1;
             c.bytes = try std.fmt.parseInt(usize, args[i], 10);
@@ -158,6 +167,7 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("spawn")) try spawn(r, io, c);
     if (c.wants("spawn-options")) try spawnOptions(r, io, c);
     if (c.wants("priority-lanes")) try priorityLanes(r, io, c);
+    if (c.wants("compute")) try compute(r, io, c);
     if (c.wants("wake")) try wake(r, io, c);
     if (c.wants("timers")) try sleeps(r, io, c);
     if (c.wants("echo")) try echo(r, gpa, io, c);
@@ -216,6 +226,31 @@ fn spawn(r: Report, io: Io, c: Config) !void {
     }
     const t3 = now(io);
     try r.line("spawn", "group of 10k, concurrent + await", nsBetween(t2, t3) / @as(f64, @floatFromInt(members * rounds)), "ns/task");
+}
+
+// compute
+
+/// About 50 microseconds of arithmetic that does not touch memory.
+fn burn(sink: *std.atomic.Value(u64)) void {
+    var x: u64 = 0x9e3779b97f4a7c15;
+    for (0..40_000) |i| x = (x ^ i) *% 0xff51afd7ed558ccd +% (x >> 29);
+    _ = sink.fetchXor(x, .monotonic);
+}
+
+fn computeRun(io: Io, tasks: usize) !void {
+    var sink: std.atomic.Value(u64) = .init(0);
+    var group: Io.Group = .init;
+    for (0..tasks) |_| try group.concurrent(io, burn, .{&sink});
+    try group.await(io);
+}
+
+fn compute(r: Report, io: Io, c: Config) !void {
+    const tasks: usize = if (c.smoke) 64 else 4096;
+    const rounds: usize = if (c.smoke) 1 else 20;
+    const t0 = now(io);
+    for (0..rounds) |_| try computeRun(io, tasks);
+    const t1 = now(io);
+    try r.line("compute", "4096 tasks of ~50 us arithmetic", @as(f64, @floatFromInt(tasks * rounds)) / (nsBetween(t0, t1) / std.time.ns_per_s), "task/s");
 }
 
 // wake
@@ -360,7 +395,7 @@ fn clientTask(io: Io, address: Io.net.IpAddress, messages: usize, failure: *?any
 fn echo(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     _ = gpa;
     for ([_]usize{ 1, 32 }) |connections| {
-        const total: usize = if (c.smoke) 100 else 200_000;
+        const total: usize = if (c.smoke) 100 else c.messages;
         const per = total / connections;
         const listen: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
         var server = try listen.listen(io, .{ .reuse_address = true });
