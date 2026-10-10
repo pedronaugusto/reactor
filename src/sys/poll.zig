@@ -25,9 +25,11 @@ pub const look: Millis = .fromRaw(0);
 
 /// The lowest index of an entry ready within `wait`; null when
 /// none was. An error or a hang-up counts as ready: a read or write then
-/// reports it. A signal ends the wait early, as a timeout.
+/// reports it, and so does a number no descriptor has, which `poll` itself
+/// skips. A signal ends the wait early, as a timeout.
 pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
     std.debug.assert(entries.len <= max);
+    for (entries, 0..) |e, i| if (e.handle < 0) return i;
     var fds: [max]posix.pollfd = undefined;
     for (entries, fds[0..entries.len]) |e, *f| f.* = .{
         .fd = e.handle,

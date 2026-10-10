@@ -38,7 +38,8 @@ pub fn of(o: anytype, cqe: linux.io_uring_cqe) op.Result {
             .TIME, .SUCCESS => {},
             else => error.Canceled,
         } },
-        .wait => .{ .wait = if (canceled) error.Canceled else if (cqe.res >= 0) {} else error.Unexpected },
+        // A descriptor that is not open is ready, as a poll says: the call reports it.
+        .wait => .{ .wait = if (canceled) error.Canceled else if (cqe.res >= 0 or e == .BADF) {} else error.Unexpected },
     };
 }
 

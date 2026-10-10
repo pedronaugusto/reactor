@@ -79,6 +79,7 @@ pub fn full(e: *const Epoll) bool {
 /// `fd` reports readiness both ways under `key`, from now on.
 pub fn register(e: *Epoll, fd: linux.fd_t, key: u64, have: readiness.Directions, direction: readiness.Direction) readiness.RegisterError!readiness.Directions {
     _ = direction;
+    if (fd < 0) return error.Unpollable;
     var event: linux.epoll_event = .{
         .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.RDHUP | linux.EPOLL.ET,
         .data = .{ .u64 = key },
@@ -92,7 +93,9 @@ pub fn register(e: *Epoll, fd: linux.fd_t, key: u64, have: readiness.Directions,
             .SUCCESS => return .both,
             .EXIST => ctl = linux.EPOLL.CTL_MOD,
             .NOENT => ctl = linux.EPOLL.CTL_ADD,
-            .PERM => return error.Unpollable,
+            // Not a file (a regular one), or closed since the wait began: the
+            // operation's own call says which.
+            .PERM, .BADF => return error.Unpollable,
             .NOMEM, .NOSPC => return error.SystemResources,
             else => |err| return posix.unexpectedErrno(err),
         }

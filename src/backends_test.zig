@@ -14,6 +14,9 @@ const shakedown = @import("shakedown");
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
 const fiber = @import("fiber.zig");
+const reactor = @import("reactor.zig");
+const kqueue_poller = @import("backend/readiness/Kqueue.zig");
+const epoll_poller = @import("backend/readiness/Epoll.zig");
 
 /// The readiness backends this system has.
 const readiness: []const Loop.Backend = switch (builtin.os.tag) {
@@ -484,7 +487,6 @@ test "a descriptor closed outside the loop and announced with closing is waited 
 }
 
 test "a recycled Wake descriptor remains registered on readiness backends" {
-    const reactor = @import("reactor.zig");
     for (readiness) |backend| {
         var r: Runtime = undefined;
         try runtime(&r, backend, 0);
@@ -567,4 +569,68 @@ test "r6: refused IPv6 connect followed by IPv4 reuses readiness" {
         const connected = try timed.connect(io, &server.socket.address, .{ .timeout = timeout });
         defer connected.stream.close(io);
     }
+}
+
+/// A wait on `w` that ends ready, with nothing else to wait for.
+fn expectReady(l: *Loop, w: Loop.Waitable) !void {
+    var o: Loop.Op = .{ .kind = .{ .wait = w } };
+    if (!try l.start(&o)) {
+        _ = try l.run(.nowait);
+        var out: [1]*Loop.Op = undefined;
+        try testing.expectEqual(@as(usize, 1), l.reap(&out).len);
+    }
+    try o.result.wait;
+}
+
+test "a wait on a descriptor that is not open is ready, as a poll says, and does not panic" {
+    for (all) |backend| {
+        var l: Loop = undefined;
+        try loopOf(&l, backend);
+        defer l.deinit(testing.allocator);
+        // A number no descriptor has, and one that was closed.
+        try expectReady(&l, .{ .readable = -1 });
+        try expectReady(&l, .{ .writable = -1 });
+        const pair = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        _ = posix.system.close(pair[1]);
+        _ = posix.system.close(pair[0]);
+        try expectReady(&l, .{ .readable = pair[0] });
+        try expectReady(&l, .{ .writable = pair[1] });
+    }
+}
+
+test "a wait on a descriptor that is not open is ready on a runtime and on Threaded" {
+    try reactor.wait(testing.io, .{ .readable = -1 }, .none);
+    try reactor.wait(testing.io, .{ .writable = -1 }, .none);
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        try reactor.wait(r.io(), .{ .readable = -1 }, .none);
+        try reactor.wait(r.io(), .{ .writable = -1 }, .none);
+        // Another member not ready: the one that is not open is the first.
+        const pipe = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        defer for (pipe) |fd| {
+            _ = posix.system.close(fd);
+        };
+        try testing.expectEqual(@as(usize, 1), try reactor.waitAny(r.io(), &.{ .{ .readable = pipe[0] }, .{ .readable = -1 } }, .none));
+    }
+}
+
+test "a readiness poller refuses a number no descriptor has instead of failing on it" {
+    inline for (.{ kqueue_poller, epoll_poller }) |Poller| {
+        if (!@hasDecl(Poller, "name")) continue;
+        if (comptime !isThisSystems(Poller.name)) continue;
+        var poller = Poller.init() catch return error.SkipZigTest;
+        defer poller.deinit();
+        try testing.expectError(error.Unpollable, poller.register(-1, 1, .{}, .read));
+        try testing.expectError(error.Unpollable, poller.register(-1, 1, .{}, .write));
+        // Nothing was queued or registered for it.
+        poller.deregister(-1, .{}, .open);
+    }
+}
+
+fn isThisSystems(comptime name: []const u8) bool {
+    return for (readiness) |b| {
+        if (std.mem.eql(u8, @tagName(b), name)) break true;
+    } else false;
 }

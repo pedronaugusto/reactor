@@ -126,8 +126,10 @@ pub fn isStream(fd: posix.fd_t) bool {
 }
 
 /// Whether `fd` is ready `direction`'s way now (an error or a hang-up
-/// counts: the call then reports it).
+/// counts: the call then reports it). So does a descriptor that is not
+/// open, a number no descriptor has included, which `poll` itself skips.
 pub fn ready(fd: posix.fd_t, direction: Direction) bool {
+    if (fd < 0) return true;
     const events: i16 = switch (direction) {
         .read => posix.POLL.IN,
         .write => posix.POLL.OUT,

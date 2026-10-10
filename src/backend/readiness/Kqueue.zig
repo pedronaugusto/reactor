@@ -145,7 +145,9 @@ fn filterOf(direction: readiness.Direction) i32 {
 }
 
 /// `fd` reports readiness `direction`'s way under `key`, from the next call.
+/// A number no descriptor has is unpollable, as one the kernel refuses is.
 pub fn register(k: *Kqueue, fd: posix.fd_t, key: u64, have: readiness.Directions, direction: readiness.Direction) readiness.RegisterError!readiness.Directions {
+    if (fd < 0) return error.Unpollable;
     k.queue(change(@intCast(fd), filterOf(direction), c.EV.ADD | c.EV.CLEAR, 0, 0, key));
     return have.with(switch (direction) {
         .read => .{ .read = true },
@@ -157,6 +159,7 @@ pub fn register(k: *Kqueue, fd: posix.fd_t, key: u64, have: readiness.Directions
 /// leaves the kernel's lists by itself; only changes still queued for it
 /// must go, lest the next call apply them to whatever takes its number.
 pub fn deregister(k: *Kqueue, fd: posix.fd_t, have: readiness.Directions, leaving: readiness.Leaving) void {
+    if (fd < 0) return;
     var kept: usize = 0;
     for (k.changes[0..k.change_count]) |e| {
         const ours = e.ident == @as(usize, @intCast(fd)) and (e.filter == c.EVFILT.READ or e.filter == c.EVFILT.WRITE) and e.udata != wake_key;
