@@ -600,6 +600,34 @@ test "a wait on a descriptor that is not open is ready, as a poll says, and does
     }
 }
 
+test "a stream read or write on a descriptor that is not open reports it, as Threaded does" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    for (all) |backend| {
+        var l: Loop = undefined;
+        try loopOf(&l, backend);
+        defer l.deinit(testing.allocator);
+        var buffer: [8]u8 = undefined;
+        var data: [1][]u8 = .{&buffer};
+        // In blocking mode a call is made only once the descriptor is ready.
+        const file: Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+        var read: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } };
+        if (!try l.start(&read)) {
+            _ = try l.run(.nowait);
+            var out: [1]*Loop.Op = undefined;
+            _ = l.reap(&out);
+        }
+        try testing.expectError(error.NotOpenForReading, (try read.result.io).file_read_streaming);
+        const bytes: []const []const u8 = &.{"x"};
+        var write: Loop.Op = .{ .kind = .{ .io = .{ .file_write_streaming = .{ .file = file, .header = &.{}, .data = bytes, .splat = 1 } } } };
+        if (!try l.start(&write)) {
+            _ = try l.run(.nowait);
+            var out: [1]*Loop.Op = undefined;
+            _ = l.reap(&out);
+        }
+        try testing.expectError(error.NotOpenForWriting, (try write.result.io).file_write_streaming);
+    }
+}
+
 test "a wait on a descriptor that is not open is ready on a runtime and on Threaded" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     try reactor.wait(testing.io, .{ .readable = -1 }, .none);
