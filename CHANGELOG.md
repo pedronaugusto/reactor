@@ -39,6 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A cancel sent from another thread to a task parked on a different processor no longer names a task that has ended: the request now lives in the wait's own record, and the task does not leave the wait until the processor has served it. Before, a task whose operation completed as its cancel was queued could be released first, and the processor read the released record (a crash in safe builds, a lost or misdirected cancel otherwise).
 - A deadline past the end of the awake timeline (584 years) armed on the loop no longer panics in safe builds or wraps in fast ones; it saturates, and the wait never ends. A `Loop.nextTimeout` or kernel wait to it is long, not negative.
 - A task count within 63 of 2^32 no longer wraps the slab count, a stack size past the address space or a stride that does not fit is refused with `SystemResources` instead of overflowing, and a worker count of 65,535 no longer wraps the processor count; `Runtime.init` returns `SystemResources`.
 - Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and run accepted work on the lane; foreign-runtime callers resume on their own scheduler.

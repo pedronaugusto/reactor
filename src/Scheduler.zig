@@ -34,6 +34,18 @@ pub const Errand = struct {
     run: *const fn (e: *Errand, p: *Processor) void,
 };
 
+/// A request that the processor holding a task's wait check the wait for a
+/// cancel. It lives in the wait's own record, in the waiting task's frame,
+/// and the task does not leave the wait (`leaveWait`) until the processor has
+/// served it, so a request never names a frame that is gone and a task's
+/// record is never released while one is queued.
+pub const CancelMessage = struct {
+    next: ?*CancelMessage = null,
+    task: *Task,
+    /// In a processor's inbox or being served; guarded by the task's lock.
+    queued: bool = false,
+};
+
 /// Descriptors are tracked hashed into this many slots; two descriptors in
 /// one slot only make a close look at a processor it need not.
 pub const descriptor_slots = 4096;
@@ -134,7 +146,7 @@ pub const Processor = struct {
     /// lines a task switch reads.
     const Remote = struct {
         inbox: Inbox(Task, "next") = .{},
-        cancels: Inbox(Task, "cancel_next") = .{},
+        cancels: Inbox(CancelMessage, "next") = .{},
         errands: Inbox(Errand, "next") = .{},
         /// Set while the processor may be waiting in the kernel: a producer
         /// that sees it wakes the loop.
@@ -342,10 +354,37 @@ pub const Processor = struct {
         if (p.held[slot] == 0) _ = p.scheduler.holders[slot].fetchAnd(~processorBit(p.index), .release);
     }
 
-    /// From any thread: this processor checks `t`'s wait for a cancel.
-    pub fn pushCancel(p: *Processor, t: *Task) void {
-        _ = p.remote.cancels.push(t);
+    /// From a wait's cancel hook, which runs with the task's lock held: this
+    /// processor checks the task's wait for a cancel. One request is queued
+    /// at a time; the one already queued checks whatever the task waits in
+    /// when it is served.
+    pub fn pushCancel(p: *Processor, m: *CancelMessage) void {
+        if (m.queued) return;
+        m.queued = true;
+        _ = m.task.cancel_messages.fetchAdd(1, .release);
+        _ = p.remote.cancels.push(m);
         p.wakeIfIdle();
+    }
+
+    /// Serves the cancel requests queued here: each task's wait is checked
+    /// for a cancel on this processor's thread. True when there were any.
+    pub fn serveCancels(p: *Processor) bool {
+        var messages = p.remote.cancels.takeAll();
+        const any = messages != null;
+        while (messages) |m| {
+            // The message and its task are alive until the count drops: the
+            // task waits for it in `leaveWait`.
+            messages = m.next;
+            const t = m.task;
+            t.lock();
+            m.queued = false;
+            // The hook re-checks that the wait is still this processor's and
+            // cancels its operation in this loop.
+            if (t.wait) |hook| hook.cancel(hook, t);
+            t.unlock();
+            _ = t.cancel_messages.fetchSub(1, .release);
+        }
+        return any;
     }
 
     /// The scheduler, on this processor's thread, until the runtime stops
@@ -442,16 +481,7 @@ pub const Processor = struct {
             e.run(e, p);
             any = true;
         }
-        var cancels = p.remote.cancels.takeAll();
-        while (cancels) |t| {
-            cancels = t.cancel_next;
-            t.cancel_next = null;
-            // The hook re-checks that the wait is still this processor's and
-            // cancels its operation in this loop.
-            t.lock();
-            if (t.wait) |hook| hook.cancel(hook, t);
-            t.unlock();
-        }
+        if (p.serveCancels()) any = true;
         return any;
     }
 
@@ -844,9 +874,18 @@ pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
     s.inject(t);
 }
 
-/// Asks the processor holding `t`'s wait to check it for a cancel.
-pub fn cancelOn(t: *Task, p: *Processor) void {
-    p.pushCancel(t);
+/// Leaves the wait `t` entered: its hook is gone, and so is every request
+/// to check it, since those live in the waiting frame. A request the
+/// processor has not served yet is served by it, on its own thread, or here
+/// when this is that thread; this task gives its processor the turn meanwhile.
+pub fn leaveWait(t: *Task) void {
+    t.leaveWait();
+    while (t.cancel_messages.load(.acquire) != 0) {
+        if (heldNow()) |p| _ = p.serveCancels();
+        if (t.cancel_messages.load(.acquire) == 0) return;
+        std.atomic.spinLoopHint();
+        if (current() != null) yield();
+    }
 }
 
 // The global queue.

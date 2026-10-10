@@ -9,6 +9,7 @@ test {
     _ = @import("boundary_test.zig");
     _ = @import("r1_regression_test.zig");
     _ = @import("later_test.zig");
+    _ = @import("cancel_race_test.zig");
     _ = @import("testing/overflow_test.zig");
     _ = @import("testing/seh_test.zig");
     _ = @import("uring_test.zig");
