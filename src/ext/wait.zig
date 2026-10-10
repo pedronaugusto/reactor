@@ -209,9 +209,22 @@ fn batched(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!?usize
             error.ConcurrencyUnavailable => return null,
             error.Canceled => return error.Canceled,
         };
+        // `Io.Threaded` completes a member only once `poll` said it is
+        // ready; another `Io` is asked again by a look, the lowest ready
+        // index being the answer either way.
+        if (io.vtable.batchAwaitConcurrent == threaded_batch) {
+            var lowest: ?usize = null;
+            while (batch.next()) |c| lowest = if (lowest) |l| @min(l, c.index) else c.index;
+            if (lowest) |i| {
+                if (i > 0) if (try once(io, set[0..i], poll.look)) |earlier| return earlier;
+                return i;
+            }
+        }
         return try once(io, set, poll.look);
     }
 }
+
+const threaded_batch = Io.Threaded.global_single_threaded.io().vtable.batchAwaitConcurrent;
 
 /// The next slice's length for what is `left` of a deadline (null: no
 /// deadline): at most `slice`, rounded up to a millisecond; null once it
