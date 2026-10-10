@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Signals.wake`: the wake a listener's deliveries set, to wait on beside other members of a `waitAny` set. When it reports, `next` with a zero timeout takes what was delivered. A program that waits on its input and on its resize signal together no longer needs a handler and a pipe of its own.
+
 ### Breaking
 
 - Byte counts in the options are aegis `units.Bytes`: `Runtime.Options.stack_size`, `zero_copy_min` (here and in `Loop.Options`), each `stack_classes` entry's `size`, `TaskOptions.stack_size`, an owned lane's `scratch_bytes` and `net.Receiver.Pool.Options.buffer_len`. Write `.stack_size = .fromRaw(256 << 10)`.
