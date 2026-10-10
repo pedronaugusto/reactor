@@ -77,7 +77,9 @@ fn ownershipProperty(_: void, c: *shakedown.Case) !void {
 }
 
 test "later: linked timeout and zero-copy notifications retain every completion ordering" {
-    try shakedown.check(testing.allocator, {}, ownershipProperty, .{ .cases = 64, .regressions = &.{ "0:0", "1:0", "2:1" } });
+    const searched = try shakedown.explore(testing.allocator, {}, ownershipProperty, .{});
+    try testing.expect(searched.complete);
+    try testing.expectEqual(@as(u64, 6), searched.runs);
 }
 
 fn fakeRequest(io: Io) anyerror!usize {
@@ -108,6 +110,32 @@ fn raceProperty(_: void, c: *shakedown.Case) !void {
 
 test "later: cancellation schedules share a shrinkable source with the production scheduler" {
     try shakedown.check(testing.allocator, {}, raceProperty, .{ .cases = 128, .regressions = &.{ "0", "7:1:0:1" } });
+}
+
+/// One to three requests, each awaited or canceled, through the production
+/// scheduler on the seeded fake: `explore` makes every completion, delay
+/// and cancel order the fake can, with up to `delays` choices that hold an
+/// operation back or lose a cancel to a completion.
+fn searchedRace(_: void, c: *shakedown.Case) !void {
+    var d: Driver = undefined;
+    try d.initSource(c.gpa, c.source, .{ .max_tasks = 8, .stack_size = .fromRaw(128 << 10), .offload = .none });
+    defer d.deinit();
+    const io = d.io();
+    const n = 1 + c.source.below(2);
+    var tasks: [3]Io.Future(anyerror!usize) = undefined;
+    for (tasks[0..@intCast(n)]) |*task| task.* = try io.concurrent(fakeRequest, .{io});
+    for (tasks[0..@intCast(n)]) |*task| {
+        const result = if (c.source.below(1) == 0) task.await(io) else task.cancel(io);
+        if (result) |got| try testing.expectEqual(@as(usize, 0), got) else |err| try testing.expectEqual(error.Canceled, err);
+    }
+    try testing.expectEqual(@as(usize, 0), d.fake.ops.items.len);
+    try testing.expectEqual(@as(u32, 0), d.runtime.stats().tasks);
+    try testing.expectEqual(@as(u32, 0), d.runtime.core.processors[0].loop.in_flight);
+}
+
+test "later: every completion and cancel order of up to three requests, searched through the production scheduler" {
+    const searched = try shakedown.explore(testing.allocator, {}, searchedRace, .{ .max_deviations = 6 });
+    try testing.expect(searched.complete);
 }
 
 fn witness(_: void, c: *shakedown.Case) !void {
