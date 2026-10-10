@@ -26,6 +26,13 @@ const Kqueue = @This();
 
 pub const name = "kqueue";
 pub const max_events = 256;
+/// A registration made again for a descriptor already registered has the
+/// kernel look at it afresh: one that is ready then is reported by the next
+/// wait, as it would be on its first registration. It costs an entry in
+/// the next call's changelist where `poll(2)` costs a call; on Darwin, whose
+/// `poll` waits off the CPU for ~8 us even with no timeout, a wait on a
+/// pipe made by turns went from 17 us a round to 1.7 (M3 Max, 2026-10-10).
+pub const rearms = true;
 /// Changes queued for the next call, never more than the event list holds
 /// (one is kept for the wait's own timer), so a refused one always has room
 /// to come back in.

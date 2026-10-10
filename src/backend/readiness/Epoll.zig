@@ -18,6 +18,9 @@ const Epoll = @This();
 
 pub const name = "epoll";
 pub const max_events = 256;
+/// A wait asks `poll(2)` whether the descriptor is ready before it parks:
+/// an `EPOLL_CTL_MOD` would cost the same call.
+pub const rearms = false;
 
 /// Events of these keys are reactor's own, never a record's.
 const wake_key: u64 = std.math.maxInt(u64);
