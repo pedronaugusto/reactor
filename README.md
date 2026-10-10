@@ -124,13 +124,16 @@ These take any `Io`. On a runtime's task they are native; on any other `Io`
 (`Io.Threaded`, a wrapping layer) they take the best path its slots allow,
 counted by `reactor.fallbacks()`.
 
-- **`wait`, `waitAny`**: readiness of descriptors, a `Process` ending, a
-  `Wake`, a Windows object. On a runtime each member is an operation of the
-  task's own loop, so the wait is a cancelation point and holds no thread;
-  elsewhere the calling thread waits in 5 ms slices between cancel checks.
+- **`wait`, `waitAny`**: readiness of descriptors (readable, writable, or a
+  `priority` condition such as urgent data or a `cgroup.events` change), a
+  `Process` ending, a `Wake`, a Windows object. On a runtime each member is an
+  operation of the task's own loop, so the wait is a cancelation point and
+  holds no thread; elsewhere the calling thread waits in 5 ms slices between
+  cancel checks. A descriptor that is not open is ready: the call that follows
+  reports it. `priority` is `Unsupported` on Darwin and Windows.
 - **`Wake`**: a wake-up any thread (or a signal handler) can send.
 - **`Process`**: a child that a wait reports once it has ended, without
-  reaping it. On Linux a runtime's `childWait` waits on the pidfd the same way.
+  reaping it; `ended` asks without waiting. On Linux a runtime's `childWait` waits on the pidfd the same way.
 - **`Job`** (Windows): a job object's messages.
 - **`blocking(io, lane, f, args)`**: a raw call that can take milliseconds,
   run on one of the runtime's lanes (`sync`, `lookup`, `wait`, `general`).

@@ -16,6 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Waitable.priority`: a descriptor's `POLLPRI` condition, such as urgent data on a stream socket or a change to a `cgroup.events` file. A task waits for it on the loop under io_uring and epoll, and on the `wait` lane under kqueue; Darwin's `poll` cannot report it and Windows has no such event, so a wait there is `Unsupported`.
+- `Process.ended`: whether the process has ended, asked without waiting or reaping.
 - `net.Deadlines.tighten`: deadlines shorter than the shortest `init` was told of shorten the watching task's tick at once, even while it waits out a longer one. `net.literal` and `net.max_addresses`: a host that is an address, and the most addresses `net.resolve` keeps.
 - `concurrentWith(io, .{ .stack_size, .priority }, f, args)` over init-reserved stack classes (`Options.stack_classes`) and a `latency` priority; latency work gets up to eight turns before queued normal work, on the scheduler and on the lanes.
 - Sparse registered buffer pools for fixed file reads and writes, io_uring SEND_ZC above `zero_copy_min`, and an explicit `sqpoll`; all off by default.
@@ -39,6 +41,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A wait on a descriptor that is not open is ready, as `poll` says for a closed one, on every backend and under `Io.Threaded`; a number below zero used to panic the kqueue backend, fail the epoll backend with `Unexpected`, complete io_uring's with `Unexpected` and never end a thread's wait. The operation that follows reports the error. The kqueue and epoll pollers answer `Unpollable` to a number no descriptor has.
+- On Darwin a `Process` opened for a child that is ending, which `kqueue` refuses for up to a few milliseconds while `waitid` still says it runs, watches `SIGCHLD` on a kqueue and asks again at each, instead of asking every 5 ms.
 - A deadline past the end of the awake timeline (584 years) armed on the loop no longer panics in safe builds or wraps in fast ones; it saturates, and the wait never ends. A `Loop.nextTimeout` or kernel wait to it is long, not negative.
 - A task count within 63 of 2^32 no longer wraps the slab count, a stack size past the address space or a stride that does not fit is refused with `SystemResources` instead of overflowing, and a worker count of 65,535 no longer wraps the processor count; `Runtime.init` returns `SystemResources`.
 - Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and run accepted work on the lane; foreign-runtime callers resume on their own scheduler.
