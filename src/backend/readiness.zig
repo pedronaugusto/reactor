@@ -146,7 +146,9 @@ fn Acts(comptime OpPtr: type) type {
                             o.result = .{ .connect = if (may_wait) calls.connected(fd) else error.Unexpected };
                             if (w.restore) calls.makeBlocking(fd);
                         },
-                        .wait => o.result = .{ .wait = if (may_wait) {} else error.Unsupported },
+                        // A registration refused because the descriptor is
+                        // not open is ready, as `poll` says (`POLLNVAL`).
+                        .wait => o.result = .{ .wait = if (may_wait or calls.ready(fd, w.direction)) {} else error.Unsupported },
                         else => unreachable, // unreachable: only these wait on a descriptor
                     }
                 },
@@ -336,6 +338,8 @@ pub fn Readiness(comptime Poller: type) type {
                         .priority => |fd| .{ fd, .priority },
                         .object => unreachable, // unreachable: Windows objects never reach a POSIX backend
                     };
+                    // A number no descriptor has is ready, as `poll` says.
+                    if (Poller.rearms and fd >= 0) return self.parkAfresh(w, fd, direction, .readiness);
                     if (calls.ready(fd, direction)) {
                         o.result = .{ .wait = {} };
                         return true;
@@ -503,6 +507,7 @@ pub fn Readiness(comptime Poller: type) type {
         fn park(self: *Self, w: *Waiter, fd: posix.fd_t, direction: Direction, how: How) SubmitError!bool {
             const index = try self.recordFor(fd);
             const r = self.records.at(index);
+            w.direction = direction;
             if (!r.registered.has(directions(direction))) {
                 try self.room();
                 const key = @as(u64, r.generation) << 32 | index;
@@ -530,6 +535,24 @@ pub fn Readiness(comptime Poller: type) type {
             if (direction == .read) r.available = 0;
             r.waiters[@backingInt(direction)].append(w);
             return false;
+        }
+
+        /// Parks `w` with the descriptor registered anew, so the poller
+        /// reports it at its next wait if it is ready now (`Poller.rearms`):
+        /// the readiness question without a call of its own.
+        fn parkAfresh(self: *Self, w: *Waiter, fd: posix.fd_t, direction: Direction, how: How) SubmitError!bool {
+            const index = try self.recordFor(fd);
+            const r = self.records.at(index);
+            if (r.registered.has(directions(direction))) {
+                try self.room();
+                const key = @as(u64, r.generation) << 32 | index;
+                r.registered = self.poller.register(fd, key, r.registered, direction) catch |err| switch (err) {
+                    error.Unpollable => unreachable, // unreachable: it was registered this way before
+                    error.SystemResources => return error.SystemResources,
+                    error.Unexpected => return error.Unexpected,
+                };
+            }
+            return self.park(w, fd, direction, how);
         }
 
         fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action) Outcome {
