@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `net.Deadlines.tighten`: deadlines shorter than the shortest `init` was told of shorten the watching task's tick at once, even while it waits out a longer one. `net.literal` and `net.max_addresses`: a host that is an address, and the most addresses `net.resolve` keeps.
 - `concurrentWith(io, .{ .stack_size, .priority }, f, args)` over init-reserved stack classes (`Options.stack_classes`) and a `latency` priority; latency work gets up to eight turns before queued normal work, on the scheduler and on the lanes.
 - Sparse registered buffer pools for fixed file reads and writes, io_uring SEND_ZC above `zero_copy_min`, and an explicit `sqpoll`; all off by default.
 - Native Linux OPENAT, STATX and WAITID, a kernel-linked deadline for `connect`, ring-message wakes between a runtime's processors, and BSD process-watch waits.

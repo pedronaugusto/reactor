@@ -170,6 +170,13 @@ test "a family asked for is kept even where the resolver answers both" {
     try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &four[0].ip4.bytes);
 }
 
+test "a host that is an address is one, IPv6 brackets allowed, and a name is not" {
+    try testing.expectEqual(@as(u16, 443), net.literal("[::1]", 443).?.getPort());
+    try testing.expectEqualSlices(u8, &.{ 10, 0, 0, 7 }, &net.literal("10.0.0.7", 80).?.ip4.bytes);
+    try testing.expectEqual(@as(?IpAddress, null), net.literal("example.test", 80));
+    try testing.expectEqual(@as(?IpAddress, null), net.literal("[example.test]", 80));
+}
+
 // Deadlines
 
 test "a timed read over an Io without concurrent batches drains its fallback" {
@@ -228,9 +235,38 @@ test "a deadline passed aborts the operation's socket, and one disarmed in time 
 }
 
 test "the watching task ticks at a tenth of the shortest timeout, between a millisecond and a second" {
-    try testing.expectEqual(@as(i96, std.time.ns_per_ms), net.Deadlines.init(.fromMilliseconds(2)).tick.nanoseconds);
-    try testing.expectEqual(@as(i96, 3 * std.time.ns_per_s / 10), net.Deadlines.init(.fromSeconds(3)).tick.nanoseconds);
-    try testing.expectEqual(@as(i96, std.time.ns_per_s), net.Deadlines.init(.fromSeconds(300)).tick.nanoseconds);
+    try testing.expectEqual(@as(i64, std.time.ns_per_ms), net.Deadlines.init(.fromMilliseconds(2)).tick.load(.monotonic));
+    try testing.expectEqual(@as(i64, 3 * std.time.ns_per_s / 10), net.Deadlines.init(.fromSeconds(3)).tick.load(.monotonic));
+    try testing.expectEqual(@as(i64, std.time.ns_per_s), net.Deadlines.init(.fromSeconds(300)).tick.load(.monotonic));
+}
+
+test "tighten only shortens the tick, and wakes the task that waits out a longer one" {
+    const io = testing.io;
+    var deadlines: net.Deadlines = .init(.fromSeconds(300));
+    defer deadlines.deinit(io);
+    deadlines.tighten(io, .fromMilliseconds(50));
+    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), deadlines.tick.load(.monotonic));
+    deadlines.tighten(io, .fromSeconds(5));
+    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), deadlines.tick.load(.monotonic));
+
+    // A task that has waited out one second between looks ends an operation
+    // within a few ticks of the shorter deadline asked for afterwards.
+    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var slow: net.Deadlines = .init(.fromSeconds(300));
+    defer slow.deinit(io);
+    var watch: net.Deadlines.Watch = .init(stream.socket.handle);
+    if (!slow.add(io, &watch)) return error.SkipZigTest;
+    defer slow.remove(io, &watch);
+    var buffer: [16]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    const read: Io.Operation = .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } };
+    const start = Io.Clock.awake.now(io);
+    slow.tighten(io, .fromMilliseconds(50));
+    try testing.expectError(error.Timeout, slow.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(60)) }));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 500 * std.time.ns_per_ms);
 }
 
 // abort

@@ -14,6 +14,8 @@ pub const connect = connect_file.connect;
 pub const ResolveOptions = resolve_file.Options;
 pub const ResolveError = resolve_file.Error;
 pub const resolve = resolve_file.resolve;
+pub const max_addresses = resolve_file.max_addresses;
+pub const literal = resolve_file.literal;
 
 pub const abort = @import("net/abort.zig").abort;
 pub const Deadlines = @import("net/Deadlines.zig");

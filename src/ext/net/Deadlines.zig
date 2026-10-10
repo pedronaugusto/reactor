@@ -37,8 +37,12 @@ armed: std.atomic.Value(u32) = .init(0),
 /// 1 while the task waits for an operation to be armed; the futex it
 /// waits on.
 parked: std.atomic.Value(u32) = .init(0),
-/// How often the task looks at the armed deadlines.
-tick: Io.Duration,
+/// How often the task looks at the armed deadlines, in nanoseconds. It only
+/// shortens, and `tighten` is what does.
+tick: std.atomic.Value(i64),
+/// Bumped to cut the task's wait between ticks short; the futex it waits
+/// on.
+nudge: std.atomic.Value(u32) = .init(0),
 
 const unarmed: clock.Awake = .fromRaw(0);
 
@@ -61,8 +65,29 @@ pub const Watch = struct {
 /// Deadlines no shorter than `shortest`: the watching task ticks at a
 /// tenth of it, between a millisecond and a second.
 pub fn init(shortest: Io.Duration) Deadlines {
-    const tenth = @divTrunc(shortest.nanoseconds, 10);
-    return .{ .tick = .fromNanoseconds(std.math.clamp(tenth, std.time.ns_per_ms, std.time.ns_per_s)) };
+    return .{ .tick = .init(tickFor(shortest)) };
+}
+
+/// A tenth of `d`, between a millisecond and a second.
+fn tickFor(d: Io.Duration) i64 {
+    return @intCast(std.math.clamp(@divTrunc(d.nanoseconds, 10), std.time.ns_per_ms, std.time.ns_per_s)); // safe: clamped to between a millisecond and a second
+}
+
+/// Keep deadlines as short as `d` too, which `init` was not told of: the
+/// tick shortens to match, at once, even while the task waits out a longer
+/// one. A longer `d` changes nothing. On a runtime nothing ticks, and this
+/// does nothing.
+pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
+    if (native.runtimeOf(io) != null) return;
+    const want = tickFor(shorter);
+    var current = d.tick.load(.monotonic);
+    while (want < current) {
+        current = d.tick.cmpxchgWeak(current, want, .monotonic, .monotonic) orelse {
+            _ = d.nudge.fetchAdd(1, .release);
+            io.futexWake(u32, &d.nudge.raw, 1);
+            return;
+        };
+    }
 }
 
 /// Every watch must have been removed.
@@ -167,7 +192,9 @@ fn watch(d: *Deadlines, io: Io) void {
                 continue;
             }
         } else idle_ticks = 0;
-        io.sleep(d.tick, .awake) catch return;
+        const seen = d.nudge.load(.acquire);
+        const tick: Io.Duration = .fromNanoseconds(d.tick.load(.monotonic));
+        io.futexWaitTimeout(u32, &d.nudge.raw, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
         d.scan(io);
     }
 }
