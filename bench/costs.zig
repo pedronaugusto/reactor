@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     const stack = std.mem.eql(u8, args[1], "stacks");
     if (!stack and !std.mem.eql(u8, args[1], "process")) return error.UnknownWorkload;
     var runtime: reactor.Runtime = undefined;
-    try runtime.init(init.gpa, .{ .workers = 0, .max_tasks = 64, .stack_size = 512 << 10, .offload = .none });
+    try runtime.init(init.gpa, .{ .workers = 0, .max_tasks = 64, .stack_size = .fromRaw(512 << 10), .offload = .none });
     defer runtime.deinit();
     try runtime.start();
     const count: usize = if (stack) 2000 else 200;

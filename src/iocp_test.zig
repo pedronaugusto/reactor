@@ -21,7 +21,7 @@ fn skipOffWindows() !void {
 fn runtime(r: *Runtime, workers: u16) !void {
     try skipOffWindows();
     // std's spawn finds programs on the PATH of the environment it is given.
-    try r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10, .environ = testing.environ });
+    try r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10), .environ = testing.environ });
     errdefer r.deinit();
     try testing.expectEqual(@as(?backend.Kind, .iocp), r.backendKind());
     try r.start();
@@ -52,7 +52,7 @@ test "shakedown's conformance suite passes on IOCP with no thread of reactor's o
 test "shakedown's conformance suite passes on IOCP with shared-nothing processors and no lanes" {
     try skipOffWindows();
     var r: Runtime = undefined;
-    try r.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .offload = .none, .max_tasks = 512, .stack_size = 256 << 10 });
+    try r.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .offload = .none, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) });
     defer r.deinit();
     try r.start();
     try conformance(r.io());

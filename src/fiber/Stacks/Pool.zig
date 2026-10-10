@@ -24,7 +24,9 @@ const Pool = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
+const Bytes = aegis.units.Bytes(usize);
 const memory = @import("../../sys/memory.zig");
 const fiber = @import("../../fiber.zig");
 
@@ -35,10 +37,14 @@ const initial_commit = 2 * 4096;
 
 pub const per_slab = 64;
 
+/// A stack's place in this pool. `Stacks` numbers stacks across every pool
+/// with its own `Stack`; the two do not mix.
+pub const Slot = aegis.id.Id(struct {}, u32);
+
 pub const Options = struct {
     count: u32,
     /// Usable bytes per stack, rounded up to whole pages.
-    size: usize,
+    size: aegis.units.Bytes(usize),
 };
 
 pub const InitError = error{ SystemResources, TooManyTasks } || Allocator.Error;
@@ -61,13 +67,18 @@ limits: if (is_windows) []usize else void = if (is_windows) &.{} else {},
 
 pub fn init(s: *Pool, gpa: Allocator, options: Options) InitError!void {
     const page = memory.pageSize();
-    const size = std.mem.alignForward(usize, @max(options.size, 4 * page), page);
-    const slab_count = (options.count + per_slab - 1) / per_slab;
+    // The size is the caller's: one past the address space cannot be reserved, so it is
+    // refused before it is rounded, and the stride and every slab are sized with checks.
+    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the least stack is four pages, and the mapping is in plain bytes
+    const wanted = @max(options.size.raw(), 4 * page);
+    const size = std.mem.alignBackward(usize, std.math.add(usize, wanted, page - 1) catch return error.SystemResources, page);
+    const with_guard = Bytes.fromRaw(size).add(Bytes.fromRaw(page)) catch return error.SystemResources;
+    const slab_count = std.math.divCeil(usize, options.count, per_slab) catch unreachable; // unreachable: the divisor is a nonzero constant
     const regions = guardRegionsWork(page);
     if (!regions and !is_windows) try checkMapCount(options.count, slab_count);
     s.* = .{
         .size = size,
-        .stride = size + page,
+        .stride = with_guard.raw(),
         .regions = regions,
         .slabs = try gpa.alloc([]align(memory.page_size_min) u8, slab_count),
         .links = undefined,
@@ -86,8 +97,9 @@ pub fn init(s: *Pool, gpa: Allocator, options: Options) InitError!void {
     var made: usize = 0;
     errdefer for (s.slabs[0..made]) |slab| memory.release(slab);
     while (made < slab_count) : (made += 1) {
-        const in_slab = @min(per_slab, options.count - made * per_slab);
-        const slab = try memory.reserveSpace(in_slab * s.stride);
+        const in_slab: usize = @min(per_slab, options.count - made * per_slab);
+        const slab_bytes = with_guard.mul(in_slab) catch return error.SystemResources;
+        const slab = try memory.reserveSpace(slab_bytes.raw());
         s.slabs[made] = slab;
         errdefer memory.release(slab);
         // Windows: the page below each stack is never committed.
@@ -100,7 +112,7 @@ pub fn init(s: *Pool, gpa: Allocator, options: Options) InitError!void {
     var i = options.count;
     while (i > 0) {
         i -= 1;
-        s.push(i);
+        s.push(.fromRaw(i));
     }
 }
 
@@ -112,8 +124,8 @@ pub fn deinit(s: *Pool, gpa: Allocator) void {
     s.* = undefined;
 }
 
-/// A free stack's index, or null when every stack is in use.
-pub inline fn take(s: *Pool) ?u32 {
+/// A free stack's slot, or null when every stack is in use.
+pub inline fn take(s: *Pool) ?Slot {
     var raw = s.free.load(.acquire);
     while (true) {
         const f: Free = @bitCast(raw);
@@ -124,23 +136,24 @@ pub inline fn take(s: *Pool) ?u32 {
             raw = actual;
             continue;
         }
-        if (is_windows and s.limits[index] == 0) s.prepare(index) catch {
-            s.push(index);
+        const slot: Slot = .fromRaw(index);
+        if (is_windows and s.limits[index] == 0) s.prepare(slot) catch {
+            s.push(slot);
             return null;
         };
         _ = s.in_use.fetchAdd(1, .monotonic);
-        return index;
+        return slot;
     }
 }
 
 /// Windows: commits a stack's top pages and the guard below them, the
 /// first time it is handed out.
-fn prepare(s: *Pool, index: u32) error{SystemResources}!void {
+fn prepare(s: *Pool, slot: Slot) error{SystemResources}!void {
     const page = (s.stride - s.size);
-    const low = s.top(index) - initial_commit;
+    const low = s.top(slot) - initial_commit;
     try memory.commit(pages(low - page, low), true);
-    try memory.commit(pages(low, s.top(index)), false);
-    s.limits[index] = low;
+    try memory.commit(pages(low, s.top(slot)), false);
+    s.limits[slot.raw()] = low;
 }
 
 fn pages(from: usize, to: usize) []align(memory.page_size_min) u8 {
@@ -148,47 +161,48 @@ fn pages(from: usize, to: usize) []align(memory.page_size_min) u8 {
     return start[0 .. to - from];
 }
 
-/// The stack `index` as a context starts on it.
-pub inline fn stack(s: *const Pool, index: u32) fiber.Stack {
+/// The stack `slot` as a context starts on it.
+pub inline fn stack(s: *const Pool, slot: Slot) fiber.Stack {
     return .{
-        .top = s.top(index),
-        .limit = if (is_windows) s.limits[index] else s.bottom(index),
-        .bottom = s.bottom(index) - (s.stride - s.size),
+        .top = s.top(slot),
+        .limit = if (is_windows) s.limits[slot.raw()] else s.bottom(slot),
+        .bottom = s.bottom(slot) - (s.stride - s.size),
     };
 }
 
-/// Makes stack `index` usable down to `low` before anything but its own
+/// Makes stack `slot` usable down to `low` before anything but its own
 /// task writes there (the task's record and its copied context, written by
 /// the thread creating it): Windows grows a stack only for the thread
 /// running on it. False when `low` is past what the stack can commit.
-pub inline fn reach(s: *Pool, index: u32, low: usize) bool {
+pub inline fn reach(s: *Pool, slot: Slot, low: usize) bool {
     if (!is_windows) return true;
     const page = (s.stride - s.size);
-    const limit = s.limits[index];
+    const limit = s.limits[slot.raw()];
     const want = std.mem.alignBackward(usize, low, page);
     if (want >= limit) return true;
-    if (want - page < s.bottom(index)) return false;
+    if (want - page < s.bottom(slot)) return false;
     memory.commit(pages(want, limit), false) catch return false;
     memory.commit(pages(want - page, want), true) catch return false;
-    s.limits[index] = want;
+    s.limits[slot.raw()] = want;
     return true;
 }
 
-/// Windows: a task on stack `index` ended with the stack committed down to
+/// Windows: a task on stack `slot` ended with the stack committed down to
 /// `limit`; the next task there starts with that much.
-pub inline fn ended(s: *Pool, index: u32, limit: usize) void {
+pub inline fn ended(s: *Pool, slot: Slot, limit: usize) void {
     if (!is_windows) return;
-    s.limits[index] = @min(s.limits[index], limit);
+    s.limits[slot.raw()] = @min(s.limits[slot.raw()], limit);
 }
 
 /// Returns a stack no task runs on any more.
-pub inline fn give(s: *Pool, index: u32) void {
-    s.push(index);
+pub inline fn give(s: *Pool, slot: Slot) void {
+    s.push(slot);
     // Zero publishes the last release after it stopped touching this pool.
     _ = s.in_use.fetchSub(1, .release);
 }
 
-fn push(s: *Pool, index: u32) void {
+fn push(s: *Pool, slot: Slot) void {
+    const index = slot.raw();
     var raw = s.free.load(.monotonic);
     while (true) {
         const f: Free = @bitCast(raw);
@@ -198,21 +212,22 @@ fn push(s: *Pool, index: u32) void {
     }
 }
 
-/// One past the highest usable byte of stack `index`; 16-aligned.
-pub inline fn top(s: *const Pool, index: u32) usize {
-    return s.bottom(index) + s.size;
+/// One past the highest usable byte of stack `slot`; 16-aligned.
+pub inline fn top(s: *const Pool, slot: Slot) usize {
+    return s.bottom(slot) + s.size;
 }
 
-/// The lowest usable byte of stack `index`, just above its guard.
-pub inline fn bottom(s: *const Pool, index: u32) usize {
+/// The lowest usable byte of stack `slot`, just above its guard.
+pub inline fn bottom(s: *const Pool, slot: Slot) usize {
+    const index = slot.raw();
     const slab = s.slabs[index / per_slab];
     return @intFromPtr(slab.ptr) + (index % per_slab) * s.stride + (s.stride - s.size); // safe: an address, for laying out the stack
 }
 
-/// Gives the pages of stack `index` below `keep_from` back to the system.
-pub fn trim(s: *const Pool, index: u32, keep_from: usize) void {
+/// Gives the pages of stack `slot` below `keep_from` back to the system.
+pub fn trim(s: *const Pool, slot: Slot, keep_from: usize) void {
     const page = (s.stride - s.size);
-    const low = s.bottom(index);
+    const low = s.bottom(slot);
     const high = std.mem.alignBackward(usize, keep_from, page);
     if (high <= low) return;
     const start: [*]align(memory.page_size_min) u8 = @ptrFromInt(low);

@@ -19,7 +19,7 @@ fn skipWithoutFibers() !void {
 const Runtime = @import("Runtime.zig");
 const blocking = @import("ext/blocking.zig").blocking;
 
-const small: Runtime.Options = .{ .max_tasks = 256, .stack_size = 256 << 10, .offload = .none };
+const small: Runtime.Options = .{ .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none };
 
 test "a sleep on the driver moves virtual time by exactly its length" {
     try skipWithoutFibers();
@@ -117,7 +117,7 @@ test "a fake loop leaves streaming file reads to the file lane" {
 test "shakedown's conformance suite passes on real worker threads" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 256, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 256, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     var failure: shakedown.conformance.Failure = undefined;
     shakedown.conformance.run(testing.allocator, t.io(), .{ .failure = &failure }) catch {
@@ -142,7 +142,7 @@ fn busy(io: Io, stop: *std.atomic.Value(bool)) Io.Cancelable!void {
 test "the root never leaves the home thread, however often it waits" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 4, .max_tasks = 64, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 4, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     var stop: std.atomic.Value(bool) = .init(false);
@@ -156,7 +156,7 @@ test "the root never leaves the home thread, however often it waits" {
 test "shakedown's conformance suite passes with shared-nothing processors" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .max_tasks = 256, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 3, .scheduling = .per_core, .max_tasks = 256, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     var failure: shakedown.conformance.Failure = undefined;
     shakedown.conformance.run(testing.allocator, t.io(), .{ .failure = &failure }) catch {
@@ -227,7 +227,7 @@ fn fromAnotherThread(io: Io, out: *u32) void {
 test "a thread outside the runtime uses its Io: a task started, awaited, and a sleep" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 64, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     var out: u32 = 0;
     const thread = try std.Thread.spawn(.{}, fromAnotherThread, .{ t.io(), &out });
@@ -244,7 +244,7 @@ fn wakeFromThread(io: Io, word: *std.atomic.Value(u32)) void {
 test "a futex wake from a thread outside the runtime reaches a waiting task" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     var word: std.atomic.Value(u32) = .init(0);
@@ -271,7 +271,7 @@ test "a deadline's timer is disarmed on the processor that armed it, wherever it
     // The runtime makes its own sockets only where it has a backend.
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 128, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 128, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     var failures: std.atomic.Value(u32) = .init(0);
@@ -295,7 +295,7 @@ fn laneCall(io: Io, gate: *std.atomic.Value(u32)) void {
 test "calls beyond a lane's cap wait their turn, never inline on a worker" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 1100, .stack_size = 64 << 10, .offload = .{ .owned = .{ .general = 1 } } });
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 1100, .stack_size = .fromRaw(64 << 10), .offload = .{ .owned = .{ .general = 1 } } });
     defer t.deinit();
     const io = t.io();
     var gate: std.atomic.Value(u32) = .init(0);
@@ -325,7 +325,7 @@ test "an injected executor carries every lane call" {
     defer threaded.deinit();
     var counting: Counting = .init(threaded.io(), .init(0));
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = counting.io(), .capacity = 128 } } });
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .offload = .{ .injected = .{ .io = counting.io(), .capacity = 128 } } });
     defer t.deinit();
     const io = t.io();
     for (0..5) |i| try testing.expectEqual(@as(u32, @intCast(i)) + 1, try blocking(io, .sync, addOne, .{@as(u32, @intCast(i))}));
@@ -340,7 +340,7 @@ test "lane calls one after another from a task and from the root keep their fram
     try skipWithoutFibers();
     for ([_]u16{ 0, 3 }) |workers| {
         var t: Threads = undefined;
-        try t.init(testing.allocator, .{ .workers = workers, .max_tasks = 64, .stack_size = 256 << 10 });
+        try t.init(testing.allocator, .{ .workers = workers, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
         defer t.deinit();
         const io = t.io();
         // A value the caller keeps in a register across every switch.
@@ -355,7 +355,7 @@ test "lane calls one after another from a task and from the root keep their fram
 test "process spawn on a lane has space for std's temporary arena" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     var child = try std.process.spawn(io, .{ .argv = if (builtin.os.tag == .windows) &.{ "C:\\Windows\\System32\\cmd.exe", "/c", @as([4096]u8, @splat(' ')) ++ "exit 0" } else &.{ "/bin/sh", "-c", @as([4096]u8, @splat(' ')) ++ "exit 0" } });
@@ -383,7 +383,7 @@ test "a canceled libc lookup detaches while its bounded storage stays alive" {
         }
     };
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .max_lookups = 1, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 16, .max_lookups = 1, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     Slow.runtime_io = t.io();
     var task = try t.io().concurrent(Slow.run, .{&t});
@@ -403,7 +403,7 @@ fn parkForDump(io: Io, event: *Io.Event) Io.Cancelable!void {
 test "dump streams a parked task without visiting its live stack" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = 256 << 10, .offload = .none });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = .fromRaw(256 << 10), .offload = .none });
     defer t.deinit();
     const io = t.io();
     var event: Io.Event = .unset;
@@ -424,7 +424,7 @@ test "dump streams a parked task without visiting its live stack" {
 test "global lane completions wake a host driving the home loop" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     // Exercise the global queue, as an unpinned migrating task uses it.
     t.runtime.core.scheduler.scheduling = .stealing;

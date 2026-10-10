@@ -14,6 +14,7 @@
 const Uring = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 const net = Io.net;
@@ -24,6 +25,7 @@ const Threaded = Io.Threaded;
 const op = @import("op.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
+const timeline = @import("../clock.zig");
 const Receive = @import("uring/Receive.zig");
 const Accept = @import("uring/Accept.zig");
 const Buffers = @import("uring/Buffers.zig");
@@ -51,7 +53,7 @@ pub const Options = struct {
     /// Built for another thread, which calls `enable`.
     disabled: bool = false,
     sqpoll: ?op.SqPoll = null,
-    zero_copy_min: ?usize = null,
+    zero_copy_min: ?aegis.units.Bytes(usize) = null,
     registered_pools: u16 = 64,
     pending_bound: u32 = 1024,
 };
@@ -142,7 +144,8 @@ pressure: ?struct {
 pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uring {
     var u: Uring = .{
         .ring = undefined,
-        .zero_copy_min = options.zero_copy_min,
+        // Validated here once; the send path compares a plain length.
+        .zero_copy_min = if (options.zero_copy_min) |min| min.raw() else null,
         .accepts = undefined,
         .files = undefined,
         .buffers = undefined,
@@ -613,8 +616,9 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
     const min: u32 = switch (wait) {
         .nowait => 0,
         .forever => 1,
-        .ns => |ns| blk: {
-            ts = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+        .up_to => |span| blk: {
+            const cut = timeline.parts(span);
+            ts = .{ .sec = @intCast(cut.sec), .nsec = cut.nsec }; // safe: seconds of a u64 of nanoseconds fit i64
             arg.ts = @intFromPtr(&ts); // safe: the kernel reads the timespec during this call
             break :blk 1;
         },

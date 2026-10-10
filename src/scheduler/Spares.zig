@@ -8,35 +8,60 @@ const Spares = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-/// The processors waiting for a thread (opaque `*Processor`s).
-queue: []*anyopaque,
-queued: u32 = 0,
-/// Threads waiting here for a processor.
-idle: u32 = 0,
-/// Threads started that have not come to wait yet.
-starting: u32 = 0,
-/// Spares started, of `threads.len`.
-threads: []std.Thread,
-started: u32 = 0,
-lock: Io.Mutex = .init,
+/// What the lock guards.
+const State = struct {
+    /// The processors waiting for a thread (opaque `*Processor`s), the last
+    /// posted taken first.
+    waiting: aegis.bounded.Buffer(*anyopaque),
+    /// Threads waiting here for a processor.
+    idle: u32 = 0,
+    /// Threads started that have not come to wait yet.
+    starting: u32 = 0,
+    /// The spares started, joined at stop.
+    threads: aegis.bounded.Buffer(std.Thread),
+};
+
+state: aegis.BlockingGuarded(State),
+/// The most spares that may be started.
+cap: u32,
 /// Moves on every post and at stop: what waiting threads wait on.
 signal: std.atomic.Value(u32) = .init(0),
 
 pub fn init(gpa: Allocator, processors: usize, cap: u16) Allocator.Error!Spares {
-    const queue = try gpa.alloc(*anyopaque, processors);
-    errdefer gpa.free(queue);
-    return .{ .queue = queue, .threads = try gpa.alloc(std.Thread, cap) };
+    var waiting = try fixed(*anyopaque, gpa, processors);
+    errdefer waiting.deinit(noCleanup(*anyopaque));
+    var threads = try fixed(std.Thread, gpa, cap);
+    errdefer threads.deinit(noCleanup(std.Thread));
+    return .{ .state = .init(.{ .waiting = waiting, .threads = threads }), .cap = cap };
 }
 
-pub fn deinit(sp: *Spares, gpa: Allocator) void {
-    assert(sp.started == 0);
-    gpa.free(sp.threads);
-    gpa.free(sp.queue);
+pub fn deinit(sp: *Spares) void {
+    const state = sp.state.teardown();
+    assert(state.threads.len() == 0);
+    state.waiting.deinit(noCleanup(*anyopaque));
+    state.threads.deinit(noCleanup(std.Thread));
     sp.* = undefined;
+}
+
+/// A buffer of exactly `n` entries, which never grows.
+fn fixed(comptime T: type, gpa: Allocator, n: usize) Allocator.Error!aegis.bounded.Buffer(T) {
+    return aegis.bounded.Buffer(T).initAllocated(gpa, n, n) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.CapacityExceeded => unreachable, // unreachable: the capacity is its own maximum
+    };
+}
+
+/// What `Buffer` runs on each element it still holds when it is cleared: nothing, since a
+/// processor is borrowed and a joined thread is spent.
+fn noCleanup(comptime T: type) fn (*T) void {
+    return struct {
+        fn run(_: *T) void {}
+    }.run;
 }
 
 fn system() Io {
@@ -47,50 +72,50 @@ fn system() Io {
 /// is not promised already, or is on its way, or one could be started
 /// (`start` then starts it, running `body(context)`).
 pub fn reserve(sp: *Spares, body: anytype, context: anytype) bool {
-    sp.lock.lockUncancelable(system());
-    defer sp.lock.unlock(system());
-    if (sp.idle + sp.starting > sp.queued) return true;
-    if (sp.started == sp.threads.len) return false;
-    const thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, body, .{ context, null }) catch return false;
-    sp.threads[sp.started] = thread;
-    sp.started += 1;
-    sp.starting += 1;
+    var held = sp.state.acquireUncancelable(system());
+    defer held.deinit(system());
+    const state = held.value();
+    if (state.idle + state.starting > state.waiting.len()) return true;
+    if (state.threads.len() == sp.cap) return false;
+    var thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, body, .{ context, null }) catch return false;
+    state.threads.append(&thread) catch unreachable; // unreachable: fewer threads than `cap`, checked above
+    state.starting += 1;
     return true;
 }
 
 /// Hands processor `p` to the next thread that waits; `reserve` promised one.
 pub fn post(sp: *Spares, p: *anyopaque) void {
-    sp.lock.lockUncancelable(system());
-    sp.queue[sp.queued] = p;
-    sp.queued += 1;
+    var pointer = p;
+    var held = sp.state.acquireUncancelable(system());
+    held.value().waiting.append(&pointer) catch aegis.assert.invariant(false, "a processor was posted that no spare was promised for");
     _ = sp.signal.fetchAdd(1, .release);
-    sp.lock.unlock(system());
+    held.deinit(system());
     system().futexWake(u32, &sp.signal.raw, 1);
 }
 
 /// A processor for the calling thread, or null once `stopping` is set.
 /// `fresh`: the thread was just started as a spare.
 pub fn wait(sp: *Spares, stopping: *const std.atomic.Value(bool), fresh: bool) ?*anyopaque {
-    sp.lock.lockUncancelable(system());
-    if (fresh) sp.starting -= 1;
-    sp.idle += 1;
+    var held = sp.state.acquireUncancelable(system());
+    const state = held.value();
+    if (fresh) state.starting -= 1;
+    state.idle += 1;
     while (true) {
-        if (sp.queued > 0) {
-            sp.queued -= 1;
-            const p = sp.queue[sp.queued];
-            sp.idle -= 1;
-            sp.lock.unlock(system());
+        var p: *anyopaque = undefined;
+        if (state.waiting.pop(&p)) {
+            state.idle -= 1;
+            held.deinit(system());
             return p;
-        }
+        } else |_| {}
         if (stopping.load(.acquire)) {
-            sp.idle -= 1;
-            sp.lock.unlock(system());
+            state.idle -= 1;
+            held.deinit(system());
             return null;
         }
         const seen = sp.signal.load(.acquire);
-        sp.lock.unlock(system());
+        held.deinit(system());
         system().futexWaitUncancelable(u32, &sp.signal.raw, seen);
-        sp.lock.lockUncancelable(system());
+        held = sp.state.acquireUncancelable(system());
     }
 }
 
@@ -98,6 +123,14 @@ pub fn wait(sp: *Spares, stopping: *const std.atomic.Value(bool), fresh: bool) ?
 pub fn stop(sp: *Spares) void {
     _ = sp.signal.fetchAdd(1, .release);
     system().futexWake(u32, &sp.signal.raw, std.math.maxInt(u32));
-    for (sp.threads[0..sp.started]) |t| t.join();
-    sp.started = 0;
+    while (true) {
+        var thread: std.Thread = undefined;
+        {
+            // Joined outside the lock: a spare leaving needs it to see the stop.
+            var held = sp.state.acquireUncancelable(system());
+            defer held.deinit(system());
+            held.value().threads.pop(&thread) catch return;
+        }
+        thread.join();
+    }
 }

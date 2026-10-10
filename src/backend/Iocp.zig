@@ -38,6 +38,7 @@ const Threaded = Io.Threaded;
 
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
+const timeline = @import("../clock.zig");
 const Notifications = @import("iocp/Notifications.zig");
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
@@ -167,7 +168,7 @@ timer_packet: Handle,
 /// The timer's packet is armed and its entry not taken yet.
 timer_armed: bool = false,
 /// When the armed timer fires, on the awake clock (ns).
-timer_at: u64 = 0,
+timer_at: timeline.Awake = .fromRaw(0),
 /// Set by `wake` until its entry is taken: later wakes post nothing.
 wake_pending: std.atomic.Value(bool) = .init(false),
 slots: []Slot,
@@ -673,7 +674,7 @@ pub fn poll(b: *Iocp, wait: Wait, sink: anytype) error{ SystemResources, Unexpec
     var timeout: ?u64 = switch (wait) {
         .nowait => 0,
         .forever => null,
-        .ns => |ns| b.timeoutFor(ns),
+        .up_to => |span| b.timeoutFor(span),
     };
     var entries: [64]sys.Entry = undefined;
     while (true) {
@@ -689,32 +690,41 @@ pub fn complete(b: *Iocp, entries: []const sys.Entry, sink: anytype) void {
     for (entries) |e| b.dispatch(e, sink);
 }
 
-/// How long the port's own wait may last for a wait of `ns`, in 100 ns
+/// How long the port's own wait may last for a wait of `span`, in 100 ns
 /// units: none when the precise timer's entry ends it.
-fn timeoutFor(b: *Iocp, ns: u64) ?u64 {
-    if (ns == 0) return 0;
-    const units = std.math.divCeil(u64, ns, 100) catch unreachable; // unreachable: the divisor is a constant
-    if (b.precise and b.armTimer(ns)) return null;
+fn timeoutFor(b: *Iocp, span: timeline.Span) ?u64 {
+    if (span.eql(.fromRaw(0))) return 0;
+    const units = hectoNanoseconds(span);
+    if (b.precise and b.armTimer(span)) return null;
     return units;
+}
+
+/// `span` in the 100 ns units of Windows timers, rounded up.
+fn hectoNanoseconds(span: timeline.Span) u64 {
+    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; Windows timers count in 100 ns
+    return std.math.divCeil(u64, span.raw(), 100) catch unreachable; // unreachable: the divisor is a constant
 }
 
 /// A timer armed this close before the deadline asked for is kept: the
 /// early wake costs a pass, re-arming costs two calls.
-const timer_slack_ns = 50 * std.time.ns_per_us;
+const timer_slack: timeline.Span = .fromRaw(50 * std.time.ns_per_us);
 
-/// Arms the precise timer to fire in `ns`; false when it cannot be now
+/// Arms the precise timer to fire in `span`; false when it cannot be now
 /// (its last entry is on its way).
-fn armTimer(b: *Iocp, ns: u64) bool {
-    const now: u64 = @intCast(@max(Io.Clock.awake.now(system()).nanoseconds, 0));
-    const at = now + ns;
+fn armTimer(b: *Iocp, span: timeline.Span) bool {
+    const now = timeline.awakeOf(Io.Clock.awake.now(system()));
+    const at = now.add(span) catch timeline.Awake.fromRaw(std.math.maxInt(u64)); // a wait past the timeline's end is its end
     if (b.timer_armed) {
-        if (b.timer_at <= at and at - b.timer_at <= timer_slack_ns) return true;
+        if (b.timer_at.compare(at) != .gt) {
+            const early = b.timer_at.durationTo(at) catch unreachable; // unreachable: the timer is not later than `at`, checked above
+            if (early.compare(timer_slack) != .gt) return true;
+        }
         switch (sys.disarmWaitPacket(b.timer_packet)) {
             .removed, .delivered => b.timer_armed = false,
             .arriving => return false,
         }
     }
-    const due = -@as(i64, @intCast(@min(std.math.divCeil(u64, ns, 100) catch unreachable, std.math.maxInt(i63)))); // unreachable: the divisor is a constant
+    const due = -@as(i64, @intCast(@min(hectoNanoseconds(span), std.math.maxInt(i63))));
     sys.setTimer(b.timer, due) catch return false;
     sys.armWaitPacket(b.timer_packet, b.port, b.timer, key(), contextOf(0, .timer)) catch return false;
     b.timer_armed = true;

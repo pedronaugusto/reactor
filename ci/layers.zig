@@ -124,6 +124,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         .name = "named dependencies",
         .unresolved_only = true,
         .except_targets = &.{
+            "aegis",
             "builtin",
             "shakedown",
             // The death test selects one test through its portable runner.

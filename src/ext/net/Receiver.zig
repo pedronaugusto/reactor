@@ -6,6 +6,7 @@ const Receiver = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -38,7 +39,7 @@ pub const Pool = struct {
     receivers: std.atomic.Value(u32) = .init(0),
 
     pub const Options = struct {
-        buffer_len: u32 = 4096,
+        buffer_len: aegis.units.Bytes(u32) = .fromRaw(4096),
         buffers: u32 = 4096,
         /// Pin the pool on every ring for positional READ_FIXED/WRITE_FIXED.
         /// Unsupported is reported; every operation using the pool must end before deinit.
@@ -47,15 +48,18 @@ pub const Pool = struct {
     pub const InitError = Groups.Error || Registrations.Error;
 
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Pool {
-        std.debug.assert(options.buffer_len > 0);
+        std.debug.assert(!options.buffer_len.eql(.fromRaw(0)));
         std.debug.assert(options.buffers > 0);
-        const memory = try gpa.alloc(u8, @as(usize, options.buffer_len) * options.buffers);
+        // Sizes come from the caller: a pool too large to count is too large to allocate.
+        const length = options.buffer_len.convert(usize) catch unreachable; // unreachable: a u32 byte count fits a usize
+        const size = length.mul(options.buffers) catch return error.OutOfMemory;
+        const memory = try gpa.alloc(u8, size.raw());
         errdefer gpa.free(memory);
         const links = try gpa.alloc(u32, options.buffers);
         errdefer gpa.free(links);
         const lengths = try gpa.alloc(u32, options.buffers);
         errdefer gpa.free(lengths);
-        var p: Pool = .{ .memory = memory, .buffer_len = options.buffer_len, .links = links, .lengths = lengths };
+        var p: Pool = .{ .memory = memory, .buffer_len = options.buffer_len.raw(), .links = links, .lengths = lengths };
         if (options.registered) {
             if (builtin.os.tag != .linux) return error.Unsupported;
             p.fixed = try Registrations.init(gpa, io, memory);
@@ -141,7 +145,9 @@ pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
             const p = Scheduler.processor().?;
             r.native_state = .{ .receiver = r, .owner = p, .group = &groups.items[p.index], .io = io };
             const state = &r.native_state.?;
-            state.request = .{ .socket = r.socket, .group = state.group.id, .context = state, .complete = Native.completed };
+            var held = state.mailbox.acquireUncancelable(Native.system());
+            held.value().request = .{ .socket = r.socket, .group = state.group.id, .context = state, .complete = Native.completed };
+            held.deinit(Native.system());
         }
         return r.native_state.?.next(io, timeout.toDeadline(io));
     };
@@ -201,107 +207,116 @@ fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8, deadline: Io.Timeout
     return r.data_len;
 }
 
-/// Native requests stay pinned here until their terminal completion.
-const Native = struct {
-    receiver: *Receiver,
-    owner: *Scheduler.Processor,
-    group: *Groups.Group,
-    io: Io,
+/// What the receiver's lock guards: the kernel request, what it has
+/// delivered and not yet been taken, and the command that serves it.
+const Mailbox = struct {
     request: Receive = undefined,
-    lock: Io.Mutex = .init,
-    ready: Io.Event = .unset,
-    ended: Io.Event = .unset,
-    command: Scheduler.Errand = .{ .run = commandRun },
     command_queued: bool = false,
     closed: bool = false,
     eof: bool = false,
     failure: ?NextError = null,
     head: ?u32 = null,
     tail: ?u32 = null,
+};
+
+/// Native requests stay pinned here until their terminal completion.
+const Native = struct {
+    receiver: *Receiver,
+    owner: *Scheduler.Processor,
+    group: *Groups.Group,
+    io: Io,
+    mailbox: aegis.BlockingGuarded(Mailbox) = .init(.{}),
+    ready: Io.Event = .unset,
+    ended: Io.Event = .unset,
+    command: Scheduler.Errand = .{ .run = commandRun },
 
     fn system() Io {
         return Io.Threaded.global_single_threaded.io();
     }
 
     fn send(state: *Native, close_request: bool) void {
-        state.lock.lockUncancelable(system());
-        if (close_request) state.closed = true;
-        if (state.command_queued) {
-            state.lock.unlock(system());
+        var held = state.mailbox.acquireUncancelable(system());
+        const mailbox = held.value();
+        if (close_request) mailbox.closed = true;
+        if (mailbox.command_queued) {
+            held.deinit(system());
             return;
         }
-        state.command_queued = true;
-        state.lock.unlock(system());
+        mailbox.command_queued = true;
+        held.deinit(system());
         if (Scheduler.processor() == state.owner) commandRun(&state.command, state.owner) else state.owner.send(&state.command);
     }
 
     fn commandRun(command: *Scheduler.Errand, _: *Scheduler.Processor) void {
         const state: *Native = @alignCast(@fieldParentPtr("command", command)); // safe: this command belongs to the receiver's native state
-        state.lock.lockUncancelable(system());
-        state.command_queued = false;
-        const closing = state.closed;
+        var held = state.mailbox.acquireUncancelable(system());
+        const mailbox = held.value();
+        mailbox.command_queued = false;
+        const closing = mailbox.closed;
         if (closing) {
-            state.request.cancel(state.group.ring);
-        } else if (!state.request.active and !state.eof) {
-            state.failure = null;
+            mailbox.request.cancel(state.group.ring);
+        } else if (!mailbox.request.active and !mailbox.eof) {
+            mailbox.failure = null;
             state.ended.reset();
             state.owner.hold(state.receiver.socket);
-            state.request.arm(state.group.ring);
+            mailbox.request.arm(state.group.ring);
         }
-        const ended = closing and !state.request.active;
-        state.lock.unlock(system());
+        const ended = closing and !mailbox.request.active;
+        held.deinit(system());
         if (ended) state.ended.set(state.io);
     }
 
     fn completed(context: *anyopaque, cqe: std.os.linux.io_uring_cqe) void {
         const state: *Native = @ptrCast(@alignCast(context)); // safe: the receive request retained this native state
         const pool = state.receiver.pool;
-        state.lock.lockUncancelable(system());
+        var held = state.mailbox.acquireUncancelable(system());
+        const mailbox = held.value();
         const final = cqe.flags & std.os.linux.IORING_CQE_F_MORE == 0;
         if (final) state.owner.release(state.receiver.socket);
         if (cqe.flags & std.os.linux.IORING_CQE_F_BUFFER != 0) {
             const local: u32 = @as(u16, @truncate(cqe.flags >> 16));
             std.debug.assert(local < state.group.count);
             const index = state.group.first + local;
-            if (cqe.res <= 0 or state.closed) {
+            if (cqe.res <= 0 or mailbox.closed) {
                 state.group.give(pool.memory, pool.buffer_len, local);
             } else {
                 pool.lengths[index] = @intCast(cqe.res);
                 pool.links[index] = std.math.maxInt(u32);
-                if (state.tail) |tail| pool.links[tail] = index else state.head = index;
-                state.tail = index;
+                if (mailbox.tail) |tail| pool.links[tail] = index else mailbox.head = index;
+                mailbox.tail = index;
             }
         }
-        if (cqe.res == 0) state.eof = true;
-        if (cqe.res < 0 and !state.closed) state.failure = switch (cqe.err()) {
+        if (cqe.res == 0) mailbox.eof = true;
+        if (cqe.res < 0 and !mailbox.closed) mailbox.failure = switch (cqe.err()) {
             .NOBUFS, .NOMEM => error.SystemResources,
             .CANCELED, .BADF, .NOTCONN => error.SocketUnconnected,
             .CONNRESET => error.ConnectionResetByPeer,
             else => error.Unexpected,
         };
         state.ready.set(state.io);
-        const ended = final and state.closed and !state.command_queued;
-        state.lock.unlock(system());
+        const ended = final and mailbox.closed and !mailbox.command_queued;
+        held.deinit(system());
         if (ended) state.ended.set(state.io);
     }
 
     fn take(state: *Native) NextError!?[]const u8 {
-        state.lock.lockUncancelable(system());
-        defer state.lock.unlock(system());
-        if (state.head) |index| {
+        var held = state.mailbox.acquireUncancelable(system());
+        defer held.deinit(system());
+        const mailbox = held.value();
+        if (mailbox.head) |index| {
             const pool = state.receiver.pool;
             const following = pool.links[index];
-            state.head = if (following == std.math.maxInt(u32)) null else following;
-            if (state.head == null) {
-                state.tail = null;
+            mailbox.head = if (following == std.math.maxInt(u32)) null else following;
+            if (mailbox.head == null) {
+                mailbox.tail = null;
                 state.ready.reset();
             }
             state.receiver.lent = index;
             return pool.buffer(index)[0..pool.lengths[index]];
         }
-        if (state.eof) return error.EndOfStream;
-        if (state.failure) |failure| {
-            state.failure = null;
+        if (mailbox.eof) return error.EndOfStream;
+        if (mailbox.failure) |failure| {
+            mailbox.failure = null;
             state.ready.reset();
             return failure;
         }
@@ -326,12 +341,13 @@ const Native = struct {
     fn close(state: *Native, io: Io) void {
         state.send(true);
         state.ended.waitUncancelable(io);
-        state.lock.lockUncancelable(system());
-        defer state.lock.unlock(system());
+        var held = state.mailbox.acquireUncancelable(system());
+        defer held.deinit(system());
+        const mailbox = held.value();
         const pool = state.receiver.pool;
-        while (state.head) |index| {
+        while (mailbox.head) |index| {
             const following = pool.links[index];
-            state.head = if (following == std.math.maxInt(u32)) null else following;
+            mailbox.head = if (following == std.math.maxInt(u32)) null else following;
             state.group.give(pool.memory, pool.buffer_len, index - state.group.first);
         }
     }

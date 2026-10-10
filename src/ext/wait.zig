@@ -6,7 +6,7 @@
 //! and costs no thread. Windows objects use native wait completion packets.
 //! A process on a system with no descriptor for it goes to the runtime's
 //! `wait` lane. Any other `Io` waits on the calling thread, in slices of
-//! `slice_ms` so a cancel is seen between them.
+//! `slice` so a cancel is seen between them.
 const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,7 +32,7 @@ pub const max = 64;
 
 /// How long one wait on the calling thread lasts before it looks for a
 /// cancel, on an `Io` that is not a runtime.
-pub const slice_ms: u32 = 5;
+pub const slice: poll.Millis = .fromRaw(5);
 
 pub const Waitable = union(enum) {
     /// A descriptor or socket has data, end of file, or an error (inotify,
@@ -72,12 +72,12 @@ pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usi
 
 fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
     if (timeout.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) {
-        return try once(io, set, 0) orelse error.Timeout;
+        return try once(io, set, poll.look) orelse error.Timeout;
     };
     // A process that had ended when it was opened needs no wait.
     if (!is_windows) for (set, 0..) |m, i| switch (m) {
         .process => |p| if (p.watch == .ended) {
-            if (i > 0) if (try once(io, set[0..i], 0)) |earlier| return earlier;
+            if (i > 0) if (try once(io, set[0..i], poll.look)) |earlier| return earlier;
             return i;
         },
         else => {},
@@ -93,7 +93,7 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
             error.Unsupported => error.Unsupported,
             error.Unexpected, error.SystemResources => error.Unexpected,
         };
-        if (index > 0) if (try once(io, set[0..index], 0)) |earlier| return earlier;
+        if (index > 0) if (try once(io, set[0..index], poll.look)) |earlier| return earlier;
         return index;
     }
     const lane_io = core.lanes.executor(.wait);
@@ -132,25 +132,28 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable) bool {
 /// Waits on the calling thread, in slices between which `io` is asked
 /// for a cancel, until a member is ready or `deadline` passes.
 fn sliced(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!usize {
-    if (try once(io, set, 0)) |i| return i;
+    if (try once(io, set, poll.look)) |i| return i;
     while (true) {
         try io.checkCancel();
-        const slice = sliceOf(io, deadline) orelse return error.Timeout;
-        if (try once(io, set, slice)) |i| return i;
+        const next = sliceFor(deadline.toDurationFromNow(io)) orelse return error.Timeout;
+        if (try once(io, set, next)) |i| return i;
     }
 }
 
-/// The next slice's length in milliseconds; null once `deadline` passed.
-fn sliceOf(io: Io, deadline: Io.Timeout) ?u32 {
-    const left = deadline.toDurationFromNow(io) orelse return slice_ms;
-    if (left.raw.nanoseconds <= 0) return null;
-    const ms = std.math.divCeil(i96, left.raw.nanoseconds, std.time.ns_per_ms) catch unreachable; // unreachable: the divisor is a positive constant
-    return @intCast(@min(ms, slice_ms));
+/// The next slice's length for what is `left` of a deadline (null: no
+/// deadline): at most `slice`, rounded up to a millisecond; null once it
+/// has passed.
+pub fn sliceFor(left: ?Io.Clock.Duration) ?poll.Millis {
+    const remaining = left orelse return slice;
+    if (remaining.raw.nanoseconds <= 0) return null;
+    // Beyond what a u32 of milliseconds holds is far past one slice.
+    const ms = poll.Millis.fromIoDuration(remaining.raw, .up) catch return slice;
+    return if (ms.compare(slice) == .gt) slice else ms;
 }
 
-/// One wait of at most `ms` milliseconds: the ready member, or null.
-fn once(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
-    if (is_windows) return onceWindows(io, set, ms);
+/// One wait of at most `limit`: the ready member, or null.
+fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
+    if (is_windows) return onceWindows(io, set, limit);
     var entries: [max]poll.Entry = undefined;
     var map: [max]usize = undefined;
     var n: usize = 0;
@@ -183,14 +186,14 @@ fn once(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
     if (n == 0) {
         if (ended) |i| return i;
         // Nothing to wait on but processes asked about: wait the slice.
-        try io.sleep(.fromMilliseconds(ms), .awake);
+        try io.sleep(limit.toIoDuration(), .awake);
         return null;
     }
-    const ready = poll.descriptors(entries[0..n], if (ended != null) 0 else ms) catch return error.Unexpected;
+    const ready = poll.descriptors(entries[0..n], if (ended != null) poll.look else limit) catch return error.Unexpected;
     return if (ready) |r| map[r] else ended;
 }
 
-fn onceWindows(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
+fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
     var handles: [max]windows.HANDLE = undefined;
     var map: [max]usize = undefined;
     var n: usize = 0;
@@ -221,10 +224,11 @@ fn onceWindows(io: Io, set: []const Waitable, ms: u32) WaitError!?usize {
         .wake => |w| if (win32.WaitForSingleObject(w.notify.handle, 0) == win32.wait_object_0) return i,
     };
     if (n == 0) {
-        try io.sleep(.fromMilliseconds(ms), .awake);
+        try io.sleep(limit.toIoDuration(), .awake);
         return null;
     }
-    const ready = poll.objects(handles[0..n], if (sockets) @min(ms, 1) else ms) catch return error.Unexpected;
+    const sooner: poll.Millis = .fromRaw(1);
+    const ready = poll.objects(handles[0..n], if (sockets and limit.compare(sooner) == .gt) sooner else limit) catch return error.Unexpected;
     return if (ready) |r| map[r] else null;
 }
 

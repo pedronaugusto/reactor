@@ -20,7 +20,7 @@ const shakedown = @import("shakedown");
 
 fn runtime(r: *Runtime, workers: u16) !void {
     if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
-    r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -139,7 +139,7 @@ test "a receiver on io_uring reads into the pool once the socket is readable" {
     const io = r.io();
     const pair = try tcpPair(io);
     defer for (pair) |s| s.close(io);
-    var pool: reactor.net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = 64, .buffers = 2 });
+    var pool: reactor.net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = .fromRaw(64), .buffers = 2 });
     defer pool.deinit(testing.allocator, io);
     var receiver: reactor.net.Receiver = .init(io, &pool, pair[0].socket.handle);
     defer receiver.deinit(io);
@@ -159,7 +159,7 @@ test "native provided buffers survive a receive timeout and return after detach"
     const io = r.io();
     const pair = try tcpPair(io);
     defer for (pair) |stream| stream.close(io);
-    var pool: reactor.net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = 64, .buffers = 2 });
+    var pool: reactor.net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = .fromRaw(64), .buffers = 2 });
     defer pool.deinit(testing.allocator, io);
     if (pool.groups == null) return error.SkipZigTest;
     var receiver: reactor.net.Receiver = .init(io, &pool, pair[0].socket.handle);
@@ -342,7 +342,7 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
     if (!fiber.supported) return error.SkipZigTest;
     const before = try threadSnapshot();
     var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .workers = 0, .offload = .none, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .workers = 0, .offload = .none, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -503,7 +503,7 @@ test "a native receive alone returns from a loop waiting for a completion" {
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
     defer closeAll(&sockets);
     const ring = loop.backend.io_uring;
-    var buffers = BufferRing.init(ring.ring.fd, 2, 1) catch |err| switch (err) {
+    var buffers = BufferRing.init(ring.ring.fd, .fromRaw(2), .fromRaw(1)) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -513,7 +513,7 @@ test "a native receive alone returns from a loop waiting for a completion" {
     linux.IoUring.buf_ring_add(buffers.br, &bytes, 0, 1, 0);
     linux.IoUring.buf_ring_advance(buffers.br, 1);
     var observed: Observed = .{};
-    var request: Receive = .{ .socket = sockets[0], .group = 1, .context = &observed, .complete = Observed.complete };
+    var request: Receive = .{ .socket = sockets[0], .group = .fromRaw(1), .context = &observed, .complete = Observed.complete };
     request.arm(ring);
     defer {
         request.cancel(ring);
@@ -536,10 +536,10 @@ test "provided buffer pools register before startup and during worker adoption" 
         };
         defer r.deinit();
         const io = r.io();
-        var before = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = 64 });
+        var before = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = .fromRaw(64) });
         defer before.deinit(testing.allocator, io);
         try r.start();
-        var during = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = 64 });
+        var during = try reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 8, .buffer_len = .fromRaw(64) });
         defer during.deinit(testing.allocator, io);
         if (during.groups == null) return error.SkipZigTest;
         try testing.expect(before.groups != null);

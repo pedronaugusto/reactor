@@ -12,6 +12,7 @@ const linux = std.os.linux;
 
 const readiness = @import("../readiness.zig");
 const Wait = @import("../wait.zig").Wait;
+const timeline = @import("../../clock.zig");
 
 const Epoll = @This();
 
@@ -116,7 +117,11 @@ pub fn wait(e: *Epoll, timeout: Wait) readiness.PollError![]const linux.epoll_ev
     const ms: i32 = switch (timeout) {
         .nowait => 0,
         .forever => -1,
-        .ns => |ns| if (e.armWait(ns)) -1 else @intCast(@min(std.math.divCeil(u64, ns, std.time.ns_per_ms) catch unreachable, std.math.maxInt(i32))), // unreachable: the divisor is a constant
+        .up_to => |span| if (e.armWait(span)) -1 else blk: {
+            const ms = span.convert(.millisecond, u64, .up) catch unreachable; // unreachable: rounding a u64 of nanoseconds up to milliseconds fits the same width
+            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; epoll_wait counts in an i32 of milliseconds
+            break :blk @intCast(@min(ms.raw(), std.math.maxInt(i32)));
+        },
     };
     const rc = linux.epoll_wait(e.epfd, events.ptr, max, ms);
     return switch (errno(rc)) {
@@ -127,10 +132,10 @@ pub fn wait(e: *Epoll, timeout: Wait) readiness.PollError![]const linux.epoll_ev
     };
 }
 
-/// The wait timer, armed `ns` from now; false when there is none to arm
+/// The wait timer, armed `span` from now; false when there is none to arm
 /// (then the wait rounds its timeout up to milliseconds). It may fire
 /// after a later wait has begun, which then wakes once for nothing.
-fn armWait(e: *Epoll, ns: u64) bool {
+fn armWait(e: *Epoll, span: timeline.Span) bool {
     const fd = e.wait_fd orelse blk: {
         const rc = linux.timerfd_create(.MONOTONIC, .{ .CLOEXEC = true, .NONBLOCK = true });
         if (errno(rc) != .SUCCESS) return false;
@@ -145,10 +150,11 @@ fn armWait(e: *Epoll, ns: u64) bool {
         break :blk fd;
     };
     // Zero would disarm it: a nanosecond instead.
-    const at = @max(ns, 1);
+    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; a timerfd of zero disarms, so the least wait is a nanosecond
+    const cut = timeline.parts(.fromRaw(@max(span.raw(), 1)));
     const spec: linux.itimerspec = .{
         .it_interval = .{ .sec = 0, .nsec = 0 },
-        .it_value = .{ .sec = @intCast(at / std.time.ns_per_s), .nsec = @intCast(at % std.time.ns_per_s) },
+        .it_value = .{ .sec = @intCast(cut.sec), .nsec = cut.nsec }, // safe: seconds of a u64 of nanoseconds fit i64
     };
     return errno(linux.timerfd_settime(fd, @bitCast(@as(u32, 0)), &spec, null)) == .SUCCESS;
 }

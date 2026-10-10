@@ -1,6 +1,7 @@
 //! A hierarchical timing wheel: 7 levels of 64 slots, level 0 one tick per
 //! slot, level k 64^k ticks per slot, so 2^42 ticks before the overflow
-//! list. A loop's tick is one microsecond.
+//! list. A loop's tick is one microsecond (`clock.Tick`); inside, ticks are
+//! plain integers, since the placement is bit arithmetic on one kind of number.
 //!
 //! Arming and disarming are O(1). A 64-bit occupancy mask per level finds
 //! the next deadline with one count of trailing zeros per level, so moving
@@ -15,6 +16,7 @@ const Wheel = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Tick = @import("clock.zig").Tick;
 
 pub const levels = 7;
 pub const slots_per_level = 64;
@@ -27,7 +29,7 @@ pub const horizon_bits = levels * slot_bits;
 /// its firing or `disarm`; it must not move while linked.
 pub const Node = struct {
     /// The tick it fires at, set by `arm`.
-    deadline: u64 = 0,
+    deadline: Tick = .fromRaw(0),
     next: ?*Node = null,
     prev: ?*Node = null,
     place: Place = .unlinked,
@@ -90,13 +92,13 @@ overflow: List = .{},
 due: List = .{},
 count: u32 = 0,
 
-pub fn init(now: u64) Wheel {
-    return .{ .elapsed = now };
+pub fn init(now: Tick) Wheel {
+    return .{ .elapsed = now.raw() };
 }
 
 /// Links `n` to fire at `deadline`. A deadline already passed fires at the
 /// next `advance`.
-pub fn arm(w: *Wheel, n: *Node, deadline: u64) void {
+pub fn arm(w: *Wheel, n: *Node, deadline: Tick) void {
     assert(!n.armed());
     n.deadline = deadline;
     w.count += 1;
@@ -124,11 +126,11 @@ pub fn disarm(w: *Wheel, n: *Node) void {
 /// The earliest tick at which a timer may fire, or null when none is
 /// armed. A slot above level 0 reports its start: `advance` there moves
 /// its timers down, and the next call reports the exact tick.
-pub fn next(w: *const Wheel) ?u64 {
-    if (!w.due.empty()) return w.elapsed;
+pub fn next(w: *const Wheel) ?Tick {
+    if (!w.due.empty()) return .fromRaw(w.elapsed);
     for (0..levels) |level| {
         const slot = w.firstSlot(level) orelse continue;
-        if (level == 0) return w.slotStart(level, slot);
+        if (level == 0) return .fromRaw(w.slotStart(level, slot));
         // Above level 0 the earliest deadline in a small slot is found
         // exactly, so a wait ends once, on time; a crowded slot reports
         // its start and is moved down there.
@@ -137,12 +139,13 @@ pub fn next(w: *const Wheel) ?u64 {
         var it = w.lists[level][slot].head;
         while (it) |n| : (it = n.next) {
             seen += 1;
-            if (seen > exact_scan) return w.slotStart(level, slot);
-            earliest = @min(earliest, n.deadline);
+            if (seen > exact_scan) return .fromRaw(w.slotStart(level, slot));
+            // glint-ignore: A004 -- measured-boundary: docs/design.md#safety-types; the wheel's placement is bit arithmetic on plain ticks
+            earliest = @min(earliest, n.deadline.raw());
         }
-        return earliest;
+        return .fromRaw(earliest);
     }
-    if (!w.overflow.empty()) return (w.epoch() + 1) << horizon_bits;
+    if (!w.overflow.empty()) return .fromRaw((w.epoch() + 1) << horizon_bits);
     return null;
 }
 
@@ -152,7 +155,8 @@ const exact_scan = 32;
 /// Moves time to `now` and calls `sink.fire(node)` for every timer whose
 /// deadline is at or before it, earliest first, unlinked before the call;
 /// a fired node may be armed again from the callback.
-pub fn advance(w: *Wheel, now: u64, sink: anytype) void {
+pub fn advance(w: *Wheel, to: Tick, sink: anytype) void {
+    const now = to.raw();
     w.fireList(&w.due, sink);
     if (now < w.elapsed) return;
     while (true) {
@@ -197,12 +201,13 @@ fn fireList(w: *Wheel, list: *List, sink: anytype) void {
 }
 
 fn place(w: *Wheel, n: *Node) void {
-    if (n.deadline <= w.elapsed) {
+    const deadline = n.deadline.raw();
+    if (deadline <= w.elapsed) {
         w.due.append(n);
         n.place = .due;
         return;
     }
-    const masked = (w.elapsed ^ n.deadline) | slot_mask;
+    const masked = (w.elapsed ^ deadline) | slot_mask;
     const significant = 63 - @clz(masked);
     const level = significant / slot_bits;
     if (level >= levels) {
@@ -210,7 +215,7 @@ fn place(w: *Wheel, n: *Node) void {
         n.place = .overflow;
         return;
     }
-    const slot: usize = @intCast((n.deadline >> @intCast(level * slot_bits)) & slot_mask);
+    const slot: usize = @intCast((deadline >> @intCast(level * slot_bits)) & slot_mask);
     w.lists[level][slot].append(n);
     w.occupied[level] |= @as(u64, 1) << @intCast(slot);
     n.place = .at(level, slot);

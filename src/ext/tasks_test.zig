@@ -11,15 +11,15 @@ fn stackSize() usize {
 
 test "per-task sizes use init-reserved classes, remain bounded, and recycle" {
     var d: Driver = undefined;
-    try d.init(testing.allocator, 0, .{ .max_tasks = 4, .stack_classes = &.{ .{ .size = 64 << 10, .count = 2 }, .{ .size = 2 << 20, .count = 1 } }, .offload = .none });
+    try d.init(testing.allocator, 0, .{ .max_tasks = 4, .stack_classes = &.{ .{ .size = .fromRaw(64 << 10), .count = 2 }, .{ .size = .fromRaw(2 << 20), .count = 1 } }, .offload = .none });
     defer d.deinit();
     const io = d.io();
-    var small = try reactor.concurrentWith(io, .{ .stack_size = 64 << 10 }, stackSize, .{});
-    var large = try reactor.concurrentWith(io, .{ .stack_size = 2 << 20 }, stackSize, .{});
-    try testing.expectError(error.ConcurrencyUnavailable, reactor.concurrentWith(io, .{ .stack_size = 4 << 20 }, stackSize, .{}));
+    var small = try reactor.concurrentWith(io, .{ .stack_size = .fromRaw(64 << 10) }, stackSize, .{});
+    var large = try reactor.concurrentWith(io, .{ .stack_size = .fromRaw(2 << 20) }, stackSize, .{});
+    try testing.expectError(error.ConcurrencyUnavailable, reactor.concurrentWith(io, .{ .stack_size = .fromRaw(4 << 20) }, stackSize, .{}));
     try testing.expectEqual(@as(usize, 64 << 10), small.await(io));
     try testing.expectEqual(@as(usize, 2 << 20), large.await(io));
-    var recycled = try reactor.concurrentWith(io, .{ .stack_size = 2 << 20 }, stackSize, .{});
+    var recycled = try reactor.concurrentWith(io, .{ .stack_size = .fromRaw(2 << 20) }, stackSize, .{});
     try testing.expectEqual(@as(usize, 2 << 20), recycled.await(io));
 }
 
@@ -83,7 +83,7 @@ test "injected latency tasks give globally queued normal work a turn after eight
 }
 
 test "foreign Io refuses options it cannot honor and supports defaults" {
-    try testing.expectError(error.ConcurrencyUnavailable, reactor.concurrentWith(testing.io, .{ .stack_size = 1024 }, record, undefined));
+    try testing.expectError(error.ConcurrencyUnavailable, reactor.concurrentWith(testing.io, .{ .stack_size = .fromRaw(1024) }, record, undefined));
     var order: [11]u8 = undefined;
     var used: usize = 0;
     var future = try reactor.concurrentWith(testing.io, .{}, record, .{ &order, &used, @as(u8, 7) });

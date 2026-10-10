@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- Byte counts in the options are aegis `units.Bytes`: `Runtime.Options.stack_size`, `zero_copy_min` (here and in `Loop.Options`), each `stack_classes` entry's `size`, `TaskOptions.stack_size`, an owned lane's `scratch_bytes` and `net.Receiver.Pool.Options.buffer_len`. Write `.stack_size = .fromRaw(256 << 10)`.
+- reactor depends on aegis, which depends on std alone. A project that builds the `reactor` module fetches it too.
 - `Runtime.start` creates the scheduler workers and prepares the owned offload lanes; fixed-signature `std.Io` operations require a successful start, checked in safe builds. A failed start must be deinitialized.
 - An injected offload executor declares exclusive capacity with its `Io`: `.{ .injected = .{ .io = host_io, .capacity = n } }`. Admission reserves execution and cancellation together and keeps the reservation until both have retired.
 - `blocking` adds `Canceled` and `ConcurrencyUnavailable` to every function result, void included, and `blockingHook.call` returns that error union. A refused call never runs inline.
@@ -36,6 +38,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A deadline past the end of the awake timeline (584 years) armed on the loop no longer panics in safe builds or wraps in fast ones; it saturates, and the wait never ends. A `Loop.nextTimeout` or kernel wait to it is long, not negative.
+- A task count within 63 of 2^32 no longer wraps the slab count, a stack size past the address space or a stride that does not fit is refused with `SystemResources` instead of overflowing, and a worker count of 65,535 no longer wraps the processor count; `Runtime.init` returns `SystemResources`.
 - Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and run accepted work on the lane; foreign-runtime callers resume on their own scheduler.
 - Failed IP and Unix connects invalidate cached readiness before closing an unpublished socket.
 - Readiness backends retain terminal read events through final bytes and EOF instead of parking after a short final read.
@@ -46,6 +50,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Time, identity and lock state use aegis types: the loop's timeline is `clock.Awake`, `Tick` and `Span`; a stack's number and its place in a size class are distinct; every lock sits beside the data it guards (`BlockingGuarded`, and `Guarded` for futex buckets); lane admission holds its executor capacity as a `Budget` reservation. A timer armed on the awake clock reads the clock once less.
 - A task in the LIFO slot no longer wakes an idle processor: it cannot be stolen. Only a task displaced into the queue does.
 - Only `connect` links a kernel timeout on io_uring; other deadlines arm the wheel and cancel, which costs nothing when the operation finishes first.
 - Everything several threads write (queues' heads, tails and slots, a processor's inboxes and flags, the scheduler's counters) sits on cache lines of its own.

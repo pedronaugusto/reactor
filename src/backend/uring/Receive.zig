@@ -2,9 +2,10 @@
 const Receive = @This();
 const std = @import("std");
 const linux = std.os.linux;
+const BufferRing = @import("../../sys/BufferRing.zig");
 
 socket: linux.fd_t,
-group: u16,
+group: BufferRing.Id,
 context: *anyopaque,
 complete: *const fn (*anyopaque, linux.io_uring_cqe) void,
 active: bool = false,
@@ -17,7 +18,7 @@ pub fn arm(r: *Receive, u: anytype) void {
     sqe.prep_recv(r.socket, &.{}, 0);
     sqe.flags |= linux.IOSQE_BUFFER_SELECT;
     sqe.ioprio |= linux.IORING_RECV_MULTISHOT;
-    sqe.buf_index = r.group;
+    sqe.buf_index = r.group.raw(); // c-os-boundary: the submission entry names the group
     sqe.user_data = @intFromPtr(r) | 6; // safe: the receiver retains this record through the terminal completion
     r.active = true;
     u.active += 1;

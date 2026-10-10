@@ -17,6 +17,7 @@ const windows = std.os.windows;
 const fiber = @import("../fiber.zig");
 const Notifications = @import("../backend/iocp/Notifications.zig");
 const lane_call = @import("../ops/lane_call.zig");
+const poll = @import("../sys/poll.zig");
 const win32 = @import("../sys/win32.zig");
 const native = @import("native.zig");
 const wait = @import("wait.zig");
@@ -109,14 +110,11 @@ fn take(io: Io, port: windows.HANDLE, deadline: Io.Timeout) NextError!Message {
     while (true) {
         try io.checkCancel();
         const left = deadline.toDurationFromNow(io);
-        const ms: u32 = if (left) |d| ms: {
-            if (d.raw.nanoseconds <= 0) break :ms 0;
-            break :ms @intCast(@min(std.math.divCeil(i96, d.raw.nanoseconds, std.time.ns_per_ms) catch unreachable, wait.slice_ms)); // unreachable: the divisor is a positive constant
-        } else wait.slice_ms;
+        const ms = wait.sliceFor(left) orelse poll.look;
         var bytes: windows.DWORD = 0;
         var key: usize = 0;
         var overlapped: ?*anyopaque = null;
-        if (win32.GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, ms) == .FALSE) {
+        if (win32.GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, ms.raw()) == .FALSE) {
             if (overlapped == null) {
                 if (left) |d| if (d.raw.nanoseconds <= 0) return error.Timeout;
                 continue;

@@ -91,7 +91,7 @@ fn fakeRequest(io: Io) anyerror!usize {
 
 fn raceProperty(_: void, c: *shakedown.Case) !void {
     var d: Driver = undefined;
-    try d.initSource(c.gpa, c.source, .{ .max_tasks = 32, .stack_size = 128 << 10, .offload = .none });
+    try d.initSource(c.gpa, c.source, .{ .max_tasks = 32, .stack_size = .fromRaw(128 << 10), .offload = .none });
     defer d.deinit();
     const io = d.io();
     const n = 1 + c.source.below(7);
@@ -112,7 +112,7 @@ test "later: cancellation schedules share a shrinkable source with the productio
 
 fn witness(_: void, c: *shakedown.Case) !void {
     var d: Driver = undefined;
-    try d.initSource(c.gpa, c.source, .{ .max_tasks = 8, .stack_size = 128 << 10, .offload = .none });
+    try d.initSource(c.gpa, c.source, .{ .max_tasks = 8, .stack_size = .fromRaw(128 << 10), .offload = .none });
     defer d.deinit();
     var future = try d.io().concurrent(fakeRequest, .{d.io()});
     _ = try future.await(d.io());
@@ -155,7 +155,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     var r: Runtime = undefined;
     try native(&r, .io_uring);
     defer r.deinit();
-    var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = .fromRaw(4096), .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
     };
@@ -551,7 +551,7 @@ fn drainPayload(socket: Io.net.Socket, total: usize) !void {
 test "later: native zero-copy send completes ownership before payload reuse" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var loop: Loop = undefined;
-    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = 1 }) catch |err| switch (err) {
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = .fromRaw(1) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -644,7 +644,7 @@ fn measured(io: Io) !void {
 }
 test "later: diagnostic overall depth includes returned frames and survives task release" {
     var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = 256 << 10, .measure_stacks = true }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = .fromRaw(256 << 10), .measure_stacks = true }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -762,12 +762,12 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
     };
     defer r.deinit();
     try r.start();
-    var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = .fromRaw(4096), .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
     };
     defer pool.deinit(testing.allocator, r.io());
-    try testing.expectError(error.SystemResources, reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = 4096, .registered = true }));
+    try testing.expectError(error.SystemResources, reactor.net.Receiver.Pool.init(testing.allocator, r.io(), .{ .buffers = 2, .buffer_len = .fromRaw(4096), .registered = true }));
     const pipe = try Io.Threaded.pipe2(.{ .CLOEXEC = true });
     defer for (pipe) |fd| {
         _ = linux.close(fd);
@@ -792,14 +792,14 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
 
 fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
     var stacks: Stacks = undefined;
-    try stacks.init(gpa, .{ .count = 12, .size = 64 << 10, .classes = &.{ .{ .count = 3, .size = 128 << 10 }, .{ .count = 2, .size = 256 << 10 } } });
+    try stacks.init(gpa, .{ .count = 12, .size = .fromRaw(64 << 10), .classes = &.{ .{ .count = 3, .size = .fromRaw(128 << 10) }, .{ .count = 2, .size = .fromRaw(256 << 10) } } });
     defer stacks.deinit(gpa);
     const ordinary = stacks.take().?;
-    const explicit = stacks.takeSized(200 << 10).?;
-    try testing.expectEqual(@as(usize, 256 << 10), stacks.sizeAt(explicit));
+    const explicit = stacks.takeSized(.fromRaw(200 << 10)).?;
+    try testing.expectEqual(@as(usize, 256 << 10), stacks.sizeAt(explicit.stack));
     try testing.expectEqual(@as(u32, 2), stacks.inUse(.monotonic));
-    stacks.give(explicit);
-    stacks.give(ordinary);
+    stacks.give(explicit.stack);
+    stacks.give(ordinary.stack);
 }
 test "later: stack class initialization rolls back every allocation failure" {
     var allocator = shakedown.alloc.NoResize.init(testing.allocator);
@@ -818,7 +818,7 @@ test "later: fixed-buffer registrations survive worker adoption and owner teardo
     };
     defer runtime.deinit();
     const io = runtime.io();
-    var pool = reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 4, .buffer_len = 4096, .registered = true }) catch |err| switch (err) {
+    var pool = reactor.net.Receiver.Pool.init(testing.allocator, io, .{ .buffers = 4, .buffer_len = .fromRaw(4096), .registered = true }) catch |err| switch (err) {
         error.Unsupported => return error.SkipZigTest,
         else => return err,
     };
@@ -891,7 +891,7 @@ test "later: idle trimming preserves live bytes and skips short shallow parks" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     for ([_]Io.Duration{ .fromMilliseconds(500), .fromMilliseconds(1500) }, 0..) |duration, at| {
         var driver: Driver = undefined;
-        try driver.init(testing.allocator, 7, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
+        try driver.init(testing.allocator, 7, .{ .max_tasks = 8, .stack_size = .fromRaw(512 << 10), .offload = .none });
         defer driver.deinit();
         var task = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), duration });
         try testing.expectEqual(@as(u8, 0x52), try task.await(driver.io()));
@@ -902,7 +902,7 @@ test "later: idle trimming preserves live bytes and skips short shallow parks" {
 test "later: waking an idle trim candidate unlinks it before stack reuse" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var driver: Driver = undefined;
-    try driver.init(testing.allocator, 7, .{ .max_tasks = 1, .stack_size = 512 << 10, .offload = .none });
+    try driver.init(testing.allocator, 7, .{ .max_tasks = 1, .stack_size = .fromRaw(512 << 10), .offload = .none });
     defer driver.deinit();
     for (0..16) |_| {
         var task = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), Io.Duration.fromMilliseconds(1500) });
@@ -925,7 +925,7 @@ test "later: shared idle trim survives head middle and tail candidate cancellati
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     for ([_]usize{ 0, 1, 3 }) |canceled| {
         var driver: Driver = undefined;
-        try driver.init(testing.allocator, 7, .{ .max_tasks = 4, .stack_size = 512 << 10, .offload = .none });
+        try driver.init(testing.allocator, 7, .{ .max_tasks = 4, .stack_size = .fromRaw(512 << 10), .offload = .none });
         defer driver.deinit();
         var tasks: [4]Io.Future(@typeInfo(@TypeOf(shallowAfterDeep)).@"fn".return_type.?) = undefined;
         for (&tasks) |*task| task.* = try driver.io().concurrent(shallowAfterDeep, .{ driver.io(), Io.Duration.fromMilliseconds(1500) });
@@ -958,7 +958,7 @@ fn drainCanceledPayload(socket: Io.net.Socket) !void {
 test "later: canceling native zero-copy sends drains ownership before poisoning payloads" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var loop: Loop = undefined;
-    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = 1 }) catch |err| switch (err) {
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = .fromRaw(1) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };

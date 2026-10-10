@@ -15,8 +15,10 @@ const Task = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
+const clocks = @import("../clock.zig");
 const fiber = @import("../fiber.zig");
 const op = @import("../backend/op.zig");
+const Stacks = @import("../fiber/Stacks.zig");
 const Lanes = @import("../Lanes.zig");
 
 /// Saved registers while the task is not running.
@@ -26,8 +28,8 @@ context: fiber.Context = undefined,
 next: ?*Task = null,
 /// The inbox link of this task's one cancel message.
 cancel_next: ?*Task = null,
-/// Its stack in the pool; null for the root, which runs on its thread's.
-stack: ?u32 = null,
+/// Its stack among the runtime's; null for the root, which runs on its thread's.
+stack: ?Stacks.Stack = null,
 /// The immutable upper bound, also used for parked stack watermarks.
 stack_top: usize = 0,
 kind: Kind,
@@ -44,9 +46,9 @@ pins: u16 = 0,
 /// Operations left before an exhausted budget turns a cancelation point
 /// into a yield.
 budget: u16 = 0,
-/// When the running task's budget started being spent (awake clock, ns);
-/// 0 until its first cancelation point that did not wait.
-slice_start: u64 = 0,
+/// When the running task's budget started being spent; zero until its
+/// first cancelation point that did not wait.
+slice_start: clocks.Awake = .fromRaw(0),
 cancel: std.atomic.Value(u32) = .init(0),
 /// The hook of the cancelable wait it is parked in; guarded by `locked`.
 wait: ?*Hook = null,

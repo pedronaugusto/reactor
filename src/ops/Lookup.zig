@@ -95,7 +95,7 @@ fn acquire(l: *Lookup) ?*Record {
             r.occupied.store(false, .release);
             continue;
         }
-        if (r.job.admitted) r.lanes.retire(&r.job);
+        if (r.job.admitted()) r.lanes.retire(&r.job);
         r.job = .{ .run = Record.run, .done = Record.done, .lane = .lookup, .pending = .init(0) };
         return r;
     }

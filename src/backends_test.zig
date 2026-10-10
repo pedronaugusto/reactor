@@ -30,7 +30,7 @@ const all: []const Loop.Backend = switch (builtin.os.tag) {
 
 fn runtime(r: *Runtime, backend: Loop.Backend, workers: u16) !void {
     if (!fiber.supported) return error.SkipZigTest;
-    r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };

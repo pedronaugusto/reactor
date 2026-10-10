@@ -2,6 +2,7 @@
 const Groups = @This();
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
@@ -13,22 +14,24 @@ const native = @import("../../native.zig");
 pub const Group = struct {
     ring: *Uring,
     owner: *Scheduler.Processor,
-    br: *align(std.heap.page_size_min) linux.io_uring_buf_ring,
+    /// The provided buffer ring a buffer is given back to; a buffer may be
+    /// released from any worker, so its publication is serialized.
+    ring_buffers: aegis.BlockingGuarded(*align(std.heap.page_size_min) linux.io_uring_buf_ring),
     registration: BufferRing,
-    id: u16,
-    entries: u16,
+    id: BufferRing.Id,
+    entries: BufferRing.Entries,
     first: u32,
     count: u32,
-    lock: Io.Mutex = .init,
 
-    /// A buffer may be released from any worker; publication is serialized.
     pub fn give(g: *Group, memory: []u8, length: u32, index: u32) void {
         const io = Io.Threaded.global_single_threaded.io();
-        g.lock.lockUncancelable(io);
-        defer g.lock.unlock(io);
+        var held = g.ring_buffers.acquireUncancelable(io);
+        defer held.deinit(io);
+        const br = held.value().*;
         const offset = @as(usize, g.first + index) * length;
-        linux.IoUring.buf_ring_add(g.br, memory[offset..][0..length], @intCast(index), g.entries - 1, 0);
-        linux.IoUring.buf_ring_advance(g.br, 1);
+        // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the ring's index mask
+        linux.IoUring.buf_ring_add(br, memory[offset..][0..length], @intCast(index), g.entries.raw() - 1, 0);
+        linux.IoUring.buf_ring_advance(br, 1);
     }
 };
 
@@ -36,7 +39,7 @@ items: []Group,
 
 pub const Error = error{ SystemResources, Unexpected } || Allocator.Error;
 
-pub fn init(gpa: Allocator, io: Io, memory: []u8, length: u32, buffers: u32) Error!?Groups {
+pub fn init(gpa: Allocator, io: Io, memory: []u8, length: aegis.units.Bytes(u32), buffers: u32) Error!?Groups {
     if (builtin.os.tag != .linux) return null;
     const core = native.runtimeOf(io) orelse return null;
     if (core.backendKind() != .io_uring) return null;
@@ -52,20 +55,22 @@ pub fn init(gpa: Allocator, io: Io, memory: []u8, length: u32, buffers: u32) Err
     for (groups, core.processors) |*g, *p| {
         const ring = p.loop.backend.io_uring;
         const count: u32 = @intCast((buffers - first) / (groups.len - made));
-        const entries: u16 = @intCast(std.math.ceilPowerOfTwoAssert(u32, @max(2, count)));
-        const id = ring.next_group.fetchAdd(1, .monotonic);
-        if (id > std.math.maxInt(u16)) return error.SystemResources;
-        const registration = register(io, p, entries, @intCast(id)) catch |err| switch (err) {
+        const entries = BufferRing.Entries.fromRaw(@intCast(std.math.ceilPowerOfTwoAssert(u32, @max(2, count)))); // safe: `buffers` is at most 32,768
+        const issued = ring.next_group.fetchAdd(1, .monotonic);
+        if (issued > std.math.maxInt(u16)) return error.SystemResources;
+        const id = BufferRing.Id.fromRaw(@intCast(issued)); // safe: checked against u16 above
+        const registration = register(io, p, entries, id) catch |err| switch (err) {
             error.Unsupported => return null,
             error.SystemResources => return error.SystemResources,
             error.Unexpected => return error.Unexpected,
         };
         const br = registration.br;
-        g.* = .{ .ring = ring, .owner = p, .br = br, .registration = registration, .id = @intCast(id), .entries = entries, .first = first, .count = count };
+        g.* = .{ .ring = ring, .owner = p, .ring_buffers = .init(br), .registration = registration, .id = id, .entries = entries, .first = first, .count = count };
         linux.IoUring.buf_ring_init(br);
         for (0..count) |i| {
-            const offset = (@as(usize, first) + i) * length;
-            linux.IoUring.buf_ring_add(br, memory[offset..][0..length], @intCast(i), entries - 1, @intCast(i));
+            const offset = (@as(usize, first) + i) * length.raw();
+            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the ring's index mask
+            linux.IoUring.buf_ring_add(br, memory[offset..][0..length.raw()], @intCast(i), entries.raw() - 1, @intCast(i));
         }
         linux.IoUring.buf_ring_advance(br, @intCast(count));
         made += 1;
@@ -87,7 +92,7 @@ const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
     ready: Io.Event = .unset,
     io: Io,
-    action: union(enum) { register: struct { entries: u16, id: u16 }, unregister: *BufferRing },
+    action: union(enum) { register: struct { entries: BufferRing.Entries, id: BufferRing.Id }, unregister: *BufferRing },
     result: BufferRing.Error!BufferRing = undefined,
 
     fn run(e: *Scheduler.Errand, p: *Scheduler.Processor) void {
@@ -110,7 +115,7 @@ const Command = struct {
     }
 };
 
-fn register(io: Io, p: *Scheduler.Processor, entries: u16, id: u16) BufferRing.Error!BufferRing {
+fn register(io: Io, p: *Scheduler.Processor, entries: BufferRing.Entries, id: BufferRing.Id) BufferRing.Error!BufferRing {
     var command: Command = .{ .io = io, .action = .{ .register = .{ .entries = entries, .id = id } } };
     command.execute(p);
     return command.result;

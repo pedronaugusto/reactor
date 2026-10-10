@@ -14,7 +14,7 @@ const fiber = @import("fiber.zig");
 
 fn runtime(r: *Runtime, workers: u16) !void {
     if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
-    r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };

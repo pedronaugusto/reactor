@@ -1,7 +1,66 @@
 //! Where a loop reads the time: the system's clocks, or a virtual clock
 //! that moves only when a test moves it.
+//!
+//! A loop keeps one timeline, the awake clock, and names its points and
+//! spans by what they count. `Awake` is a point in nanoseconds, `Tick` the
+//! same timeline in the wheel's microseconds, `Span` a length of it. They do
+//! not mix without a conversion that says how it rounds.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
+
+/// A point on the loop's timeline: the awake clock, in nanoseconds.
+pub const Awake = aegis.units.Instant(.awake, .nanosecond, u64);
+/// The same timeline in the wheel's tick, one microsecond.
+pub const Tick = aegis.units.Instant(.awake, .microsecond, u64);
+/// A length of the loop's timeline, in nanoseconds.
+pub const Span = aegis.units.Duration(.nanosecond, u64);
+
+/// A point of the awake timeline from std's timestamp. The loop's timeline
+/// starts at zero and ends 584 years on: a negative stamp is the start and
+/// one beyond the end is the end, which no wait reaches.
+pub fn awakeOf(t: Io.Timestamp) Awake {
+    return .fromRaw(@intCast(std.math.clamp(t.nanoseconds, 0, std.math.maxInt(u64)))); // safe: clamped into u64 above
+}
+
+/// A span from std's duration, on the same terms: negative is zero and
+/// beyond the end is the end.
+pub fn spanOf(d: Io.Duration) Span {
+    return .fromRaw(@intCast(std.math.clamp(d.nanoseconds, 0, std.math.maxInt(u64)))); // safe: clamped into u64 above
+}
+
+/// How long ago `then` was at `now`: nothing when the clock stepped back.
+pub fn since(then: Awake, now: Awake) Span {
+    return then.durationTo(now) catch .fromRaw(0);
+}
+
+/// `at` in the wheel's tick, rounded up: a timer never fires early.
+pub fn tickUp(at: Awake) Tick {
+    return at.convert(.microsecond, u64, .up) catch unreachable; // unreachable: a nanosecond count rounded up to microseconds fits the same width
+}
+
+/// `at` in the wheel's tick, rounded down: the last tick that has begun.
+pub fn tickDown(at: Awake) Tick {
+    return at.convert(.microsecond, u64, .down) catch unreachable; // unreachable: a nanosecond count rounded down to microseconds fits the same width
+}
+
+/// The nanoseconds a tick begins at, or the end of the timeline when the
+/// tick lies beyond it.
+pub fn awakeAt(tick: Tick) Awake {
+    return tick.convert(.nanosecond, u64, .exact) catch |err| switch (err) {
+        error.Overflow => .fromRaw(std.math.maxInt(u64)),
+        error.Inexact => unreachable, // unreachable: microseconds scale to whole nanoseconds
+    };
+}
+
+/// A span as the two fields of a C `timespec`: whole seconds, then the
+/// nanoseconds left over. The one place a kernel call's time is cut.
+pub const Parts = struct { sec: u64, nsec: u32 };
+
+pub fn parts(span: Span) Parts {
+    const ns = span.raw(); // c-os-boundary: the timespec of a kernel call
+    return .{ .sec = ns / std.time.ns_per_s, .nsec = @intCast(ns % std.time.ns_per_s) }; // safe: a remainder below a second
+}
 
 pub const Source = union(enum) {
     system,
@@ -14,15 +73,14 @@ pub const Source = union(enum) {
         };
     }
 
-    /// The awake clock in nanoseconds, the loop's timeline.
-    pub fn awake(s: Source) u64 {
-        const t = s.now(.awake);
-        return @intCast(@max(t.nanoseconds, 0));
+    /// The awake clock, the loop's timeline.
+    pub fn awake(s: Source) Awake {
+        return awakeOf(s.now(.awake));
     }
 
-    /// The awake clock in the wheel's ticks (microseconds), rounded down.
-    pub fn ticks(s: Source) u64 {
-        return s.awake() / std.time.ns_per_us;
+    /// The awake clock in the wheel's ticks, rounded down.
+    pub fn ticks(s: Source) Tick {
+        return tickDown(s.awake());
     }
 };
 
@@ -53,11 +111,11 @@ pub const Virtual = struct {
     }
 
     pub fn advance(v: *Virtual, by: Io.Duration) void {
-        _ = v.ns.fetchAdd(@intCast(by.nanoseconds), .acq_rel);
+        _ = v.ns.fetchAdd(spanOf(by).raw(), .acq_rel);
     }
 
-    pub fn set(v: *Virtual, ns: u64) void {
-        v.ns.store(ns, .release);
+    pub fn set(v: *Virtual, at: Awake) void {
+        v.ns.store(at.raw(), .release);
     }
 
     /// Moves `real` by `by` without moving the timeline.

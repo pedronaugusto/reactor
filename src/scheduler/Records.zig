@@ -45,13 +45,13 @@ pub fn deinit(records: *Records, gpa: std.mem.Allocator) void {
 }
 
 pub inline fn created(records: *Records, task: *Task) void {
-    const record = &records.items[task.stack.?];
+    const record = &records.items[task.stack.?.raw()];
     record.summary.store(@bitCast(Summary{ .kind = @intCast(@backingInt(task.kind)) }), .monotonic);
     record.spawned_at.store(task.spawned_at, .monotonic);
 }
 
 pub inline fn publish(records: *Records, task: *Task, processor: u16, state: State) void {
-    const record = &records.items[task.stack orelse return];
+    const record = &records.items[(task.stack orelse return).raw()];
     var summary: Summary = @bitCast(record.summary.load(.monotonic));
     summary.processor = processor;
     summary.state = state;
@@ -61,7 +61,7 @@ pub inline fn publish(records: *Records, task: *Task, processor: u16, state: Sta
 /// Notes a park `bytes` deep and returns the deepest park of this task since
 /// its stack was last trimmed.
 pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usize) usize {
-    const record = &records.items[task.stack.?];
+    const record = &records.items[task.stack.?.raw()];
     var summary: Summary = @bitCast(record.summary.load(.monotonic));
     summary.state = .waiting;
     summary.processor = processor;
@@ -75,7 +75,7 @@ pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usiz
 
 /// The task is forgotten: its deepest park stays in `deepest`.
 pub inline fn release(records: *Records, task: *Task) void {
-    const record = &records.items[task.stack.?];
+    const record = &records.items[task.stack.?.raw()];
     const summary: Summary = @bitCast(record.summary.load(.monotonic));
     if (summary.high_water > records.retained.load(.monotonic)) records.retain(summary.high_water);
     record.summary.store(@bitCast(Summary{}), .monotonic);
@@ -84,7 +84,7 @@ pub inline fn release(records: *Records, task: *Task) void {
 /// Pages below `resident` bytes from the top of the task's stack were given
 /// back: its deepest park counts from there.
 pub fn trimmed(records: *Records, task: *Task, resident: usize) void {
-    const record = &records.items[task.stack.?];
+    const record = &records.items[task.stack.?.raw()];
     var summary: Summary = @bitCast(record.summary.load(.monotonic));
     records.retain(summary.high_water);
     summary.high_water = @min(summary.high_water, @min(resident, std.math.maxInt(u36)));

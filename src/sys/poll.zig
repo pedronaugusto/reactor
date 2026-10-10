@@ -3,6 +3,7 @@
 //! a given time: what the extensions' waits fall back to on an `Io` that is
 //! not a runtime.
 const std = @import("std");
+const aegis = @import("aegis");
 const posix = std.posix;
 const Io = std.Io;
 const win32 = @import("win32.zig");
@@ -16,10 +17,16 @@ pub const Entry = struct { handle: Io.File.Handle, interest: Interest };
 
 pub const Error = error{ SystemResources, Unexpected };
 
-/// The lowest index of an entry ready within `ms` milliseconds; null when
+/// How long a wait may last: the kernel counts it in whole milliseconds.
+pub const Millis = aegis.units.Duration(.millisecond, u32);
+
+/// A wait that only looks.
+pub const look: Millis = .fromRaw(0);
+
+/// The lowest index of an entry ready within `wait`; null when
 /// none was. An error or a hang-up counts as ready: a read or write then
 /// reports it. A signal ends the wait early, as a timeout.
-pub fn descriptors(entries: []const Entry, ms: u32) Error!?usize {
+pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
     std.debug.assert(entries.len <= max);
     var fds: [max]posix.pollfd = undefined;
     for (entries, fds[0..entries.len]) |e, *f| f.* = .{
@@ -30,7 +37,8 @@ pub fn descriptors(entries: []const Entry, ms: u32) Error!?usize {
         },
         .revents = 0,
     };
-    const timeout: i32 = @intCast(@min(ms, std.math.maxInt(i32)));
+    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; poll counts in an i32 of milliseconds
+    const timeout: i32 = @intCast(@min(wait.raw(), std.math.maxInt(i32)));
     const rc = posix.system.poll(&fds, @intCast(entries.len), timeout);
     switch (posix.errno(rc)) {
         .SUCCESS => {},
@@ -43,11 +51,11 @@ pub fn descriptors(entries: []const Entry, ms: u32) Error!?usize {
     return null;
 }
 
-/// The lowest index of a signaled object within `ms` milliseconds; null
+/// The lowest index of a signaled object within `wait`; null
 /// when none was.
-pub fn objects(handles: []const std.os.windows.HANDLE, ms: u32) Error!?usize {
+pub fn objects(handles: []const std.os.windows.HANDLE, wait: Millis) Error!?usize {
     std.debug.assert(handles.len <= win32.maximum_wait_objects);
-    const rc = win32.WaitForMultipleObjects(@intCast(handles.len), handles.ptr, .FALSE, ms);
+    const rc = win32.WaitForMultipleObjects(@intCast(handles.len), handles.ptr, .FALSE, wait.raw());
     if (rc == win32.wait_timeout) return null;
     if (rc == win32.wait_failed) return error.Unexpected;
     // WAIT_OBJECT_0 + i; an abandoned mutex (WAIT_ABANDONED_0 + i) is

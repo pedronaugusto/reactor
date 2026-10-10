@@ -72,7 +72,7 @@ test "a worker stuck in a blocking file call hands its processor to a spare, and
     const backend = readiness orelse return error.SkipZigTest;
     if (!fiber.supported) return error.SkipZigTest;
     var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .backend = backend, .workers = 2, .max_tasks = 64, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .backend = backend, .workers = 2, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -100,7 +100,7 @@ test "a worker stuck in a blocking file call hands its processor to a spare, and
 fn fifoRuntime(r: *Runtime, workers: u16) !void {
     const backend = readiness orelse return error.SkipZigTest;
     if (!fiber.supported) return error.SkipZigTest;
-    r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 64, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -150,7 +150,7 @@ test "a task that holds its processor past report_after without switching out is
     const backend = readiness orelse return error.SkipZigTest;
     if (!fiber.supported) return error.SkipZigTest;
     var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .backend = backend, .workers = 1, .max_tasks = 64, .stack_size = 256 << 10, .report_after = .fromMilliseconds(5) }) catch |err| switch (err) {
+    r.init(testing.allocator, .{ .backend = backend, .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .report_after = .fromMilliseconds(5) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
@@ -194,7 +194,7 @@ const Pipe = struct {
 test "a synchronous Windows pipe read hands its IOCP processor to a spare" {
     if (builtin.os.tag != .windows or !fiber.supported) return error.SkipZigTest;
     var r: Runtime = undefined;
-    try r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
+    try r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer r.deinit();
     try r.start();
     const io = r.io();

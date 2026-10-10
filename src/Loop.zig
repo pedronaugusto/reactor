@@ -15,6 +15,7 @@ const Loop = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -42,7 +43,7 @@ pub const Options = struct {
     /// Linux only, explicitly requested; failure is reported, never downgraded.
     sqpoll: ?SqPoll = null,
     /// Minimum contiguous send eligible for SEND_ZC; null disables it.
-    zero_copy_min: ?usize = null,
+    zero_copy_min: ?aegis.units.Bytes(usize) = null,
     registered_pools: u16 = 64,
     /// Windows: the host's completion port, which the loop shares. The host
     /// waits on it and hands the entries that carry `completionKey()` to
@@ -293,7 +294,7 @@ pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     switch (o.kind) {
         .timer => |deadline| if (l.backend.kind() == null or (deadline.clock != .real and deadline.clock != .boot)) {
             o.state.phase = .timer;
-            l.wheel.arm(&o.state.storage.node, l.deadlineTicks(deadline));
+            l.wheel.arm(&o.state.storage.node, l.deadlineTick(deadline));
             l.in_flight += 1;
             return false;
         },
@@ -369,8 +370,8 @@ pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
     l.installPressure();
     l.assertOwner();
     var delivered: u32 = 0;
-    const deadline: ?u64 = switch (mode) {
-        .until, .within => |t| l.awakeNs(t),
+    const deadline: ?clocks.Awake = switch (mode) {
+        .until, .within => |t| l.awakeAt(t),
         else => null,
     };
     while (true) {
@@ -391,8 +392,8 @@ pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
         switch (mode) {
             .nowait => return delivered,
             .once => if (delivered > 0 or woken) return delivered,
-            .within => if (delivered > 0 or woken or l.clock.awake() >= deadline.?) return delivered,
-            .until => if (woken or l.clock.awake() >= deadline.?) return delivered,
+            .within => if (delivered > 0 or woken or l.clock.awake().compare(deadline.?) != .lt) return delivered,
+            .until => if (woken or l.clock.awake().compare(deadline.?) != .lt) return delivered,
         }
     }
 }
@@ -421,9 +422,8 @@ pub fn backendHandle(l: *Loop) error{ Unsupported, SystemResources, Unexpected }
 pub fn nextTimeout(l: *const Loop) ?Io.Duration {
     if (l.ready.head != null or l.backend.hasCompletions()) return .zero;
     const next = l.wheel.next() orelse return null;
-    const now = l.clock.awake();
-    const at = next * std.time.ns_per_us;
-    return .fromNanoseconds(if (at > now) at - now else 0);
+    const left = l.clock.awake().durationTo(clocks.awakeAt(next)) catch return .zero; // a timer already due is zero away
+    return left.toIoDuration();
 }
 
 /// From any thread: makes `backendHandle` readable and returns a waiting
@@ -488,23 +488,29 @@ fn writeTotal(data: []const []const u8, splat: usize) usize {
     return n + data[data.len - 1].len * splat;
 }
 
-/// A timestamp on any clock as nanoseconds on the loop's awake timeline.
-fn awakeNs(l: *const Loop, t: Io.Clock.Timestamp) u64 {
-    const now_awake: i96 = l.clock.now(.awake).nanoseconds;
-    const ns: i96 = if (t.clock == .awake) t.raw.nanoseconds else now_awake + (t.raw.nanoseconds - l.clock.now(t.clock).nanoseconds);
-    return @intCast(@max(ns, 0));
+/// A timestamp on any clock as a point on the loop's awake timeline.
+fn awakeAt(l: *const Loop, t: Io.Clock.Timestamp) clocks.Awake {
+    if (t.clock == .awake) return clocks.awakeOf(t.raw);
+    // Another clock's deadline is as far ahead on the awake timeline as it is on its own.
+    const ahead = t.raw.nanoseconds -| l.clock.now(t.clock).nanoseconds;
+    return clocks.awakeOf(.{ .nanoseconds = l.clock.now(.awake).nanoseconds +| ahead });
 }
 
-fn deadlineTicks(l: *const Loop, t: Io.Clock.Timestamp) u64 {
-    return std.math.divCeil(u64, l.awakeNs(t), std.time.ns_per_us) catch unreachable; // unreachable: the divisor is a constant
+/// The wheel tick a timer for `t` fires at, never earlier than `t`.
+fn deadlineTick(l: *const Loop, t: Io.Clock.Timestamp) clocks.Tick {
+    return clocks.tickUp(l.awakeAt(t));
 }
 
-fn waitFor(l: *const Loop, deadline: ?u64) backends.Wait {
+fn waitFor(l: *const Loop, deadline: ?clocks.Awake) backends.Wait {
     if (l.ready.head != null) return .nowait;
-    const timer: ?u64 = if (l.wheel.count == 0) null else if (l.wheel.next()) |ticks| ticks * std.time.ns_per_us else null;
-    const until = if (timer) |t| (if (deadline) |d| @min(t, d) else t) else deadline orelse return .forever;
-    const now = l.clock.awake();
-    return if (until <= now) .nowait else .{ .ns = until - now };
+    const timer: ?clocks.Awake = if (l.wheel.count == 0) null else if (l.wheel.next()) |tick| clocks.awakeAt(tick) else null;
+    const until: clocks.Awake = if (timer) |t| (if (deadline) |d| earlier(t, d) else t) else deadline orelse return .forever;
+    const left = l.clock.awake().durationTo(until) catch return .nowait; // already past: no wait
+    return if (left.eql(.fromRaw(0))) .nowait else .{ .up_to = left };
+}
+
+fn earlier(a: clocks.Awake, b: clocks.Awake) clocks.Awake {
+    return if (a.compare(b) == .gt) b else a;
 }
 
 fn expire(l: *Loop) u32 {

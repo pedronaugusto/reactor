@@ -3,7 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize });
+    const aegis_dependency = b.dependency("aegis", .{ .target = target, .optimize = optimize });
+    const aegis = aegis_dependency.module("aegis");
+    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
     const library = b.addLibrary(.{ .name = "reactor", .root_module = module });
     b.installArtifact(library);
     // Everything below is this repository's own: a project depending on
@@ -15,6 +17,7 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "aegis", .module = aegis }},
     });
     if (target.result.os.tag == .windows) {
         test_module.link_libc = true;
@@ -63,7 +66,7 @@ pub fn build(b: *std.Build) !void {
         });
         // A project that depends on reactor by path, with no packages to
         // fetch: the build a consumer gets.
-        preflight.addConsumerCheck(b, .{ .package = "reactor", .program = b.path("ci/consumer.zig") });
+        preflight.addConsumerCheck(b, .{ .package = "reactor", .program = b.path("ci/consumer.zig"), .packages = &.{aegis_dependency} });
     }
     return needed;
 }
@@ -72,6 +75,7 @@ pub fn build(b: *std.Build) !void {
 /// its own mode, so a ReleaseFast benchmark over the Debug module would
 /// time the Debug module.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const reactor = b.createModule(.{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize });
+    const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    const reactor = b.createModule(.{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
     return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "reactor", .module = reactor }}) catch @panic("OOM");
 }

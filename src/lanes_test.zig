@@ -176,7 +176,7 @@ test "admission: retiring groups hold capacity and full admission never runs inl
     accepted.job.group.token.store(null, .release);
     lanes.retire(&accepted.job);
     try testing.expectEqual(@as(u64, 0), lanes.stats(.general).@"inline");
-    try testing.expectEqual(@as(u32, 0), lanes.reserved);
+    try testing.expectEqual(@as(u32, 0), lanes.charged());
 }
 
 fn workerCount(threaded: *Io.Threaded) usize {
@@ -212,5 +212,5 @@ test "admission: startup prepares all owned workers and sequential calls reuse t
         lanes.retire(&call.job);
     }
     for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 5), workerCount(threaded));
-    try testing.expectEqual(@as(u32, 0), lanes.reserved);
+    try testing.expectEqual(@as(u32, 0), lanes.charged());
 }

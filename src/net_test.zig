@@ -266,7 +266,7 @@ test "a receiver holds no buffer while idle and lends one per read" {
     const server = try listener.accept(io);
     defer server.close(io);
 
-    var pool: net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = 64, .buffers = 1 });
+    var pool: net.Receiver.Pool = try .init(testing.allocator, io, .{ .buffer_len = .fromRaw(64), .buffers = 1 });
     defer pool.deinit(testing.allocator, io);
     var receiver: net.Receiver = .init(io, &pool, server.socket.handle);
     defer receiver.deinit(io);

@@ -117,8 +117,8 @@ pub fn main(init: std.process.Init) !void {
     runtime.init(gpa, .{
         .workers = c.workers,
         .backend = c.backend,
-        .stack_classes = if (c.task_size) |size| &.{.{ .size = size, .count = 256 }} else &.{},
-        .zero_copy_min = c.zero_copy_min,
+        .stack_classes = if (c.task_size) |size| &.{.{ .size = .fromRaw(size), .count = 256 }} else &.{},
+        .zero_copy_min = if (c.zero_copy_min) |min| .fromRaw(min) else null,
         .sqpoll = if (c.sqpoll) .{} else null,
         .uring_off = .{ .msg_ring = c.msg_ring_off, .linked_timeout = c.linked_timeout_off, .fixed_files = c.fixed_files_off },
         .files = if (c.files_pool) .pool else .auto,
@@ -703,7 +703,7 @@ fn spawnOptions(r: Report, io: Io, c: Config) !void {
     const n: usize = if (c.smoke) 100 else 200_000;
     const start = now(io);
     for (0..n) |_| {
-        var future = try reactor.concurrentWith(io, .{ .stack_size = c.task_size, .priority = if (c.latency) .latency else .normal }, nothing, .{});
+        var future = try reactor.concurrentWith(io, .{ .stack_size = if (c.task_size) |size| .fromRaw(size) else null, .priority = if (c.latency) .latency else .normal }, nothing, .{});
         future.await(io);
     }
     try r.line("spawn-options", "concurrentWith + await, empty", nsBetween(start, now(io)) / @as(f64, @floatFromInt(n)), "ns/task");

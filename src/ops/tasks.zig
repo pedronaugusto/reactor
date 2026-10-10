@@ -7,6 +7,7 @@
 //! at its first member while it has any; its `state` holds a lock bit, a
 //! canceled bit, and the awaiter.
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
@@ -22,11 +23,11 @@ pub fn concurrent(s: *Scheduler, result_len: usize, result_alignment: Alignment,
     return concurrentMode(false, s, result_len, result_alignment, context, context_alignment, start, spawned_at, null, .normal);
 }
 
-pub fn concurrentWith(s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize, stack_size: ?usize, priority: Task.Priority) Io.ConcurrentError!*Task {
+pub fn concurrentWith(s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize, stack_size: ?aegis.units.Bytes(usize), priority: Task.Priority) Io.ConcurrentError!*Task {
     return concurrentMode(true, s, result_len, result_alignment, context, context_alignment, start, spawned_at, stack_size, priority);
 }
 
-inline fn concurrentMode(comptime customized: bool, s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize, stack_size: ?usize, priority: Task.Priority) Io.ConcurrentError!*Task {
+inline fn concurrentMode(comptime customized: bool, s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize, stack_size: ?aegis.units.Bytes(usize), priority: Task.Priority) Io.ConcurrentError!*Task {
     const layout = Layout.of(context.len, context_alignment, result_len, result_alignment);
     const created = if (customized) s.createWith(.future, layout.size, layout.alignment, futureEntry, stack_size, priority) else s.create(.future, layout.size, layout.alignment, futureEntry);
     const t, const extra = created orelse return error.ConcurrencyUnavailable;

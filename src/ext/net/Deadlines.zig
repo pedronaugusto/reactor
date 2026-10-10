@@ -16,32 +16,40 @@
 const Deadlines = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 
+const clock = @import("../../clock.zig");
 const native = @import("../native.zig");
 const abort = @import("abort.zig").abort;
 
-/// Held for `watches`; by the task while it scans.
-mutex: Io.Mutex = .init,
-watches: std.DoublyLinkedList = .{},
+/// What the lock holds: the watched, and the task that keeps their
+/// deadlines. Held by the task while it scans.
+const Watching = struct {
+    watches: std.DoublyLinkedList = .{},
+    task: ?Io.Future(void) = null,
+};
+
+watching: aegis.BlockingGuarded(Watching) = .init(.{}),
 /// Watches with an operation armed.
 armed: std.atomic.Value(u32) = .init(0),
 /// 1 while the task waits for an operation to be armed; the futex it
 /// waits on.
 parked: std.atomic.Value(u32) = .init(0),
-task: ?Io.Future(void) = null,
 /// How often the task looks at the armed deadlines.
 tick: Io.Duration,
+
+const unarmed: clock.Awake = .fromRaw(0);
 
 /// One socket's operation deadline.
 pub const Watch = struct {
     /// Its place among the watched; not to be touched.
     node: std.DoublyLinkedList.Node = .{},
     socket: Io.net.Socket.Handle,
-    /// The armed operation's deadline on the awake clock, in nanoseconds;
-    /// 0 when none is armed.
-    deadline: std.atomic.Value(i64) = .init(0),
+    /// The armed operation's deadline, as an `Awake`'s nanoseconds; zero
+    /// when none is armed.
+    deadline: std.atomic.Value(u64) = .init(unarmed.raw()),
     /// Set once a deadline fired and the socket was aborted.
     fired: std.atomic.Value(bool) = .init(false),
 
@@ -59,8 +67,11 @@ pub fn init(shortest: Io.Duration) Deadlines {
 
 /// Every watch must have been removed.
 pub fn deinit(d: *Deadlines, io: Io) void {
-    assert(d.watches.first == null);
-    if (d.task) |*task| task.cancel(io);
+    var held = d.watching.acquireUncancelable(io);
+    assert(held.value().watches.first == null);
+    var task = held.value().task;
+    held.deinit(io);
+    if (task) |*running| running.cancel(io);
     d.* = undefined;
 }
 
@@ -68,21 +79,22 @@ pub fn deinit(d: *Deadlines, io: Io) void {
 /// `w` is not added, and operations on it run unbounded.
 pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
     if (native.runtimeOf(io) != null) return true;
-    d.mutex.lockUncancelable(io);
-    defer d.mutex.unlock(io);
-    if (d.task == null) d.task = io.concurrent(watch, .{ d, io }) catch return false;
-    d.watches.append(&w.node);
+    var held = d.watching.acquireUncancelable(io);
+    defer held.deinit(io);
+    const watching = held.value();
+    if (watching.task == null) watching.task = io.concurrent(watch, .{ d, io }) catch return false;
+    watching.watches.append(&w.node);
     return true;
 }
 
 /// Stops watching `w`, which has no operation under way. Once this
 /// returns, nothing touches `w` or its socket.
 pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
-    assert(w.deadline.load(.monotonic) == 0);
+    assert(w.deadline.load(.monotonic) == unarmed.raw());
     if (native.runtimeOf(io) != null) return;
-    d.mutex.lockUncancelable(io);
-    defer d.mutex.unlock(io);
-    d.watches.remove(&w.node);
+    var held = d.watching.acquireUncancelable(io);
+    defer held.deinit(io);
+    held.value().watches.remove(&w.node);
 }
 
 pub const OperateError = Io.Cancelable || error{Timeout};
@@ -127,8 +139,10 @@ fn failed(r: Io.Operation.Result) bool {
 
 fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
     // The watching task reads the awake clock.
-    const at = if (deadline.clock == .awake) deadline.raw else Io.Clock.awake.now(io).addDuration(deadline.durationFromNow(io).raw);
-    w.deadline.store(@intCast(@max(1, at.nanoseconds)), .release);
+    const at: Io.Timestamp = if (deadline.clock == .awake) deadline.raw else .{ .nanoseconds = Io.Clock.awake.now(io).nanoseconds +| deadline.durationFromNow(io).raw.nanoseconds };
+    // Zero means unarmed, so a deadline at the very start is the next tick.
+    // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; the atomic cell holds an `Awake`'s integer
+    w.deadline.store(@max(1, clock.awakeOf(at).raw()), .release);
     if (d.armed.fetchAdd(1, .seq_cst) == 0 and d.parked.load(.seq_cst) == 1) {
         d.parked.store(0, .seq_cst);
         io.futexWake(u32, &d.parked.raw, 1);
@@ -136,7 +150,7 @@ fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
 }
 
 fn disarm(d: *Deadlines, w: *Watch) void {
-    w.deadline.store(0, .release);
+    w.deadline.store(unarmed.raw(), .release);
     _ = d.armed.fetchSub(1, .seq_cst);
 }
 
@@ -159,14 +173,14 @@ fn watch(d: *Deadlines, io: Io) void {
 }
 
 fn scan(d: *Deadlines, io: Io) void {
-    d.mutex.lockUncancelable(io);
-    defer d.mutex.unlock(io);
-    const now: i64 = @intCast(Io.Clock.awake.now(io).nanoseconds);
-    var it = d.watches.first;
+    var held = d.watching.acquireUncancelable(io);
+    defer held.deinit(io);
+    const now = clock.awakeOf(Io.Clock.awake.now(io));
+    var it = held.value().watches.first;
     while (it) |node| : (it = node.next) {
         const w: *Watch = @fieldParentPtr("node", node);
-        const deadline = w.deadline.load(.acquire);
-        if (deadline == 0 or now < deadline or w.fired.load(.acquire)) continue;
+        const deadline = clock.Awake.fromRaw(w.deadline.load(.acquire));
+        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.load(.acquire)) continue;
         w.fired.store(true, .release);
         abort(io, w.socket);
     }

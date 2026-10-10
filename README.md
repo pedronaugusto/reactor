@@ -11,7 +11,8 @@ frame loop, a job system) drives it without giving up a thread.
 Requires Zig 0.17.0. Fetch with `zig fetch --save
 git+https://github.com/pedronaugusto/reactor`, then obtain the `reactor` module
 through `b.dependency` and add it to your executable's imports. reactor depends
-on nothing but std.
+on std and [aegis](https://github.com/pedronaugusto/aegis), which depends on
+std alone and is fetched with it.
 
 ## Usage
 
@@ -60,6 +61,9 @@ Reserve stack classes in `Runtime.Options.stack_classes`, whose counts come
 out of `max_tasks`. `concurrentWith(io, options, f, args)` chooses a reserved
 `stack_size` and a `priority` (`normal` or `latency`). Latency work receives
 up to eight turns before queued normal work, on CPU and blocking lanes.
+Byte counts in the options are aegis `units.Bytes`, written
+`.stack_size = .fromRaw(256 << 10)`; a size or count too large to map or
+allocate is refused with an error.
 
 `net.Receiver.Pool.Options.registered` registers the pool on each native
 ring for fixed file reads and writes. Keep the pool alive until its operations
@@ -156,7 +160,7 @@ to 16 KiB pages; reserved address space is separate from resident memory.
 
 ## Built with
 
-Production code depends only on Zig std. Repository checks use preflight;
+Production code depends on Zig std and aegis. Repository checks use preflight;
 properties, faults, virtual time and conformance use shakedown as a lazy
 test-only dependency.
 

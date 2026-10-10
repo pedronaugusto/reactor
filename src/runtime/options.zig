@@ -1,5 +1,6 @@
 //! What a runtime is built with.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
@@ -38,7 +39,7 @@ pub const Options = struct {
     budget_time: std.Io.Duration = .fromMilliseconds(1),
     /// Each task's stack reservation; what a task costs is the pages it
     /// touches.
-    stack_size: usize = 1 << 20,
+    stack_size: aegis.units.Bytes(usize) = .fromRaw(1 << 20),
     /// Paint and scan task stacks to measure overall touched depth. This
     /// commits diagnostic pages and suspends trimming; leave off when timing.
     measure_stacks: bool = false,
@@ -57,7 +58,7 @@ pub const Options = struct {
     ring_entries: u16 = 256,
     uring_off: Loop.UringFeatures = .{},
     sqpoll: ?Loop.SqPoll = null,
-    zero_copy_min: ?usize = null,
+    zero_copy_min: ?aegis.units.Bytes(usize) = null,
     /// Sparse fixed-buffer pools per ring, reserved at init.
     registered_pools: u16 = 64,
     /// Linux: worker n on CPU n.

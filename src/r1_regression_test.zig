@@ -64,7 +64,7 @@ noinline fn deepPark(io: Io, address: *usize) Io.Cancelable!u8 {
 test "R1 ended deep stacks stay warm through immediate recycling" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var d: Driver = undefined;
-    try d.init(testing.allocator, 1, .{ .max_tasks = 8, .stack_size = 512 << 10, .offload = .none });
+    try d.init(testing.allocator, 1, .{ .max_tasks = 8, .stack_size = .fromRaw(512 << 10), .offload = .none });
     defer d.deinit();
     var address: usize = 0;
     var future = try d.io().concurrent(deepPark, .{ d.io(), &address });
@@ -125,7 +125,7 @@ fn wakeStoppingWorkers(r: *Runtime) void {
 }
 test "R1 group await observes all member stacks released" {
     var runtime: Runtime = undefined;
-    runtime.init(testing.allocator, .{ .workers = 2, .max_tasks = 32, .stack_size = 512 << 10 }) catch |err| switch (err) {
+    runtime.init(testing.allocator, .{ .workers = 2, .max_tasks = 32, .stack_size = .fromRaw(512 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -154,7 +154,7 @@ test "R1 group await observes all member stacks released" {
 
 test "R1 group await waits for a member still returning its stack" {
     var runtime: Runtime = undefined;
-    runtime.init(testing.allocator, .{ .workers = 1, .max_tasks = 8, .stack_size = 512 << 10 }) catch |err| switch (err) {
+    runtime.init(testing.allocator, .{ .workers = 1, .max_tasks = 8, .stack_size = .fromRaw(512 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };

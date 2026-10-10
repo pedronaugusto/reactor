@@ -3,13 +3,20 @@
 //! smallest configured class that fits and has capacity.
 const Stacks = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Pool = @import("Stacks/Pool.zig");
 const memory = @import("../sys/memory.zig");
 const fiber = @import("../fiber.zig");
 
-pub const Class = struct { size: usize, count: u32 };
-pub const Options = struct { count: u32, size: usize, classes: []const Class = &.{} };
+/// One stack among all of a runtime's, whatever its class. A `Pool.Slot` is
+/// its place in one class; `locate` is the only way from one to the other.
+pub const Stack = aegis.id.Id(struct {}, u32);
+
+pub const Bytes = aegis.units.Bytes(usize);
+
+pub const Class = struct { size: Bytes, count: u32 };
+pub const Options = struct { count: u32, size: Bytes, classes: []const Class = &.{} };
 pub const InitError = Pool.InitError;
 default_pool: Pool,
 /// Only additional classes need a table. The common pool stays directly
@@ -24,7 +31,7 @@ pub fn init(s: *Stacks, gpa: std.mem.Allocator, options: Options) InitError!void
     for (options.classes) |class| extra += class.count;
     if (extra > options.count) return error.TooManyTasks;
     var default_pool: Pool = undefined;
-    try default_pool.init(gpa, .{ .count = options.count - @as(u32, @intCast(extra)), .size = options.size });
+    try default_pool.init(gpa, .{ .count = options.count - @as(u32, @intCast(extra)), .size = options.size }); // safe: not above `options.count`, checked above
     errdefer default_pool.deinit(gpa);
     const pools = try gpa.alloc(Pool, options.classes.len);
     errdefer gpa.free(pools);
@@ -54,16 +61,21 @@ pub fn deinit(s: *Stacks, gpa: std.mem.Allocator) void {
     s.* = undefined;
 }
 
-pub inline fn take(s: *Stacks) ?u32 {
-    const index = s.default_pool.take() orelse return null;
+/// A stack handed out: its number among all of them, and its place in its class.
+pub const Taken = struct { stack: Stack, at: Location };
+
+pub inline fn take(s: *Stacks) ?Taken {
+    const slot = s.default_pool.take() orelse return null;
     if (s.pools.len > 0) _ = s.total_in_use.fetchAdd(1, .monotonic);
-    return index;
+    // The default class comes first, so its slots are the first stacks.
+    // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; Stacks alone turns a slot into a stack number
+    return .{ .stack = .fromRaw(slot.raw()), .at = .{ .pool = &s.default_pool, .slot = slot } };
 }
 fn poolAt(s: *Stacks, index: usize) *Pool {
     return if (index == 0) &s.default_pool else &s.pools[index - 1];
 }
-pub fn takeSized(s: *Stacks, bytes: ?usize) ?u32 {
-    const size = bytes orelse return s.take();
+pub fn takeSized(s: *Stacks, bytes: ?Bytes) ?Taken {
+    const size = (bytes orelse return s.take()).raw(); // the pools' sizes are plain: compared here, nowhere else
     var previous: usize = 0;
     while (true) {
         var best: ?usize = null;
@@ -77,9 +89,10 @@ pub fn takeSized(s: *Stacks, bytes: ?usize) ?u32 {
         var offset: u32 = 0;
         for (0..s.pools.len + 1) |i| {
             const pool = s.poolAt(i);
-            if (pool.size == usable) if (pool.take()) |index| {
+            if (pool.size == usable) if (pool.take()) |slot| {
                 if (s.pools.len > 0) _ = s.total_in_use.fetchAdd(1, .monotonic);
-                return offset + index;
+                // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; Stacks alone turns a slot into a stack number
+                return .{ .stack = .fromRaw(offset + slot.raw()), .at = .{ .pool = pool, .slot = slot } };
             };
             offset += pool.count;
         }
@@ -87,55 +100,56 @@ pub fn takeSized(s: *Stacks, bytes: ?usize) ?u32 {
     }
 }
 
-pub const Location = struct { pool: *Pool, index: u32 };
-pub inline fn locate(s: *Stacks, index: u32) Location {
-    if (index < s.default_pool.count) return .{ .pool = &s.default_pool, .index = index };
+pub const Location = struct { pool: *Pool, slot: Pool.Slot };
+pub inline fn locate(s: *Stacks, stack_id: Stack) Location {
+    const index = stack_id.raw(); // Stacks alone turns a stack number into a class and a slot
+    if (index < s.default_pool.count) return .{ .pool = &s.default_pool, .slot = .fromRaw(index) };
     var remaining = index - s.default_pool.count;
     for (s.pools) |*pool| {
-        if (remaining < pool.count) return .{ .pool = pool, .index = remaining };
+        if (remaining < pool.count) return .{ .pool = pool, .slot = .fromRaw(remaining) };
         remaining -= pool.count;
     }
-    unreachable; // unreachable: only indices returned by take are used
+    unreachable; // unreachable: only stacks returned by take are used
 }
 
-pub fn sizeAt(s: *Stacks, index: u32) usize {
-    return s.locate(index).pool.size;
+pub fn sizeAt(s: *Stacks, stack_id: Stack) usize {
+    return s.locate(stack_id).pool.size;
 }
-pub fn top(s: *Stacks, index: u32) usize {
-    const l = s.locate(index);
-    return l.pool.top(l.index);
+pub fn top(s: *Stacks, stack_id: Stack) usize {
+    const l = s.locate(stack_id);
+    return l.pool.top(l.slot);
 }
-pub fn bottom(s: *Stacks, index: u32) usize {
-    const l = s.locate(index);
-    return l.pool.bottom(l.index);
+pub fn bottom(s: *Stacks, stack_id: Stack) usize {
+    const l = s.locate(stack_id);
+    return l.pool.bottom(l.slot);
 }
-pub fn stack(s: *Stacks, index: u32) fiber.Stack {
-    const l = s.locate(index);
-    return l.pool.stack(l.index);
+pub fn stack(s: *Stacks, stack_id: Stack) fiber.Stack {
+    const l = s.locate(stack_id);
+    return l.pool.stack(l.slot);
 }
-pub fn reach(s: *Stacks, index: u32, low: usize) bool {
-    const l = s.locate(index);
-    return l.pool.reach(l.index, low);
+pub fn reach(s: *Stacks, stack_id: Stack, low: usize) bool {
+    const l = s.locate(stack_id);
+    return l.pool.reach(l.slot, low);
 }
-pub inline fn ended(s: *Stacks, index: u32, limit: usize) void {
-    const l = s.locate(index);
-    l.pool.ended(l.index, limit);
+pub inline fn ended(s: *Stacks, stack_id: Stack, limit: usize) void {
+    const l = s.locate(stack_id);
+    l.pool.ended(l.slot, limit);
 }
-pub inline fn give(s: *Stacks, index: u32) void {
-    const l = s.locate(index);
-    l.pool.give(l.index);
+pub inline fn give(s: *Stacks, stack_id: Stack) void {
+    const l = s.locate(stack_id);
+    l.pool.give(l.slot);
     if (s.pools.len > 0) _ = s.total_in_use.fetchSub(1, .release);
 }
-pub fn trim(s: *Stacks, index: u32, keep_from: usize) void {
-    const l = s.locate(index);
-    l.pool.trim(l.index, keep_from);
+pub fn trim(s: *Stacks, stack_id: Stack, keep_from: usize) void {
+    const l = s.locate(stack_id);
+    l.pool.trim(l.slot, keep_from);
 }
 
 /// Diagnostic painting commits the stack before entry; it is opt-in and
 /// disabled in ordinary runs. No live frame is ever painted.
-pub fn paint(s: *Stacks, index: u32, until: usize) bool {
-    const low = s.bottom(index) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
-    if (!s.reach(index, low)) return false;
+pub fn paint(s: *Stacks, stack_id: Stack, until: usize) bool {
+    const low = s.bottom(stack_id) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
+    if (!s.reach(stack_id, low)) return false;
     const bytes: [*]u8 = @ptrFromInt(low); // safe: exclusively owned, committed stack below its initial frame
     @memset(bytes[0 .. until - low], 0xa5);
     return true;
@@ -144,10 +158,10 @@ pub fn paint(s: *Stacks, index: u32, until: usize) bool {
 /// Called off-stack, before publishing a wake or an ended task. The
 /// lowest changed byte measures deepest touched storage, including work
 /// which returned before the next park.
-pub fn highWater(s: *Stacks, index: u32) usize {
-    const low = s.bottom(index) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
+pub fn highWater(s: *Stacks, stack_id: Stack) usize {
+    const low = s.bottom(stack_id) + if (builtin.os.tag == .windows) memory.pageSize() else @as(usize, 0);
     const bytes: [*]const u8 = @ptrFromInt(low); // safe: the scheduler exclusively owns this suspended stack
-    const size = s.top(index) - low;
+    const size = s.top(stack_id) - low;
     for (bytes[0..size], 0..) |byte, at| if (byte != 0xa5) return size - at;
     return 0;
 }

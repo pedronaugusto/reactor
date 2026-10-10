@@ -20,6 +20,7 @@ const c = std.c;
 
 const readiness = @import("../readiness.zig");
 const Wait = @import("../wait.zig").Wait;
+const timeline = @import("../../clock.zig");
 
 const Kqueue = @This();
 
@@ -178,17 +179,19 @@ pub fn wait(k: *Kqueue, timeout: Wait) readiness.PollError![]const Event {
     switch (timeout) {
         .nowait => immediate = true,
         .forever => {},
-        .ns => |ns| if (darwin) {
+        .up_to => |span| if (darwin) {
             // A timer that fires on time, instead of a coalesced timeout.
-            k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, c.NOTE.NSECONDS | critical, @intCast(@min(ns, std.math.maxInt(i64))), ignore_key);
+            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the kevent's data field is an i64 of nanoseconds
+            k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, c.NOTE.NSECONDS | critical, @intCast(@min(span.raw(), std.math.maxInt(i64))), ignore_key);
             k.change_count += 1;
             k.wait_armed = true;
         } else {
-            ts = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+            const cut = timeline.parts(span);
+            ts = .{ .sec = @intCast(cut.sec), .nsec = @intCast(cut.nsec) }; // safe: seconds of a u64 of nanoseconds fit the C types
             limit = &ts;
         },
     }
-    if (darwin and k.wait_armed and timeout != .ns) {
+    if (darwin and k.wait_armed and timeout != .up_to) {
         // An earlier wait's timer would wake a later wait for nothing.
         k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.DELETE, 0, 0, ignore_key);
         k.change_count += 1;

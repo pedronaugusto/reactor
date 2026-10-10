@@ -62,7 +62,7 @@ pub fn deinit(trims: *Trims, gpa: std.mem.Allocator) void {
 /// Off-stack before publishing the wake hook: retain the task on its loop
 /// and append in monotonic deadline order. Timer submission is best effort.
 pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Records, stacks: *Stacks, counter: *std.atomic.Value(u64), sp: usize) void {
-    const record = &trims.records[task.stack.?];
+    const record = &trims.records[task.stack.?.raw()];
     const bucket = &trims.buckets[processor];
     std.debug.assert(record.task == null);
     bucket.loop = loop;
@@ -87,7 +87,7 @@ pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Re
 /// Before resume on the pinned loop: remove its candidate and release the
 /// pin. The shared timer remains armed for its original deadline.
 pub fn beforeRun(trims: *Trims, loop: *Loop, task: *Task) void {
-    const record = &trims.records[task.stack.?];
+    const record = &trims.records[task.stack.?.raw()];
     std.debug.assert(record.task == task);
     std.debug.assert(record.bucket.loop == loop);
     if (record.queued) unlink(record);

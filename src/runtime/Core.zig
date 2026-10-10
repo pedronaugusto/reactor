@@ -5,6 +5,7 @@ const Core = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -84,7 +85,8 @@ pub const Construction = union(enum) {
 pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtable: *const Io.VTable) InitError!void {
     if (comptime !fiber.supported) return error.BackendUnavailable;
     const workers: u16 = options.workers orelse @intCast(std.math.clamp((std.Thread.getCpuCount() catch 1) -| 1, 0, 255));
-    const count: u16 = workers + 1;
+    // The home processor and one for each worker: the count is the caller's, to its top.
+    const count = (aegis.int.Checked(u16).init(workers).add(1) catch return error.SystemResources).raw();
     c.* = .{
         .gpa = gpa,
         .options = options,
@@ -123,7 +125,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .scheduling = if (workers == 0) .per_core else options.scheduling,
         .measure_stacks = options.measure_stacks,
         .budget_ops = options.budget_ops,
-        .budget_ns = @intCast(@max(options.budget_time.nanoseconds, 0)),
+        .budget = clock.spanOf(options.budget_time),
         .home_thread = std.Thread.getCurrentId(),
     };
 
@@ -141,7 +143,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         made += 1;
     }
 
-    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = options.max_tasks + options.max_lookups + 1 });
+    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = (aegis.int.Checked(u32).init(options.max_tasks).add(options.max_lookups) catch return error.TooManyTasks).raw() +| 1 });
     errdefer c.lanes.deinit(gpa);
 
     try c.initMonitor(workers);
@@ -173,7 +175,7 @@ fn initMonitor(c: *Core, workers: u16) InitError!void {
     const handoff = handable and workers > 0 and c.scheduler.scheduling == .stealing;
     const cap: u16 = if (handoff) c.options.spares orelse @max(workers / 2, 1) else 0;
     c.scheduler.spares = try .init(c.gpa, c.processors.len, cap);
-    errdefer c.scheduler.spares.deinit(c.gpa);
+    errdefer c.scheduler.spares.deinit();
     const monitor = try c.gpa.create(Scheduler.Monitor);
     errdefer c.gpa.destroy(monitor);
     monitor.* = try .init(c.gpa, c.processors.len, handoff, c.options.handoff_after, c.options.report_after);
@@ -184,7 +186,7 @@ fn deinitMonitor(c: *Core) void {
     if (c.scheduler.monitor) |m| {
         m.deinit(c.gpa);
         c.gpa.destroy(m);
-        c.scheduler.spares.deinit(c.gpa);
+        c.scheduler.spares.deinit();
         c.scheduler.monitor = null;
     }
 }

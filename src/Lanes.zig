@@ -16,6 +16,7 @@
 const Lanes = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -45,7 +46,7 @@ pub const Owned = struct {
     /// null: max(4, CPUs), at most 64.
     general: ?u16 = null,
     /// Maximum allocation made by std inside one call; blocks are reserved at init.
-    scratch_bytes: u32 = 256 << 10,
+    scratch_bytes: aegis.units.Bytes(u32) = .fromRaw(256 << 10),
 };
 
 /// What every Threaded instance needs from the runtime's options.
@@ -68,7 +69,8 @@ pub const Job = struct {
     priority: Priority = .normal,
     group: Io.Group = .init,
     cancellation: Io.Group = .init,
-    admitted: bool = false,
+    /// The executor capacity this call holds from `admit` to `retire`.
+    executor: ?Executor.Reservation = null,
     /// Child termination bypasses occupied wait slots using reserved control capacity.
     control: bool = false,
     next: ?*Job = null,
@@ -79,6 +81,11 @@ pub const Job = struct {
     /// The executor refused the call; no user code ran.
     rejected: bool = false,
 
+    /// Whether `admit` has reserved this call's capacity and `retire` has not given it back.
+    pub fn admitted(job: *const Job) bool {
+        return job.executor != null;
+    }
+
     /// Whether the executor still holds the job's group: wait until not
     /// before the job's frame goes.
     pub fn held(job: *const Job) bool {
@@ -88,19 +95,75 @@ pub const Job = struct {
 
 pub const Stats = struct { queued: u32, running: u32, threads: u16, @"inline": u64 };
 
-const State = struct {
-    cap: u16,
+/// Executor capacity, in units: two for each admitted call.
+const Executor = aegis.bounded.Budget(u32);
+
+/// What `admit` and `retire` keep, under one lock: calls admitted per lane,
+/// the executor capacity they hold, and whether the one control call is out.
+const Admission = struct {
+    admitted: [count]u32 = @splat(0),
+    executor: Executor,
+    control: bool = false,
+};
+
+/// A lane's calls waiting for a slot, oldest first, latency before normal
+/// within the turn limit.
+const Queue = struct {
     running: u16 = 0,
-    admitted: u32 = 0,
-    limit: u32,
-    launch: Io.Mutex = .init,
-    dormant: []Warm = &.{},
-    activated: usize = 0,
     head: [2]?*Job = .{ null, null },
     tail: [2]?*Job = .{ null, null },
     latency_runs: u8 = 0,
     queued: u32 = 0,
-    lock: Io.Mutex = .init,
+
+    fn push(q: *Queue, job: *Job) void {
+        job.next = null;
+        const class = @backingInt(job.priority);
+        if (q.tail[class]) |t| t.next = job else q.head[class] = job;
+        q.tail[class] = job;
+        q.queued += 1;
+    }
+
+    /// The call to run next, or null with nothing queued.
+    fn pop(q: *Queue) ?*Job {
+        const class: usize = if (q.head[1] != null and (q.latency_runs < 8 or q.head[0] == null)) 1 else 0;
+        const job = q.head[class] orelse return null;
+        q.head[class] = job.next;
+        if (q.head[class] == null) q.tail[class] = null;
+        if (class == 1) q.latency_runs +|= 1 else q.latency_runs = 0;
+        q.queued -= 1;
+        return job;
+    }
+
+    /// Takes `job` out of the queue; false when it is not in it.
+    fn remove(q: *Queue, job: *Job) bool {
+        var prev: ?*Job = null;
+        const class = @backingInt(job.priority);
+        var it = q.head[class];
+        while (it) |j| : ({
+            prev = j;
+            it = j.next;
+        }) {
+            if (j != job) continue;
+            if (prev) |p| p.next = j.next else q.head[class] = j.next;
+            if (q.tail[class] == j) q.tail[class] = prev;
+            q.queued -= 1;
+            return true;
+        }
+        return false;
+    }
+};
+
+/// The workers a lane starts calls on, held for the whole of a start.
+const Launch = struct {
+    dormant: []Warm = &.{},
+    activated: usize = 0,
+};
+
+const State = struct {
+    cap: u16,
+    limit: u32,
+    launch: aegis.BlockingGuarded(Launch) = .init(.{}),
+    queue: aegis.BlockingGuarded(Queue) = .init(.{}),
     inlined: std.atomic.Value(u64) = .init(0),
 };
 
@@ -118,9 +181,9 @@ scratch: SlotPool,
 /// Where cancels of calls run; never awaited until `deinit`.
 started: bool = false,
 capacity: u32 = 0,
-reserved: u32 = 0,
-control_admitted: bool = false,
-admission_lock: Io.Mutex = .init,
+/// The most executor capacity admitted calls can hold.
+units: u32,
+admission: aegis.BlockingGuarded(Admission),
 
 pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocator.Error!void {
     const caps = capsOf(config);
@@ -129,13 +192,16 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
     var pool = try SlotPool.init(gpa, 4 * total + 16);
     errdefer pool.deinit(gpa);
     const bytes = switch (config) {
-        .owned => |o| o.scratch_bytes,
+        .owned => |o| o.scratch_bytes.raw(),
         else => 256 << 10,
     };
     var scratch = try SlotPool.initSized(gpa, total + 16, bytes);
     errdefer scratch.deinit(gpa);
     const warm_entries = try gpa.alloc(Warm, if (config == .owned) 2 * total + 3 * count else 0);
     for (warm_entries) |*entry| entry.* = .{};
+    const capacity: u32 = if (config == .injected) config.injected.capacity else 0;
+    // Only an injected executor has capacity of its own to run out of.
+    const units: u32 = if (config == .injected) capacity else std.math.maxInt(u32);
     l.* = .{
         .mode = config,
         .borrowed = .init(.failing, .{ .async_limit = .nothing, .concurrent_limit = .nothing, .environ = env.environ, .argv0 = env.argv0 }),
@@ -145,18 +211,20 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
         .pool = pool,
         .scratch = scratch,
         .warm_entries = warm_entries,
+        .capacity = capacity,
+        .units = units,
+        .admission = .init(.{ .executor = .init(units) }),
     };
     l.borrowed.allocator = l.allocator();
-    for (&l.states, caps) |*s, c| s.* = .{ .cap = c, .limit = env.max_jobs };
-    if (config == .owned) {
-        var offset: usize = 0;
-        for (&l.states) |*state| {
-            const n = 2 * @as(usize, state.cap) + 3;
-            state.dormant = warm_entries[offset..][0..n];
+    var offset: usize = 0;
+    for (&l.states, caps) |*s, c| {
+        s.* = .{ .cap = c, .limit = env.max_jobs };
+        if (config == .owned) {
+            const n = 2 * @as(usize, c) + 3;
+            s.launch = .init(.{ .dormant = warm_entries[offset..][0..n] });
             offset += n;
         }
     }
-    if (config == .injected) l.capacity = config.injected.capacity;
     switch (config) {
         // The lane's cap bounds its calls; std's own limit would also count
         // a call that has ended while its thread is still leaving, and
@@ -175,7 +243,7 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
 }
 
 pub fn deinit(l: *Lanes, gpa: Allocator) void {
-    for (l.states) |state| assert(state.admitted == 0);
+    for (l.admission.teardown().admitted) |n| assert(n == 0);
     if (l.mode == .owned) {
         for (l.warm_entries) |*entry| entry.gate.set(system());
         for (&l.warm_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // unreachable: shutdown is outside a cancelable executor task
@@ -258,16 +326,19 @@ const Warm = struct {
 /// executor's ready pool, preserving warm-thread reuse for sequential calls.
 fn warm(threaded: *Io.Threaded, state: *State, group: *Io.Group) error{SystemResources}!void {
     const io = threaded.io();
-    for (state.dormant) |*entry| {
+    var launching = state.launch.acquireUncancelable(system());
+    defer launching.deinit(system());
+    const workers = launching.value();
+    for (workers.dormant) |*entry| {
         const pointer = entry;
         io.vtable.groupConcurrent(io.userdata, group, std.mem.asBytes(&pointer), .of(@TypeOf(pointer)), Warm.run) catch return error.SystemResources;
     }
-    for (state.dormant) |*entry| while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
-    state.dormant[0].gate.set(system());
-    state.activated = 1;
+    for (workers.dormant) |*entry| while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
+    workers.dormant[0].gate.set(system());
+    workers.activated = 1;
     while (true) {
         threaded.mutex.lockUncancelable(system());
-        const available = threaded.busy_count < state.dormant.len;
+        const available = threaded.busy_count < workers.dormant.len;
         threaded.mutex.unlock(system());
         if (available) return;
         std.atomic.spinLoopHint();
@@ -278,52 +349,51 @@ fn warm(threaded: *Io.Threaded, state: *State, group: *Io.Group) error{SystemRes
 /// A reservation survives completion until both executor groups retire.
 pub fn admit(l: *Lanes, job: *Job) bool {
     if (!l.started) return false;
-    const state = &l.states[@backingInt(job.lane)];
-    l.admission_lock.lockUncancelable(system());
-    defer l.admission_lock.unlock(system());
-    if (state.cap == 0 or (!job.control and state.admitted >= state.limit)) return false;
+    const index = @backingInt(job.lane);
+    const state = &l.states[index];
+    var held = l.admission.acquireUncancelable(system());
+    defer held.deinit(system());
+    const admission = held.value();
+    if (state.cap == 0 or (!job.control and admission.admitted[index] >= state.limit)) return false;
     if (job.control) {
-        if (l.control_admitted) return false;
-    } else if (l.mode == .injected and l.capacity - l.reserved < 4) return false;
-    if (l.mode == .injected and l.capacity - l.reserved < 2) return false;
-    if (job.control) l.control_admitted = true;
-    state.admitted += 1;
-    l.reserved += 2;
-    job.admitted = true;
+        if (admission.control) return false;
+    } else if (l.mode == .injected and admission.executor.remaining() < 4) return false; // two units stay for child termination
+    job.executor = admission.executor.reserve(2) catch return false;
+    if (job.control) admission.control = true;
+    admission.admitted[index] += 1; // bounded by the lane's limit, and by `max_tasks` for the control call
     return true;
 }
 
 /// Starts an admitted job, or queues it behind the lane's running cap.
 /// Standalone fallible callers may submit without an earlier reservation.
 pub fn submit(l: *Lanes, job: *Job) void {
-    if (!job.admitted and !l.admit(job)) {
+    if (!job.admitted() and !l.admit(job)) {
         job.rejected = true;
         return finish(job);
     }
-    const s = &l.states[@backingInt(job.lane)];
-    s.lock.lockUncancelable(system());
-    if (job.control) {
-        const accepted = l.start(job);
-        s.lock.unlock(system());
-        if (!accepted) {
+    switch (l.dispatch(job)) {
+        .started, .queued => {},
+        .refused => if (job.control) {
             job.rejected = true;
             finish(job);
-        }
-        return;
+        } else l.reject(job),
     }
-    if (s.running < s.cap) {
-        s.running += 1;
-        const accepted = l.start(job);
-        s.lock.unlock(system());
-        if (!accepted) l.reject(job);
-        return;
+}
+
+const Dispatch = enum { started, queued, refused };
+
+/// Under the lane's lock: the call starts if a slot is free, else it waits.
+fn dispatch(l: *Lanes, job: *Job) Dispatch {
+    var held = l.states[@backingInt(job.lane)].queue.acquireUncancelable(system());
+    defer held.deinit(system());
+    const queue = held.value();
+    if (job.control) return if (l.start(job)) .started else .refused;
+    if (queue.running < l.states[@backingInt(job.lane)].cap) {
+        queue.running += 1;
+        return if (l.start(job)) .started else .refused;
     }
-    job.next = null;
-    const class = @backingInt(job.priority);
-    if (s.tail[class]) |t| t.next = job else s.head[class] = job;
-    s.tail[class] = job;
-    s.queued += 1;
-    s.lock.unlock(system());
+    queue.push(job);
+    return .queued;
 }
 
 /// After execution and cancellation have retired, release their reservation.
@@ -331,21 +401,22 @@ pub fn submit(l: *Lanes, job: *Job) void {
 pub fn retire(l: *Lanes, job: *Job) void {
     assert(!job.held());
     assert(job.pending.load(.acquire) == 0);
-    if (!job.admitted) return;
-    l.admission_lock.lockUncancelable(system());
-    l.states[@backingInt(job.lane)].admitted -= 1;
-    l.reserved -= 2;
-    if (job.control) l.control_admitted = false;
-    job.admitted = false;
-    l.admission_lock.unlock(system());
+    const reservation = if (job.executor) |*r| r else return;
+    var held = l.admission.acquireUncancelable(system());
+    defer held.deinit(system());
+    const admission = held.value();
+    admission.admitted[@backingInt(job.lane)] -= 1;
+    reservation.release();
+    if (job.control) admission.control = false;
+    job.executor = null;
 }
 
 /// `job` as a member of its own group on the lane's executor; false when
 /// the executor could take no more.
 fn start(l: *Lanes, job: *Job) bool {
     const io = l.executor(job.lane);
-    l.launch(job.lane);
-    defer l.states[@backingInt(job.lane)].launch.unlock(system());
+    var launching = l.launch(job.lane);
+    defer launching.deinit(system());
     const context: Context = .{ .lanes = l, .job = job };
     io.vtable.groupConcurrent(io.userdata, &job.group, std.mem.asBytes(&context), .of(Context), runEntry) catch return false;
     return true;
@@ -376,18 +447,13 @@ fn runEntry(context: *const anyopaque) void {
 /// A call on `lane` ended: the oldest queued one takes its slot, or the
 /// slot is freed.
 fn next(l: *Lanes, lane: Lane) ?*Job {
-    const s = &l.states[@backingInt(lane)];
-    s.lock.lockUncancelable(system());
-    defer s.lock.unlock(system());
-    const class: usize = if (s.head[1] != null and (s.latency_runs < 8 or s.head[0] == null)) 1 else 0;
-    const job = s.head[class] orelse {
-        s.running -= 1;
+    var held = l.states[@backingInt(lane)].queue.acquireUncancelable(system());
+    defer held.deinit(system());
+    const queue = held.value();
+    const job = queue.pop() orelse {
+        queue.running -= 1;
         return null;
     };
-    s.head[class] = job.next;
-    if (s.head[class] == null) s.tail[class] = null;
-    if (class == 1) s.latency_runs +|= 1 else s.latency_runs = 0;
-    s.queued -= 1;
     // Publish the execution group before a cancellation can observe unqueued work.
     if (!l.start(job)) job.rejected = true;
     return job;
@@ -400,30 +466,32 @@ fn finish(job: *Job) void {
 /// From any thread: cancels `job` by std's own mechanism. A call still
 /// queued is dropped without running.
 pub fn cancel(l: *Lanes, job: *Job) void {
-    const s = &l.states[@backingInt(job.lane)];
-    s.lock.lockUncancelable(system());
-    if (unqueue(s, job)) {
-        s.lock.unlock(system());
+    var held = l.states[@backingInt(job.lane)].queue.acquireUncancelable(system());
+    if (held.value().remove(job)) {
+        held.deinit(system());
         job.dropped = true;
         return finish(job);
     }
-    defer s.lock.unlock(system());
+    defer held.deinit(system());
     var pending = job.pending.load(.acquire);
     while (true) {
         if (pending == 0) return;
         pending = job.pending.cmpxchgWeak(pending, pending + 1, .acq_rel, .acquire) orelse break;
     }
     const io = l.executor(job.lane);
-    l.launch(job.lane);
-    defer l.states[@backingInt(job.lane)].launch.unlock(system());
+    var launching = l.launch(job.lane);
+    defer launching.deinit(system());
     const context: Context = .{ .lanes = l, .job = job };
     io.vtable.groupConcurrent(io.userdata, &job.cancellation, std.mem.asBytes(&context), .of(Context), cancelEntry) catch @panic("reactor: lane executor refused cancellation");
 }
 
-fn launch(l: *Lanes, lane: Lane) void {
+/// The lane's launch lock, taken once an owned lane has a worker free to
+/// run what is started under it.
+fn launch(l: *Lanes, lane: Lane) aegis.BlockingGuarded(Launch).Guard {
     const state = &l.states[@backingInt(lane)];
-    state.launch.lockUncancelable(system());
-    if (l.mode != .owned) return;
+    var held = state.launch.acquireUncancelable(system());
+    if (l.mode != .owned) return held;
+    const launching = held.value();
     const threaded = &l.threaded[@backingInt(lane)];
     const prepared = 2 * @as(usize, state.cap) + 3;
     var activated = false;
@@ -431,31 +499,14 @@ fn launch(l: *Lanes, lane: Lane) void {
         threaded.mutex.lockUncancelable(system());
         const available = threaded.busy_count < prepared;
         threaded.mutex.unlock(system());
-        if (available) return;
-        if (!activated and state.activated < state.dormant.len) {
+        if (available) return held;
+        if (!activated and launching.activated < launching.dormant.len) {
             activated = true;
-            state.dormant[state.activated].gate.set(system());
-            state.activated += 1;
+            launching.dormant[launching.activated].gate.set(system());
+            launching.activated += 1;
         }
         std.atomic.spinLoopHint();
     }
-}
-
-fn unqueue(s: *State, job: *Job) bool {
-    var prev: ?*Job = null;
-    const class = @backingInt(job.priority);
-    var it = s.head[class];
-    while (it) |j| : ({
-        prev = j;
-        it = j.next;
-    }) {
-        if (j != job) continue;
-        if (prev) |p| p.next = j.next else s.head[class] = j.next;
-        if (s.tail[class] == j) s.tail[class] = prev;
-        s.queued -= 1;
-        return true;
-    }
-    return false;
 }
 
 fn cancelEntry(context: *const anyopaque) void {
@@ -466,9 +517,17 @@ fn cancelEntry(context: *const anyopaque) void {
 
 pub fn stats(l: *Lanes, lane: Lane) Stats {
     const s = &l.states[@backingInt(lane)];
-    s.lock.lockUncancelable(system());
-    defer s.lock.unlock(system());
-    return .{ .queued = s.queued, .running = s.running, .threads = s.running, .@"inline" = s.inlined.load(.monotonic) };
+    var held = s.queue.acquireUncancelable(system());
+    defer held.deinit(system());
+    const queue = held.value();
+    return .{ .queued = queue.queued, .running = queue.running, .threads = queue.running, .@"inline" = s.inlined.load(.monotonic) };
+}
+
+/// Executor capacity the admitted calls hold, in units.
+pub fn charged(l: *Lanes) u32 {
+    var held = l.admission.acquireUncancelable(system());
+    defer held.deinit(system());
+    return l.units - held.value().executor.remaining();
 }
 
 fn system() Io {

@@ -1,11 +1,12 @@
 //! Spawn options std.Io cannot express. A foreign Io supports only defaults.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const native = @import("native.zig");
 const tasks = @import("../ops/tasks.zig");
 
 pub const Priority = @import("../scheduler/Task.zig").Priority;
-pub const Options = struct { stack_size: ?usize = null, priority: Priority = .normal };
+pub const Options = struct { stack_size: ?aegis.units.Bytes(usize) = null, priority: Priority = .normal };
 pub const ConcurrentError = Io.ConcurrentError;
 
 pub fn concurrentWith(io: Io, options: Options, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) ConcurrentError!Io.Future(@typeInfo(@TypeOf(function)).@"fn".return_type.?) {

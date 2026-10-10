@@ -152,9 +152,9 @@ fn pollSeeded(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink, virtual: 
     if (delivered > 0) return;
     switch (wait) {
         .nowait => {},
-        .ns => |ns| {
+        .up_to => |span| {
             f.waits += 1;
-            virtual.advance(.fromNanoseconds(ns));
+            virtual.advance(span.toIoDuration());
         },
         .forever => if (f.woken.swap(0, .acq_rel) == 0 and f.ops.items.len == 0 and f.batch.items.len == 0)
             @panic("reactor's fake: every task waits and nothing can wake one"),
@@ -217,7 +217,7 @@ fn pollIdle(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink) void {
     const sys = Io.Threaded.global_single_threaded.io();
     switch (wait) {
         .nowait => {},
-        .ns => |ns| sys.futexWaitTimeout(u32, &f.woken.raw, 0, .{ .duration = .{ .raw = .fromNanoseconds(ns), .clock = .awake } }) catch unreachable, // unreachable: a scheduler's thread is no `Threaded` task, so nothing cancels it
+        .up_to => |span| sys.futexWaitTimeout(u32, &f.woken.raw, 0, .{ .duration = .{ .raw = span.toIoDuration(), .clock = .awake } }) catch unreachable, // unreachable: a scheduler's thread is no `Threaded` task, so nothing cancels it
         .forever => sys.futexWaitUncancelable(u32, &f.woken.raw, 0),
     }
     f.woken.store(0, .release);

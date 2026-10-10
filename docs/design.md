@@ -2,8 +2,8 @@
 
 reactor implements Zig's blocking-shaped `std.Io` on completion engines with
 stackful tasks. A host may use the single-threaded `Loop`, the `Runtime` that
-implements `std.Io`, or the any-Io extensions. Production code depends only on
-std.
+implements `std.Io`, or the any-Io extensions. Production code depends on std
+and [aegis](https://github.com/pedronaugusto/aegis), the family's safety types.
 
 ## Layers and state owners
 
@@ -21,9 +21,10 @@ backend. The fake backend and virtual clock are test support.
 | Task stack, saved context and cancel hook | Task | Stack remains until its result and asynchronous owners are gone. |
 | Free stacks and size classes | Scheduler stack pools | Reserved at init; tagged atomic free lists prevent ABA. |
 | Global inbox, idle and searching counts, steals | Scheduler | Written by many threads on cache lines of their own; the read-mostly fields stay off them. |
-| Lane queues and call/cancel groups | Lanes | Queued jobs live in waiting task frames; executor relinquishes groups before return. |
-| Futex waiters | Operations | One lock per bucket; hooks cannot outlive their frames. |
+| Lane queues, launch workers, admission counts and executor capacity | Lanes | One guard each; queued jobs live in waiting task frames; executor relinquishes groups before return. |
+| Futex waiters | Operations | One spin guard per bucket; hooks cannot outlive their frames. |
 | Receive memory and registered buffers | Receiver pool | Unregister on every owning ring before releasing memory. |
+| A receiver's kernel request and delivered buffers | Receiver | One guard; a buffer ring's publication has a guard of its own. |
 | Resolver requests | Lookup | Bounded capacity includes detached requests until completion. |
 
 The root task stays on the home thread. io_uring's submitter remains its loop
@@ -153,3 +154,76 @@ conduit uses a thread-spin mutex with a parked holder in its zero-worker
 profile; relic has allocation, concurrency and transport questions; the
 Windows uplink fixture crashes between tests and needs adoption-time
 isolation.
+
+## Safety types
+
+Values that mean different things are different types, and data sits behind
+the lock that guards it. aegis supplies them; nothing here costs more than the
+hand-written form it replaced, and the hot paths were measured against the
+code before.
+
+- **Time.** The loop keeps one timeline, the awake clock. `clock.Awake` is a
+  point on it in nanoseconds, `clock.Tick` the same point in the wheel's
+  microseconds, `clock.Span` a length. They convert only through `clock`,
+  which says how each rounds: a timer's tick rounds up, a clock reading's
+  rounds down. A time from the caller (a deadline, `budget_time`, a stall
+  threshold) saturates at the ends of the timeline instead of wrapping: a
+  deadline 600 years away is a wait that never ends. `Wheel` takes and
+  returns ticks; inside, a tick is a plain integer, since its placement is bit
+  arithmetic on one kind of number. The kernel's own units (a timespec,
+  whole milliseconds for `poll`, 100 ns on Windows) are cut in one place each.
+- **Guards.** A lock beside its data is a `BlockingGuarded` (`Guarded`, the
+  spin form, for a few stores that never park): the lane queue, launch workers
+  and admission counts, the global inject queue, the spare-thread pool, a
+  receiver's mailbox and a buffer ring's publication, `net.Deadlines`' watch
+  list, a Windows job's notification mailbox, and a futex bucket's waiters. A
+  parked task keeps its bucket's guard until it is off its stack; the
+  scheduler releases it there.
+- **Limits.** Executor capacity is a `Budget`: two units per admitted call,
+  held by the call as a reservation from `admit` to `retire`, so a limit that
+  would wrap refuses instead. The spare pool's processors and threads are
+  `Buffer`s that cannot grow, and a Windows job's messages a `Ring` of 32.
+- **Identity.** A stack is a `Stacks.Stack` among all of a runtime's;
+  `Pool.Slot` is its place in one size class. `Stacks.locate` turns one into
+  the other and nothing else does. A provided-buffer group is a
+  `BufferRing.Id` with `BufferRing.Entries` buffers.
+- **Bytes.** Stack sizes, `zero_copy_min`, a lane's scratch and a receiver
+  pool's buffer length are `units.Bytes` in the options. Sizes and counts that
+  come from the caller are multiplied and rounded with checks at the point
+  they become a mapping or an allocation: past the address space they are
+  refused (`SystemResources`, `OutOfMemory`, `TooManyTasks`), as are a worker
+  count that would wrap the processor count.
+
+### Raw sites kept
+
+A plain integer or hand-written lock stays where one of these holds, and says
+which beside the code (`glint-ignore: A004 -- <reason>: docs/design.md#safety-types`):
+
+- **c-os-boundary**: the raw call itself: a `timespec`, `poll`'s i32 of
+  milliseconds, an epoll or kevent field, a ring's index mask, a buffer group
+  in the kernel's registration, an absolute deadline on the `real` or `boot`
+  clock handed to a kernel timer, Windows' 100 ns, and the completion key a
+  job notification carries (which holds the record's generation).
+- **measured-boundary**: the wheel's placement, validated where a tick enters.
+- **safe-type-internals**: `Stacks.locate` and the code that builds a stack
+  number from a slot, an atomic cell that holds an `Awake`'s integer.
+- **design**, no type fits:
+  - A bit lock inside a word: a task's `cancel` word and a group's `state`,
+    which std's `Io.Group` lays out.
+  - Lock-free structures: the run queues, the inboxes, and the tagged free
+    lists of stacks, lane closures and receive buffers. These are stacks of
+    indices with a tag against ABA, not generation-checked slot maps, and no
+    pool sits between the kernel and a lease.
+  - The standard-error mutex, held across `lockStderr` and `unlockStderr`, two
+    calls of std's vtable, and recursive by holder.
+  - `Signals`' table, which the handlers read without a lock.
+
+### Lock order
+
+Each lock is taken by itself, except these nestings, always in this order: a
+lane's queue before its launch workers, a receiver's mailbox before its buffer
+ring's publication, and a task's cancel bit before a futex bucket (a cancel
+hook runs under the bit and unlinks the waiter from its bucket). Every lock
+here is taken uncancelable, since a cancel must not leave one half held, and
+aegis's ordered guards only take a lock that may return `Canceled`; the order
+is kept by this list and the tests rather than a checked rank.

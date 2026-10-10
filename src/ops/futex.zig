@@ -8,6 +8,7 @@
 //! still switching away. A timed wait arms a timer on the task's processor
 //! and holds the task there until it has disarmed it.
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
 
@@ -18,7 +19,7 @@ const perform = @import("perform.zig");
 pub const bucket_count = 1024;
 
 pub const Table = struct {
-    buckets: [bucket_count]Bucket = @splat(.{}),
+    buckets: [bucket_count]Bucket = @splat(.init(.{})),
 
     fn bucket(table: *Table, ptr: *const u32) *Bucket {
         const address: usize = @intFromPtr(ptr); // safe: hashed, never dereferenced
@@ -27,37 +28,30 @@ pub const Table = struct {
     }
 };
 
-const Bucket = struct {
-    locked: std.atomic.Value(bool) = .init(false),
+/// A bucket's waiters, oldest first. Its sections are a few link stores:
+/// the spin lock never covers a park, a wake or a call out.
+const Chain = struct {
     head: ?*Waiter = null,
     tail: ?*Waiter = null,
 
-    fn lock(b: *Bucket) void {
-        while (b.locked.swap(true, .acquire)) {
-            while (b.locked.load(.monotonic)) std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(b: *Bucket) void {
-        b.locked.store(false, .release);
-    }
-
-    fn append(b: *Bucket, w: *Waiter) void {
+    fn append(c: *Chain, w: *Waiter) void {
         w.next = null;
-        w.prev = b.tail;
-        if (b.tail) |t| t.next = w else b.head = w;
-        b.tail = w;
+        w.prev = c.tail;
+        if (c.tail) |t| t.next = w else c.head = w;
+        c.tail = w;
         w.linked = true;
     }
 
-    fn remove(b: *Bucket, w: *Waiter) void {
-        if (w.prev) |p| p.next = w.next else b.head = w.next;
-        if (w.next) |n| n.prev = w.prev else b.tail = w.prev;
+    fn remove(c: *Chain, w: *Waiter) void {
+        if (w.prev) |p| p.next = w.next else c.head = w.next;
+        if (w.next) |n| n.prev = w.prev else c.tail = w.prev;
         w.next = null;
         w.prev = null;
         w.linked = false;
     }
 };
+
+const Bucket = aegis.Guarded(Chain);
 
 const Outcome = enum(u8) { waiting, woken, canceled, timed_out };
 
@@ -79,33 +73,34 @@ const Waiter = struct {
     /// A cancel of the waiting task: out of the bucket, and runnable.
     fn cancelHook(hook: *Task.Hook, t: *Task) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("hook", hook)); // safe: the field belongs to this record
-        w.bucket.lock();
+        var held = w.bucket.acquire();
         const was = w.linked;
         if (was) {
-            w.bucket.remove(w);
+            held.value().remove(w);
             w.outcome = .canceled;
         }
-        w.bucket.unlock();
+        held.deinit();
         if (was) w.scheduler.ready(t, .woken);
     }
 
     fn timedOut(d: *perform.Deadline) void {
         const w: *Waiter = @alignCast(@fieldParentPtr("deadline", d)); // safe: the field belongs to this record
-        w.bucket.lock();
+        var held = w.bucket.acquire();
         const was = w.linked;
         if (was) {
-            w.bucket.remove(w);
+            held.value().remove(w);
             w.outcome = .timed_out;
         }
-        w.bucket.unlock();
+        held.deinit();
         if (was) w.scheduler.ready(w.task.?, .completed);
     }
 };
 
+/// The parked task's guard is released once it is off its stack, which still holds the guard.
 fn unlockAfterPark(context: *anyopaque, t: *Task) void {
     _ = t;
-    const b: *Bucket = @ptrCast(@alignCast(context)); // safe: `wait` passed its bucket
-    b.unlock();
+    const held: *Bucket.Guard = @ptrCast(@alignCast(context)); // safe: `wait` passed its guard
+    held.deinit();
 }
 
 /// Waits while `ptr.*` is `expected`, until a wake, `timeout`, a cancel
@@ -116,24 +111,24 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
     const t = p.current orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
     var w: Waiter = .{ .ptr = ptr, .task = t, .bucket = b, .scheduler = s };
     if (cancelable) try t.enterWait(&w.hook);
-    b.lock();
+    var held = b.acquire();
     if (@atomicLoad(u32, ptr, .seq_cst) != expected) {
-        b.unlock();
+        held.deinit();
         t.leaveWait();
         s.spend();
         return;
     }
-    b.append(&w);
+    held.value().append(&w);
     if (perform.deadline(p, timeout)) |deadline| {
         if (!w.deadline.arm(s, deadline)) {
             // No room for a timer: return at once, a spurious wake.
-            b.remove(&w);
-            b.unlock();
+            held.value().remove(&w);
+            held.deinit();
             t.leaveWait();
             return;
         }
     }
-    Scheduler.park(.{ .func = unlockAfterPark, .context = b });
+    Scheduler.park(.{ .func = unlockAfterPark, .context = &held });
     // Back on the processor that armed the timer: disarm it there.
     w.deadline.disarm();
     t.leaveWait();
@@ -145,22 +140,22 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
 /// `Threaded`'s own mechanism.
 fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout: Io.Timeout, cancelable: bool) error{Canceled}!void {
     var w: Waiter = .{ .ptr = ptr, .task = null, .bucket = b, .scheduler = s };
-    b.lock();
+    var held = b.acquire();
     if (@atomicLoad(u32, ptr, .seq_cst) != expected) {
-        b.unlock();
+        held.deinit();
         return;
     }
-    b.append(&w);
-    b.unlock();
+    held.value().append(&w);
+    held.deinit();
     const sys = Scheduler.system();
     const outcome: error{Canceled}!void = if (cancelable)
         sys.futexWaitTimeout(u32, &w.word.raw, 0, timeout.toDeadline(sys))
     else
         sys.futexWaitUncancelable(u32, &w.word.raw, 0);
-    b.lock();
+    held = b.acquire();
     const still = w.linked;
-    if (still) b.remove(&w);
-    b.unlock();
+    if (still) held.value().remove(&w);
+    held.deinit();
     // A waker unlinked it and will set the word: wait for that, so the
     // waker never writes to a frame that is gone.
     if (!still) while (w.word.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &w.word.raw, 0);
@@ -174,19 +169,19 @@ pub fn wake(table: *Table, ptr: *const u32, max: u32) void {
     var woken: ?*Waiter = null;
     var last: ?*Waiter = null;
     var n: u32 = 0;
-    b.lock();
-    var it = b.head;
+    var held = b.acquire();
+    var it = held.value().head;
     while (it) |w| {
         it = w.next;
         if (w.ptr != ptr) continue;
-        b.remove(w);
+        held.value().remove(w);
         w.outcome = .woken;
         if (last) |l| l.next = w else woken = w;
         last = w;
         n += 1;
         if (n == max) break;
     }
-    b.unlock();
+    held.deinit();
     // Off the bucket, each waiter is now ours alone until we wake it.
     while (woken) |w| {
         woken = w.next;

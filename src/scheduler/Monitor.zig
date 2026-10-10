@@ -19,12 +19,14 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const clocks = @import("../clock.zig");
+
 /// What the monitor remembers of one processor between samples.
 const Sample = struct {
     blocking: u32 = 0,
-    blocking_since: u64 = 0,
+    blocking_since: clocks.Awake = .fromRaw(0),
     passes: u32 = 0,
-    passes_since: u64 = 0,
+    passes_since: clocks.Awake = .fromRaw(0),
     reported: bool = false,
 };
 
@@ -40,13 +42,13 @@ pub const Stall = struct {
 
 pub const records_kept = 32;
 const sites_logged = 64;
-const shortest_ns = 20 * std.time.ns_per_us;
+const shortest: clocks.Span = .fromRaw(20 * std.time.ns_per_us);
 const no_site = std.math.maxInt(usize);
-const longest_ns = 10 * std.time.ns_per_ms;
+const longest: clocks.Span = .fromRaw(10 * std.time.ns_per_ms);
 
 samples: []Sample,
-handoff_after_ns: u64,
-report_after_ns: ?u64,
+handoff_after: clocks.Span,
+report_after: ?clocks.Span,
 handoff: bool,
 thread: ?std.Thread = null,
 /// What the monitor sleeps on: moved to wake it early.
@@ -68,8 +70,8 @@ pub fn init(gpa: Allocator, processors: usize, handoff: bool, handoff_after: Io.
     return .{
         .samples = samples,
         .handoff = handoff,
-        .handoff_after_ns = @intCast(@max(handoff_after.nanoseconds, 0)),
-        .report_after_ns = if (report_after) |d| @intCast(@max(d.nanoseconds, 0)) else null,
+        .handoff_after = clocks.spanOf(handoff_after),
+        .report_after = if (report_after) |d| clocks.spanOf(d) else null,
     };
 }
 
@@ -82,8 +84,8 @@ fn system() Io {
     return Io.Threaded.global_single_threaded.io();
 }
 
-fn now() u64 {
-    return @intCast(@max(Io.Clock.awake.now(system()).nanoseconds, 0));
+fn now() clocks.Awake {
+    return clocks.awakeOf(Io.Clock.awake.now(system()));
 }
 
 /// From a processor: something to watch began while the monitor sleeps long.
@@ -105,14 +107,14 @@ pub fn stop(m: *Monitor) void {
 /// The monitor's body. `S` is the scheduler: its processors carry
 /// `blocking`, `passes` and `site`; it answers `handOff` and `allIdle`.
 pub fn run(m: *Monitor, s: anytype) void {
-    var delay: u64 = shortest_ns;
+    var delay = shortest;
     while (!s.stopping.load(.acquire)) {
         const t = now();
         var watching = false;
         for (s.processors, m.samples) |*p, *sample| {
             if (m.look(s, p, sample, t)) watching = true;
         }
-        delay = if (watching) shortest_ns else @min(delay * 2, longest_ns);
+        delay = if (watching) shortest else doubled(delay);
         const seen = m.word.load(.acquire);
         if (!watching and s.allIdle()) {
             m.parked.store(true, .seq_cst);
@@ -121,18 +123,18 @@ pub fn run(m: *Monitor, s: anytype) void {
             // sees `parked` and wakes the monitor.
             if (s.allIdle() and !s.stopping.load(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
             m.parked.store(false, .monotonic);
-            delay = shortest_ns;
+            delay = shortest;
             continue;
         }
-        m.slow.store(delay > shortest_ns, .monotonic);
-        system().futexWaitTimeout(u32, &m.word.raw, seen, .{ .duration = .{ .raw = .fromNanoseconds(@intCast(delay)), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
-        if (m.word.load(.acquire) != seen) delay = shortest_ns;
+        m.slow.store(delay.compare(shortest) == .gt, .monotonic);
+        system().futexWaitTimeout(u32, &m.word.raw, seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
+        if (m.word.load(.acquire) != seen) delay = shortest;
     }
 }
 
 /// One processor's sample; true when it needs watching closely: a blocking
 /// call under way, or one task holding it since the last sample.
-fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
+fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) bool {
     var watching = false;
     const blocking = p.blocking.load(.acquire);
     if (blocking & 3 == 1) {
@@ -140,7 +142,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
         if (sample.blocking != blocking) {
             sample.blocking = blocking;
             sample.blocking_since = t;
-        } else if (m.handoff and t - sample.blocking_since >= m.handoff_after_ns) {
+        } else if (m.handoff and clocks.since(sample.blocking_since, t).compare(m.handoff_after) != .lt) {
             if (s.handOff(p, blocking)) _ = m.handoffs.fetchAdd(1, .monotonic);
         }
     }
@@ -153,13 +155,19 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: u64) bool {
             sample.passes_since = t;
             sample.reported = false;
         } else if (!sample.reported) {
-            if (m.report_after_ns) |after| if (t - sample.passes_since >= after) {
+            if (m.report_after) |after| if (clocks.since(sample.passes_since, t).compare(after) != .lt) {
                 sample.reported = true;
-                m.record(.{ .site = p.site.load(.monotonic), .processor = p.index, .duration = .fromNanoseconds(@intCast(t - sample.passes_since)) });
+                m.record(.{ .site = p.site.load(.monotonic), .processor = p.index, .duration = clocks.since(sample.passes_since, t).toIoDuration() });
             };
         }
     } else sample.passes = passes;
     return watching;
+}
+
+/// Twice `delay`, at most `longest`.
+fn doubled(delay: clocks.Span) clocks.Span {
+    const twice = delay.mul(2) catch return longest;
+    return if (twice.compare(longest) == .gt) longest else twice;
 }
 
 fn record(m: *Monitor, stall: Stall) void {

@@ -6,11 +6,13 @@
 const Scheduler = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const clocks = @import("clock.zig");
 const fiber = @import("fiber.zig");
 const Stacks = @import("fiber/Stacks.zig");
 const Loop = @import("Loop.zig");
@@ -63,7 +65,11 @@ const trim_gap = 64 << 10;
 
 /// How long a processor with nothing to do looks for work before it
 /// waits in the kernel.
-const spin_ns = 20 * std.time.ns_per_us;
+/// A task whose budget has not begun to be spent in time: the awake clock
+/// reads zero only before the machine has run.
+const no_slice: clocks.Awake = .fromRaw(0);
+
+const spin_for: clocks.Span = .fromRaw(20 * std.time.ns_per_us);
 
 /// A processor: a loop, the tasks ready to run on it, and the context its
 /// scheduler runs in. Exactly one thread holds a processor at a time.
@@ -455,7 +461,7 @@ pub const Processor = struct {
         p.current = t;
         t.processor = p;
         t.budget = p.scheduler.budget_ops;
-        t.slice_start = 0;
+        t.slice_start = no_slice;
         if (watched) {
             // The root runs on the home thread alone: another thread holding
             // the home processor gives it back instead.
@@ -607,7 +613,7 @@ pub const Processor = struct {
                 // kernel flags them.
                 if (p.pollKernel(.nowait)) return true;
                 if (p.steal()) return true;
-                if (p.loop.clock.awake() - start > spin_ns) return false;
+                if (clocks.since(start, p.loop.clock.awake()).compare(spin_for) == .gt) return false;
             }
             std.atomic.spinLoopHint();
         }
@@ -645,12 +651,17 @@ pub const Processor = struct {
     }
 };
 
-const Shared = struct {
-    inject_lock: Io.Mutex = .init,
-    inject_head: ?*Task = null,
-    inject_tail: ?*Task = null,
+/// The global queue's two classes of waiting task, under its lock.
+const Injected = struct {
+    normal_head: ?*Task = null,
+    normal_tail: ?*Task = null,
     latency_head: ?*Task = null,
     latency_tail: ?*Task = null,
+};
+
+const Shared = struct {
+    inject: aegis.BlockingGuarded(Injected) = .init(.{}),
+    /// How many tasks the global queue holds, readable without its lock.
     inject_len: std.atomic.Value(u32) = .init(0),
     /// Processors waiting in their kernel.
     idle_count: std.atomic.Value(u32) = .init(0),
@@ -678,13 +689,15 @@ scheduling: Scheduling,
 measure_stacks: bool = false,
 budget_ops: u16,
 /// The longest a task runs through cancelation points without waiting.
-budget_ns: u64,
+budget: clocks.Span,
 /// Everything several processors write, on cache lines of their own: the
 /// read-mostly fields around it are read at every task switch.
 shared: Shared = .{},
+/// Serializes the claims on persistent listener queues, which live in each
+/// processor's own ring: no data of the scheduler's sits beside it.
+listeners: aegis.Guarded(void) = .init({}),
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
-listener_lock: std.atomic.Value(bool) = .init(false),
 holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
 stopping: std.atomic.Value(bool) = .init(false),
 
@@ -744,8 +757,8 @@ pub fn current() ?*Task {
 pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Processor {
     if (comptime builtin.os.tag != .linux) return caller;
     if (caller.loop.backend != .io_uring) return caller;
-    while (s.listener_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
-    defer s.listener_lock.store(false, .release);
+    var claiming = s.listeners.acquire();
+    defer claiming.deinit();
     for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.contains(fd)) return p;
     if (caller.loop.backend.io_uring.accepts.reserve(fd)) return caller;
     for (s.processors) |*p| if (p.loop.backend.io_uring.accepts.reserve(fd)) return p;
@@ -807,11 +820,11 @@ pub fn spend(s: *Scheduler) void {
         t.budget -= 1;
         if (t.budget % 8 != 0) return;
         const now = p.loop.clock.awake();
-        if (t.slice_start == 0) {
+        if (t.slice_start.eql(no_slice)) {
             t.slice_start = now;
             return;
         }
-        if (now - t.slice_start < s.budget_ns) return;
+        if (clocks.since(t.slice_start, now).compare(s.budget) == .lt) return;
     }
     _ = s.shared.forced_yields.fetchAdd(1, .monotonic);
     yield();
@@ -864,17 +877,18 @@ fn injectChain(s: *Scheduler, first: *Task, last: *Task, count: u32) void {
         if (task == last) break;
         task = next_task.?;
     }
-    s.shared.inject_lock.lockUncancelable(system());
+    var locked = s.shared.inject.acquireUncancelable(system());
+    const queue = locked.value();
     if (heads[0]) |head| {
-        if (s.shared.inject_tail) |tail| tail.next = head else s.shared.inject_head = head;
-        s.shared.inject_tail = tails[0];
+        if (queue.normal_tail) |tail| tail.next = head else queue.normal_head = head;
+        queue.normal_tail = tails[0];
     }
     if (heads[1]) |head| {
-        if (s.shared.latency_tail) |tail| tail.next = head else s.shared.latency_head = head;
-        s.shared.latency_tail = tails[1];
+        if (queue.latency_tail) |tail| tail.next = head else queue.latency_head = head;
+        queue.latency_tail = tails[1];
     }
     _ = s.shared.inject_len.fetchAdd(count, .release);
-    s.shared.inject_lock.unlock(system());
+    locked.deinit(system());
     s.wakeIdle();
 }
 
@@ -885,17 +899,18 @@ pub fn injectedLen(s: *const Scheduler) u32 {
 /// One task from the global queue for `p`.
 pub fn takeInjected(s: *Scheduler, p: *Processor) ?*Task {
     if (s.shared.inject_len.load(.acquire) == 0) return null;
-    s.shared.inject_lock.lockUncancelable(system());
-    defer s.shared.inject_lock.unlock(system());
-    const latency = s.shared.latency_head != null and (p.latency_state.runs < 8 or s.shared.inject_head == null);
-    const t = (if (latency) s.shared.latency_head else s.shared.inject_head) orelse return null;
+    var locked = s.shared.inject.acquireUncancelable(system());
+    defer locked.deinit(system());
+    const queue = locked.value();
+    const latency = queue.latency_head != null and (p.latency_state.runs < 8 or queue.normal_head == null);
+    const t = (if (latency) queue.latency_head else queue.normal_head) orelse return null;
     if (latency) {
         p.latency_state.runs +|= 1;
-        s.shared.latency_head = t.next;
-        if (s.shared.latency_head == null) s.shared.latency_tail = null;
+        queue.latency_head = t.next;
+        if (queue.latency_head == null) queue.latency_tail = null;
     } else {
-        s.shared.inject_head = t.next;
-        if (s.shared.inject_head == null) s.shared.inject_tail = null;
+        queue.normal_head = t.next;
+        if (queue.normal_head == null) queue.normal_tail = null;
     }
     t.next = null;
     _ = s.shared.inject_len.fetchSub(1, .release);
@@ -1070,22 +1085,22 @@ pub fn wakeAll(s: *Scheduler) void {
 /// (aligned to `extra_align`) below its record for the caller's context
 /// and result; null when every stack is in use. `entry` runs first.
 pub inline fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
-    const index = s.stacks.take() orelse return null;
-    return s.createAt(index, .{ .pool = &s.stacks.default_pool, .index = index }, kind, extra, extra_align, entry, .normal);
+    const taken = s.stacks.take() orelse return null;
+    return s.createAt(taken.stack, taken.at, kind, extra, extra_align, entry, .normal);
 }
 
-pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?usize, priority: Task.Priority) ?struct { *Task, [*]u8 } {
-    const index = s.stacks.takeSized(size) orelse return null;
-    return s.createAt(index, s.stacks.locate(index), kind, extra, extra_align, entry, priority);
+pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?aegis.units.Bytes(usize), priority: Task.Priority) ?struct { *Task, [*]u8 } {
+    const taken = s.stacks.takeSized(size) orelse return null;
+    return s.createAt(taken.stack, taken.at, kind, extra, extra_align, entry, priority);
 }
 
-inline fn createAt(s: *Scheduler, index: u32, location: Stacks.Location, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
+inline fn createAt(s: *Scheduler, index: Stacks.Stack, location: Stacks.Location, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     const pool = location.pool;
-    const top = pool.top(location.index);
+    const top = pool.top(location.slot);
     const record_at = std.mem.alignBackward(usize, top - @sizeOf(Task), @alignOf(Task));
     const extra_at = extra_align.backward(record_at - extra);
     const sp = std.mem.alignBackward(usize, extra_at, 16);
-    if (sp - pool.bottom(location.index) < pool.size / 2 or !pool.reach(location.index, sp - 48)) {
+    if (sp - pool.bottom(location.slot) < pool.size / 2 or !pool.reach(location.slot, sp - 48)) {
         s.stacks.give(index);
         return null;
     }
@@ -1107,7 +1122,7 @@ inline fn createAt(s: *Scheduler, index: u32, location: Stacks.Location, kind: T
         .budget = undefined,
         .slice_start = undefined,
     };
-    t.context = fiber.initial(pool.stack(location.index), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
+    t.context = fiber.initial(pool.stack(location.slot), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
     return .{ t, @ptrFromInt(extra_at) };
 }
 

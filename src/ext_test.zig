@@ -21,7 +21,7 @@ fn skipWithoutFibers() !void {
     if (!fiber.supported) return error.SkipZigTest;
 }
 
-const small: reactor.Runtime.Options = .{ .max_tasks = 256, .stack_size = 256 << 10, .offload = .none };
+const small: reactor.Runtime.Options = .{ .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none };
 
 fn ms(n: i64) Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(n), .clock = .awake } };
@@ -173,7 +173,7 @@ test "blocking runs the call on the caller under Threaded, and on a lane under a
     try testing.expectEqual(@as(u32, 21), try reactor.blocking(testing.io, .general, triple, .{7}));
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     try testing.expectEqual(@as(u32, 42), try reactor.blocking(io, .sync, triple, .{14}));
@@ -249,7 +249,7 @@ test "on real worker threads a native wait ends at its deadline or its cancel" {
     try skipWithoutFibers();
     if (is_windows) return error.SkipZigTest;
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 64, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 2, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     const io = t.io();
     // The idle fake never makes a descriptor ready.
@@ -320,7 +320,7 @@ test "a blocking hook runs a library's raw call on the sync lane" {
         }
     };
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     var id: std.Thread.Id = undefined;
     const hook = reactor.blockingHook(t.io());
@@ -438,7 +438,7 @@ test "r6: refused void value and narrow offloads return an error without running
     try skipWithoutFibers();
     var refusing: RefusingOffload = .init(testing.io, 0);
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10), .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
     defer t.deinit();
     const io = t.io();
     try checkOffloadRefusal(io);
@@ -456,7 +456,7 @@ test "r6: a refused blocking hook returns an error without touching its context"
     try skipWithoutFibers();
     var refusing: RefusingOffload = .init(testing.io, 0);
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10), .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
     defer t.deinit();
     var ran = false;
     const hook = reactor.blockingHook(t.io());
@@ -474,7 +474,7 @@ test "r6: fallible offloads preserve user errors and successful void results" {
     try testing.expect(ran);
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10 });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     try testing.expectError(error.RawFailure, reactor.blocking(t.io(), .general, originalOffloadError, .{}));
     ran = false;
@@ -497,7 +497,7 @@ fn waitOffload(io: Io, gate: *OffloadGate) !void {
 test "r6: canceling a queued void offload drains without invoking it" {
     try skipWithoutFibers();
     var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = 256 << 10, .offload = .{ .owned = .{ .general = 1 } } });
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10), .offload = .{ .owned = .{ .general = 1 } } });
     defer t.deinit();
     const io = t.io();
     var gate: OffloadGate = .{ .io = testing.io };

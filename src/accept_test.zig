@@ -74,7 +74,7 @@ test "closing one listener keeps a colliding listener reachable" {
 test "a ring keeps at most eight accepted sockets between accepts" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var runtime: Runtime = undefined;
-    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -118,7 +118,7 @@ test "accepting a burst keeps every connected peer" {
     const perform = @import("ops/perform.zig");
     const Scheduler = @import("Scheduler.zig");
     var runtime: Runtime = undefined;
-    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = 256 << 10 }) catch |err| switch (err) {
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
