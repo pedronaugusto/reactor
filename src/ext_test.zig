@@ -251,6 +251,20 @@ test "a listener's wake is a member of a wait beside other waitables, and next t
     try testing.expectError(error.Timeout, s.next(io, ms(10)));
 }
 
+test "a wake's handle is readable while it is signaled, until it is cleared" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var w = try reactor.Wake.init(io);
+    defer w.deinit(io);
+    var fds = [_]posix.pollfd{.{ .fd = w.handle(), .events = posix.POLL.IN, .revents = 0 }};
+    try testing.expectEqual(@as(usize, 0), try posix.poll(&fds, 0));
+    w.signal();
+    try testing.expectEqual(@as(usize, 1), try posix.poll(&fds, 0));
+    w.clear();
+    fds[0].revents = 0;
+    try testing.expectEqual(@as(usize, 0), try posix.poll(&fds, 0));
+}
+
 test "the last listener to stop puts the previous handler back" {
     if (is_windows) return error.SkipZigTest;
     const io = testing.io;

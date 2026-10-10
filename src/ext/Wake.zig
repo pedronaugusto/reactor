@@ -28,3 +28,16 @@ pub fn deinit(w: *Wake, io: Io) void {
 pub fn signal(w: *Wake) void {
     w.notify.set();
 }
+
+/// The kernel object a signal sets, for a program with a wait loop of its own
+/// (`poll` for readability on POSIX, a wait on the handle on Windows). A wait
+/// of reactor's clears the signal it reports; a program that waits on this
+/// itself calls `clear`.
+pub fn handle(w: *const Wake) Io.File.Handle {
+    return w.notify.handle;
+}
+
+/// Clears a signal that a wait outside reactor saw.
+pub fn clear(w: *Wake) void {
+    w.notify.clear();
+}
