@@ -51,7 +51,7 @@ pub const Pool = struct {
         std.debug.assert(!options.buffer_len.eql(.fromRaw(0)));
         std.debug.assert(options.buffers > 0);
         // Sizes come from the caller: a pool too large to count is too large to allocate.
-        const length = options.buffer_len.convert(usize) catch unreachable; // unreachable: a u32 byte count fits a usize
+        const length = options.buffer_len.convert(usize);
         const size = length.mul(options.buffers) catch return error.OutOfMemory;
         const memory = try gpa.alloc(u8, size.raw());
         errdefer gpa.free(memory);

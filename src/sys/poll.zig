@@ -40,7 +40,6 @@ pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
         },
         .revents = 0,
     };
-    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; poll counts in an i32 of milliseconds
     const timeout: i32 = @intCast(@min(wait.raw(), std.math.maxInt(i32)));
     const rc = posix.system.poll(&fds, @intCast(entries.len), timeout);
     switch (posix.errno(rc)) {

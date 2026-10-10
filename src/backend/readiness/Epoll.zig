@@ -121,8 +121,7 @@ pub fn wait(e: *Epoll, timeout: Wait) readiness.PollError![]const linux.epoll_ev
         .nowait => 0,
         .forever => -1,
         .up_to => |span| if (e.armWait(span)) -1 else blk: {
-            const ms = span.convert(.millisecond, u64, .up) catch unreachable; // unreachable: rounding a u64 of nanoseconds up to milliseconds fits the same width
-            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; epoll_wait counts in an i32 of milliseconds
+            const ms = span.convert(.millisecond, u64, .up);
             break :blk @intCast(@min(ms.raw(), std.math.maxInt(i32)));
         },
     };
@@ -153,7 +152,6 @@ fn armWait(e: *Epoll, span: timeline.Span) bool {
         break :blk fd;
     };
     // Zero would disarm it: a nanosecond instead.
-    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; a timerfd of zero disarms, so the least wait is a nanosecond
     const cut = timeline.parts(.fromRaw(@max(span.raw(), 1)));
     const spec: linux.itimerspec = .{
         .it_interval = .{ .sec = 0, .nsec = 0 },

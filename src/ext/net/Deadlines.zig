@@ -45,15 +45,16 @@ tick: std.atomic.Value(i64),
 nudge: std.atomic.Value(u32) = .init(0),
 
 const unarmed: clock.Awake = .fromRaw(0);
+/// What an `Awake` of zero is armed as: the first nanosecond.
+const soonest: clock.Awake = .fromRaw(1);
 
 /// One socket's operation deadline.
 pub const Watch = struct {
     /// Its place among the watched; not to be touched.
     node: std.DoublyLinkedList.Node = .{},
     socket: Io.net.Socket.Handle,
-    /// The armed operation's deadline, as an `Awake`'s nanoseconds; zero
-    /// when none is armed.
-    deadline: std.atomic.Value(u64) = .init(unarmed.raw()),
+    /// The armed operation's deadline; `unarmed` when none is.
+    deadline: aegis.Atomic(clock.Awake) = .init(unarmed),
     /// Set once a deadline fired and the socket was aborted.
     fired: std.atomic.Value(bool) = .init(false),
 
@@ -115,7 +116,7 @@ pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
 /// Stops watching `w`, which has no operation under way. Once this
 /// returns, nothing touches `w` or its socket.
 pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
-    assert(w.deadline.load(.monotonic) == unarmed.raw());
+    assert(w.deadline.load(.monotonic).eql(unarmed));
     if (native.runtimeOf(io) != null) return;
     var held = d.watching.acquireUncancelable(io);
     defer held.deinit(io);
@@ -166,8 +167,8 @@ fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
     // The watching task reads the awake clock.
     const at: Io.Timestamp = if (deadline.clock == .awake) deadline.raw else .{ .nanoseconds = Io.Clock.awake.now(io).nanoseconds +| deadline.durationFromNow(io).raw.nanoseconds };
     // Zero means unarmed, so a deadline at the very start is the next tick.
-    // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; the atomic cell holds an `Awake`'s integer
-    w.deadline.store(@max(1, clock.awakeOf(at).raw()), .release);
+    const stamp = clock.awakeOf(at);
+    w.deadline.store(if (stamp.eql(unarmed)) soonest else stamp, .release);
     if (d.armed.fetchAdd(1, .seq_cst) == 0 and d.parked.load(.seq_cst) == 1) {
         d.parked.store(0, .seq_cst);
         io.futexWake(u32, &d.parked.raw, 1);
@@ -175,7 +176,7 @@ fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
 }
 
 fn disarm(d: *Deadlines, w: *Watch) void {
-    w.deadline.store(unarmed.raw(), .release);
+    w.deadline.store(unarmed, .release);
     _ = d.armed.fetchSub(1, .seq_cst);
 }
 
@@ -206,7 +207,7 @@ fn scan(d: *Deadlines, io: Io) void {
     var it = held.value().watches.first;
     while (it) |node| : (it = node.next) {
         const w: *Watch = @fieldParentPtr("node", node);
-        const deadline = clock.Awake.fromRaw(w.deadline.load(.acquire));
+        const deadline = w.deadline.load(.acquire);
         if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.load(.acquire)) continue;
         w.fired.store(true, .release);
         abort(io, w.socket);

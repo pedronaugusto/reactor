@@ -408,6 +408,7 @@ test "dump streams a parked task without visiting its live stack" {
     const io = t.io();
     var event: Io.Event = .unset;
     var task = try io.concurrent(parkForDump, .{ io, &event });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer task.cancel(io) catch {};
     t.runtime.run(.nowait);
     var buffer: [4096]u8 = undefined;

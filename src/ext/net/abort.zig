@@ -20,10 +20,10 @@ pub fn abort(io: Io, socket: Io.net.Socket.Handle) void {
             .code = windows.IOCTL.AFD.PARTIAL_DISCONNECT,
             .in = std.mem.asBytes(&info),
         } };
-        // ziglint-ignore: Z026 a socket that cannot be disconnected is ended already, which is what this asks
+        // glint-ignore: Z026 -- a socket that cannot be disconnected is ended already, which is what this asks
         _ = io.operate(operation) catch {};
         return;
     }
-    // ziglint-ignore: Z026 a socket that cannot be shut down is ended already, which is what this asks
+    // glint-ignore: Z026 -- a socket that cannot be shut down is ended already, which is what this asks
     io.vtable.netShutdown(io.userdata, socket, .both) catch {};
 }

@@ -100,13 +100,17 @@ const Watchdog = struct {
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(120), .clock = .awake });
         while (w.done.load(.acquire) == 0) {
             if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline.raw.nanoseconds) break;
+            // glint-ignore: Z026 -- a timed futex wait ends by wake, timeout or error alike, and the loop reads the flag it waited on
             io.futexWaitTimeout(u32, &w.done.raw, 0, .{ .deadline = deadline }) catch {};
         }
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
         var output = std.Io.File.stderr().writer(io, &buffer);
+        // glint-ignore: Z026 -- the watchdog is ending the process; a failed write to stderr has nowhere to be reported
         output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
+        // glint-ignore: Z026 -- the watchdog is ending the process; a failed dump has nowhere to be reported
         w.runtime.dump(&output.interface) catch {};
+        // glint-ignore: Z026 -- the watchdog is ending the process; a failed flush has nowhere to be reported
         output.interface.flush() catch {};
         std.process.exit(70);
     }

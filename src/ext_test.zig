@@ -591,6 +591,7 @@ test "r6: canceling a queued void offload drains without invoking it" {
     const io = t.io();
     var gate: OffloadGate = .{ .io = testing.io };
     var first = try io.concurrent(waitOffload, .{ io, &gate });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = first.cancel(io) catch {};
     // Drive the first task onto the lane before blocking on test infrastructure.
     t.runtime.run(.nowait);
@@ -598,6 +599,7 @@ test "r6: canceling a queued void offload drains without invoking it" {
     try gate.begun.wait(testing.io);
     var ran = false;
     var queued = try io.concurrent(voidOffload, .{ io, &ran });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = queued.cancel(io) catch {};
     t.runtime.run(.nowait);
     try testing.expectEqual(@as(u32, 1), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].queued);

@@ -31,26 +31,23 @@ pub fn spanOf(d: Io.Duration) Span {
 
 /// How long ago `then` was at `now`: nothing when the clock stepped back.
 pub fn since(then: Awake, now: Awake) Span {
-    return then.durationTo(now) catch .fromRaw(0);
+    return then.saturatingDurationTo(now);
 }
 
 /// `at` in the wheel's tick, rounded up: a timer never fires early.
 pub fn tickUp(at: Awake) Tick {
-    return at.convert(.microsecond, u64, .up) catch unreachable; // unreachable: a nanosecond count rounded up to microseconds fits the same width
+    return at.convert(.microsecond, u64, .up);
 }
 
 /// `at` in the wheel's tick, rounded down: the last tick that has begun.
 pub fn tickDown(at: Awake) Tick {
-    return at.convert(.microsecond, u64, .down) catch unreachable; // unreachable: a nanosecond count rounded down to microseconds fits the same width
+    return at.convert(.microsecond, u64, .down);
 }
 
 /// The nanoseconds a tick begins at, or the end of the timeline when the
 /// tick lies beyond it.
 pub fn awakeAt(tick: Tick) Awake {
-    return tick.convert(.nanosecond, u64, .exact) catch |err| switch (err) {
-        error.Overflow => .fromRaw(std.math.maxInt(u64)),
-        error.Inexact => unreachable, // unreachable: microseconds scale to whole nanoseconds
-    };
+    return tick.convert(.nanosecond, u64, .exact) catch .fromRaw(std.math.maxInt(u64));
 }
 
 /// A span as the two fields of a C `timespec`: whole seconds, then the

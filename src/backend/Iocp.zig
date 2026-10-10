@@ -705,7 +705,6 @@ fn timeoutFor(b: *Iocp, span: timeline.Span) ?u64 {
 
 /// `span` in the 100 ns units of Windows timers, rounded up.
 fn hectoNanoseconds(span: timeline.Span) u64 {
-    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; Windows timers count in 100 ns
     return std.math.divCeil(u64, span.raw(), 100) catch unreachable; // unreachable: the divisor is a constant
 }
 

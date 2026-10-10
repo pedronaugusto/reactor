@@ -353,6 +353,7 @@ fn echo(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
         var servers: Io.Group = .init;
         defer servers.cancel(io);
         var acceptor = try io.concurrent(acceptAll, .{ io, &server, connections, &servers });
+        // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
         defer acceptor.cancel(io) catch {};
         const t0 = now(io);
         var clients: Io.Group = .init;
@@ -391,6 +392,7 @@ fn accepts(r: Report, io: Io, c: Config) !void {
         // and the client's ports are free again at once.
         var byte: [1]u8 = undefined;
         var data: [1][]u8 = .{&byte};
+        // glint-ignore: Z026 -- the server closed first, so the read ends in end of stream or a reset, and either is the end this wants
         _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
         stream.close(io);
     }
@@ -407,6 +409,7 @@ fn files(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     const file = try tmp.createFile(io, path, .{ .read = true });
     defer {
         file.close(io);
+        // glint-ignore: Z026 -- cleanup of a scratch file the run is done with
         tmp.deleteFile(io, path) catch {};
     }
     var pool: ?reactor.net.Receiver.Pool = null;
@@ -628,6 +631,7 @@ fn receivers(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     defer server.deinit(io);
     const n: usize = if (c.smoke) 100 else 100_000;
     var task = try io.concurrent(receiverAccept, .{ io, &pool, &server });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer task.cancel(io) catch {};
     const t0 = now(io);
     try client(io, server.socket.address, n);
@@ -642,6 +646,7 @@ fn openStat(r: Report, io: Io, c: Config) !void {
     const path = "reactor-bench-open.bin";
     const file = try dir.createFile(io, path, .{});
     file.close(io);
+    // glint-ignore: Z026 -- cleanup of a scratch file the run is done with
     defer dir.deleteFile(io, path) catch {};
     const n: usize = if (c.smoke) 4 else 20_000;
     const start = now(io);
@@ -671,6 +676,7 @@ fn bulk(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer server.deinit(io);
     var receiver = try io.concurrent(drainBulk, .{ io, &server, messages * c.bytes });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = receiver.cancel(io) catch {};
     const stream = try server.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
@@ -742,6 +748,7 @@ test "r6: an echo peer ending before its reply cannot count as completed work" {
         }
     };
     var closer = try io.concurrent(ClosingPeer.run, .{ io, &server });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer closer.cancel(io) catch {};
     try testing.expectError(error.EndOfStream, client(io, server.socket.address, 1));
     try closer.await(io);

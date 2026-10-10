@@ -69,7 +69,6 @@ pub fn init(s: *Pool, gpa: Allocator, options: Options) InitError!void {
     const page = memory.pageSize();
     // The size is the caller's: one past the address space cannot be reserved, so it is
     // refused before it is rounded, and the stride and every slab are sized with checks.
-    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the least stack is four pages, and the mapping is in plain bytes
     const wanted = @max(options.size.raw(), 4 * page);
     const size = std.mem.alignBackward(usize, std.math.add(usize, wanted, page - 1) catch return error.SystemResources, page);
     const with_guard = Bytes.fromRaw(size).add(Bytes.fromRaw(page)) catch return error.SystemResources;

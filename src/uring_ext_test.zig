@@ -352,6 +352,7 @@ test "a runtime with no thread of its own runs the conformance suite in 1 ms fra
     var failure: shakedown.conformance.Failure = undefined;
     var done: std.atomic.Value(bool) = .init(false);
     var suite = try io.concurrent(conformance, .{ io, &failure, &done });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = suite.cancel(io) catch {};
     // The host's frames: a millisecond of the runtime's time each.
     var frames: usize = 0;
@@ -430,8 +431,10 @@ test "a socket close reports EOF while unrelated reads remain pending" {
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &out } })).net_write;
     try testing.expectEqual(@as(usize, 1), try pendingRead(io, pair[0].socket.handle, ms(5000)));
     var peer = try io.concurrent(pendingRead, .{ io, pair[0].socket.handle, ms(100) });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = peer.cancel(io) catch {};
     var unrelated = try io.concurrent(pendingRead, .{ io, other[0].socket.handle, Io.Timeout.none });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = unrelated.cancel(io) catch {};
     r.run(.nowait);
     pair[1].close(io);
@@ -474,6 +477,7 @@ test "a listener's queued connection follows a consumer on another processor" {
     var done: Io.Event = .unset;
     const core = native.runtimeOf(io).?;
     var accepting = try io.concurrent(acceptOnProcessor, .{ io, &server, &core.processors[1], &done });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer _ = accepting.cancel(io) catch {};
     try done.waitTimeout(io, ms(100));
     try accepting.await(io);

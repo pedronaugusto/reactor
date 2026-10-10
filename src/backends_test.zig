@@ -503,6 +503,7 @@ test "a recycled Wake descriptor remains registered on readiness backends" {
                     w.signal();
                 }
             }.send, .{ io, &wake });
+            // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
             defer sender.cancel(io) catch {};
             try reactor.wait(io, .{ .wake = &wake }, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
             try sender.await(io);

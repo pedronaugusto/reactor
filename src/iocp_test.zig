@@ -438,7 +438,9 @@ test "several datagrams in one send, one request each" {
     const words = [_][]const u8{ "one", "two", "three" };
     var messages: [3]net.OutgoingMessage = undefined;
     for (&messages, words) |*m, w| m.* = .{ .address = &a.address, .data_ptr = w.ptr, .data_len = w.len };
-    try b.sendMany(io, &messages, .{});
+    const failed, const sent = b.sendManyTimeout(io, &messages, .{}, .none);
+    if (failed) |err| return err;
+    try std.testing.expectEqual(messages.len, sent);
     for (words) |w| {
         var buffer: [16]u8 = undefined;
         const message = try a.receive(io, &buffer);

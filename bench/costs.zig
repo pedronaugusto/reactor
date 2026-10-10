@@ -52,8 +52,8 @@ fn verifyDepth(gpa: std.mem.Allocator, runtime: *reactor.Runtime) !void {
     parks.shallow_release.set(io);
     if (task.await(io) != 176) return error.LiveStackCorrupted;
     const prefix = "parked_stack=";
-    const start = (std.mem.indexOf(u8, dump.written(), prefix) orelse return error.NoParkedTask) + prefix.len;
-    const end = std.mem.indexOfScalarPos(u8, dump.written(), start, '\n') orelse dump.written().len;
+    const start = (std.mem.find(u8, dump.written(), prefix) orelse return error.NoParkedTask) + prefix.len;
+    const end = std.mem.findScalarPos(u8, dump.written(), start, '\n') orelse dump.written().len;
     const depth = try std.fmt.parseInt(usize, dump.written()[start..end], 10);
     if (depth < 192 << 10) return error.DeepFrameOptimizedAway;
 }

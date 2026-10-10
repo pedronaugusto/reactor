@@ -175,6 +175,7 @@ const Pipe = struct {
 
     fn read(io: Io, file: Io.File, writer: windows.HANDLE) !void {
         var sending = try io.concurrent(send, .{writer});
+        // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
         defer sending.cancel(io) catch {};
         var byte: [1]u8 = undefined;
         try testing.expectEqual(@as(usize, 1), try file.readStreaming(io, &.{&byte}));

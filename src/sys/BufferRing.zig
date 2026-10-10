@@ -17,6 +17,12 @@ pub const Entries = aegis.units.Count(struct {}, u16);
 
 pub const Error = error{ Unsupported, SystemResources, Unexpected };
 
+/// The mask the kernel's ring arithmetic takes: the entries are a power of two.
+pub fn indexMask(entries: Entries) u16 {
+    const last = entries.sub(.fromRaw(1)) catch unreachable; // unreachable: a ring holds at least two entries
+    return last.raw(); // c-os-boundary: the kernel's ring arithmetic
+}
+
 pub fn init(fd: linux.fd_t, entries: Entries, id: Id) Error!BufferRing {
     const reg: linux.io_uring_buf_reg = .{
         .ring_addr = 0,
@@ -36,7 +42,6 @@ pub fn init(fd: linux.fd_t, entries: Entries, id: Id) Error!BufferRing {
     }
     errdefer unregister(fd, id);
     const bytes = ringBytes(entries);
-    // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the mmap offset that names the group
     const offset: u64 = 0x80000000 | (@as(u64, id.raw()) << 16);
     const memory = posix.mmap(null, bytes, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, offset) catch return error.SystemResources;
     return .{ .br = @ptrCast(memory.ptr), .entries = entries, .id = id, .fd = fd }; // safe: the kernel maps an array of io_uring_buf entries here

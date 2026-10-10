@@ -142,10 +142,10 @@ test "a million timers armed and nearly all disarmed" {
     const Count = struct {
         const Self = @This();
         n: usize = 0,
-        last: u64 = 0,
+        last: Tick = .fromRaw(0),
         pub fn fire(c: *Self, node: *Wheel.Node) void {
-            std.debug.assert(node.deadline.raw() >= c.last);
-            c.last = node.deadline.raw();
+            std.debug.assert(node.deadline.compare(c.last) != .lt);
+            c.last = node.deadline;
             c.n += 1;
         }
     };

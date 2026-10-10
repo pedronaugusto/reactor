@@ -68,7 +68,6 @@ pub inline fn take(s: *Stacks) ?Taken {
     const slot = s.default_pool.take() orelse return null;
     if (s.pools.len > 0) _ = s.total_in_use.fetchAdd(1, .monotonic);
     // The default class comes first, so its slots are the first stacks.
-    // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; Stacks alone turns a slot into a stack number
     return .{ .stack = .fromRaw(slot.raw()), .at = .{ .pool = &s.default_pool, .slot = slot } };
 }
 fn poolAt(s: *Stacks, index: usize) *Pool {
@@ -86,15 +85,15 @@ pub fn takeSized(s: *Stacks, bytes: ?Bytes) ?Taken {
         }
         const chosen = best orelse return null;
         const usable = s.poolAt(chosen).size;
-        var offset: u32 = 0;
+        var first: Stack = .fromRaw(0);
         for (0..s.pools.len + 1) |i| {
             const pool = s.poolAt(i);
             if (pool.size == usable) if (pool.take()) |slot| {
                 if (s.pools.len > 0) _ = s.total_in_use.fetchAdd(1, .monotonic);
-                // glint-ignore: A004 -- safe-type-internals: docs/design.md#safety-types; Stacks alone turns a slot into a stack number
-                return .{ .stack = .fromRaw(offset + slot.raw()), .at = .{ .pool = pool, .slot = slot } };
+                const number = first.advance(.fromRaw(slot.raw())) catch unreachable; // unreachable: the classes hold `count` stacks in all, and a number is below it
+                return .{ .stack = number, .at = .{ .pool = pool, .slot = slot } };
             };
-            offset += pool.count;
+            first = first.advance(.fromRaw(pool.count)) catch unreachable; // unreachable: the pools hold `count` stacks in all, which a stack number holds
         }
         previous = usable;
     }

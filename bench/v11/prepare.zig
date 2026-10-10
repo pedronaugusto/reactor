@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const fixture = args[3];
     const clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, fixture } });
     if (clone.term != .exited or clone.term.exited != 0) return error.CloneFailed;
-    const working = try std.fmt.allocPrint(gpa, "{s}/.v11-compiled", .{fixture});
+    const working = try gpa.print("{s}/.v11-compiled", .{fixture});
     const work_clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, working } });
     if (work_clone.term != .exited or work_clone.term.exited != 0) return error.CloneFailed;
     var dir = try Io.Dir.cwd().openDir(io, fixture, .{ .iterate = true });
@@ -33,8 +33,8 @@ pub fn main(init: std.process.Init) !void {
     const original_build = try dir.readFileAlloc(io, "build.zig", gpa, .limited(1 << 20));
     const build = try compileSources(gpa, try planning(gpa, original_build));
     const call = "    v11(b, tests, target, optimize);\n";
-    const at = if (std.mem.indexOf(u8, build, "    return needed;")) |pos| pos else try buildEnd(gpa, build);
-    const helper = try std.fmt.allocPrint(gpa,
+    const at = if (std.mem.find(u8, build, "    return needed;")) |pos| pos else try buildEnd(gpa, build);
+    const helper = try gpa.print(
         \\fn v11(b: *std.Build, tests: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {{
         \\    const shakedown = tests.root_module.import_table.get("shakedown") orelse return;
         \\    const reactor = b.createModule(.{{ .root_source_file = .{{ .cwd_relative = "{s}/src/reactor.zig" }}, .target = target, .optimize = optimize }});
@@ -89,7 +89,7 @@ fn replaceIo(gpa: std.mem.Allocator, bytes: []const u8, sites: *usize) ![]const 
 }
 
 fn buildEnd(gpa: std.mem.Allocator, build: []const u8) !usize {
-    const start = std.mem.indexOf(u8, build, "pub fn build(") orelse return error.NoBuild;
+    const start = std.mem.find(u8, build, "pub fn build(") orelse return error.NoBuild;
     var tokenizer: std.zig.Tokenizer = .init(try gpa.dupeSentinel(u8, build[start..], 0));
     var depth: usize = 0;
     var entered = false;
@@ -112,7 +112,7 @@ fn buildEnd(gpa: std.mem.Allocator, build: []const u8) !usize {
 /// script invocation replaces only this unexecuted repository-tooling step.
 fn planning(gpa: std.mem.Allocator, build: []const u8) ![]const u8 {
     const old = "const plan = b.addRunArtifact(dependency.artifact(\"preflight\"));";
-    const at = std.mem.indexOf(u8, build, old) orelse return build;
+    const at = std.mem.find(u8, build, old) orelse return build;
     const replacement =
         \\const plan = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--build-file" });
         \\            plan.addFileArg(dependency.path("build.zig"));

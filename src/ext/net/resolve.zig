@@ -59,6 +59,7 @@ pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpA
         if (getaddrinfo.available) return (getaddrinfo.lookup(host, port, options.family, out, null) catch return error.NameNotResolved).addresses;
         return error.ConcurrencyUnavailable;
     };
+    // glint-ignore: Z026 -- the lookup's own error is dropped on the way out: the caller gets the error that ended this call
     defer future.cancel(io) catch {};
     const found = try drain(io, &queue, options.family, out);
     future.await(io) catch |err| return switch (err) {

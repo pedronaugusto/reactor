@@ -190,7 +190,6 @@ pub fn wait(k: *Kqueue, timeout: Wait) readiness.PollError![]const Event {
         .forever => {},
         .up_to => |span| if (darwin) {
             // A timer that fires on time, instead of a coalesced timeout.
-            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the kevent's data field is an i64 of nanoseconds
             k.changes[k.change_count] = change(wait_ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, c.NOTE.NSECONDS | critical, @intCast(@min(span.raw(), std.math.maxInt(i64))), ignore_key);
             k.change_count += 1;
             k.wait_armed = true;

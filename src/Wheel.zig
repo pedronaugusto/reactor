@@ -140,7 +140,6 @@ pub fn next(w: *const Wheel) ?Tick {
         while (it) |n| : (it = n.next) {
             seen += 1;
             if (seen > exact_scan) return .fromRaw(w.slotStart(level, slot));
-            // glint-ignore: A004 -- measured-boundary: docs/design.md#safety-types; the wheel's placement is bit arithmetic on plain ticks
             earliest = @min(earliest, n.deadline.raw());
         }
         return .fromRaw(earliest);

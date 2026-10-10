@@ -29,8 +29,7 @@ pub const Group = struct {
         defer held.deinit(io);
         const br = held.value().*;
         const offset = @as(usize, g.first + index) * length;
-        // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the ring's index mask
-        linux.IoUring.buf_ring_add(br, memory[offset..][0..length], @intCast(index), g.entries.raw() - 1, 0);
+        linux.IoUring.buf_ring_add(br, memory[offset..][0..length], @intCast(index), BufferRing.indexMask(g.entries), 0);
         linux.IoUring.buf_ring_advance(br, 1);
     }
 };
@@ -68,9 +67,8 @@ pub fn init(gpa: Allocator, io: Io, memory: []u8, length: aegis.units.Bytes(u32)
         g.* = .{ .ring = ring, .owner = p, .ring_buffers = .init(br), .registration = registration, .id = id, .entries = entries, .first = first, .count = count };
         linux.IoUring.buf_ring_init(br);
         for (0..count) |i| {
-            const offset = (@as(usize, first) + i) * length.raw();
-            // glint-ignore: A004 -- c-os-boundary: docs/design.md#safety-types; the ring's index mask
-            linux.IoUring.buf_ring_add(br, memory[offset..][0..length.raw()], @intCast(i), entries.raw() - 1, @intCast(i));
+            const from = length.convert(usize).mul(@as(usize, first) + i) catch unreachable; // unreachable: `memory` holds every buffer, so their offsets fit a usize
+            linux.IoUring.buf_ring_add(br, memory[from.raw()..][0..length.raw()], @intCast(i), BufferRing.indexMask(entries), @intCast(i));
         }
         linux.IoUring.buf_ring_advance(br, @intCast(count));
         made += 1;
