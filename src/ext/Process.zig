@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const windows = std.os.windows;
+const poll = @import("../sys/poll.zig");
 const process = @import("../sys/process.zig");
 const win32 = @import("../sys/win32.zig");
 
@@ -37,6 +38,19 @@ pub fn open(io: Io, id: std.process.Child.Id) OpenError!Process {
         return .{ .watch = copy, .id = id };
     }
     return .{ .watch = try process.open(id), .id = id };
+}
+
+/// Whether the process has ended, asked without waiting and without
+/// reaping it: the answer a wait for it would be ready on. A watch that
+/// cannot be asked counts as ended, as a wait counts it ready: the reap
+/// says what became of the process.
+pub fn ended(p: *const Process) bool {
+    if (is_windows) return win32.WaitForSingleObject(p.watch, 0) != win32.wait_timeout;
+    return switch (p.watch) {
+        .ended => true,
+        .descriptor => |h| (poll.descriptors(&.{.{ .handle = h, .interest = .readable }}, poll.look) catch return true) != null,
+        .exiting, .asking => process.endedUnreaped(p.id) != .running,
+    };
 }
 
 pub fn close(p: *Process, io: Io) void {

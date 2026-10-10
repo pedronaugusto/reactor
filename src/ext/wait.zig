@@ -139,7 +139,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable, kind: ?backend.K
         .priority => |h| if (kind == .kqueue) return false else .{ .priority = h },
         .process => |p| switch (p.watch) {
             .descriptor => |h| .{ .readable = h },
-            .ended, .asking => return false,
+            .ended, .asking, .exiting => return false,
         },
         .wake => |w| .{ .readable = w.notify.handle },
         .object => return false,
@@ -194,6 +194,12 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
                     }
                     continue;
                 },
+                // Asked first; if it runs still, the kqueue's `SIGCHLD` says
+                // when to ask again.
+                .exiting => |h| if (process.endedUnreaped(p.id) != .running) {
+                    ended = i;
+                    break;
+                } else .{ .handle = h, .interest = .readable },
             },
             .wake => |w| .{ .handle = w.notify.handle, .interest = .readable },
             .object => unreachable, // unreachable: Windows' alone, which waits in `onceWindows`
@@ -208,7 +214,20 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
         try io.sleep(limit.toIoDuration(), .awake);
         return null;
     }
-    const ready = poll.descriptors(entries[0..n], if (ended != null) poll.look else limit) catch return error.Unexpected;
+    var ready = poll.descriptors(entries[0..n], if (ended != null) poll.look else limit) catch return error.Unexpected;
+    // A `SIGCHLD` is some child's: when it is not this one's, take it and
+    // look again for the others.
+    while (ready) |r| {
+        const queue = switch (set[map[r]]) {
+            .process => |p| switch (p.watch) {
+                .exiting => |h| if (process.endedUnreaped(p.id) == .running) h else break,
+                else => break,
+            },
+            else => break,
+        };
+        process.drain(queue);
+        ready = poll.descriptors(entries[0..n], poll.look) catch return error.Unexpected;
+    }
     return if (ready) |r| map[r] else ended;
 }
 

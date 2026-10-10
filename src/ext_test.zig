@@ -129,6 +129,95 @@ test "a process still running times out; one that ended before it was opened is 
     _ = try done.wait(io);
 }
 
+const process_sys = @import("sys/process.zig");
+
+const is_bsd = switch (builtin.os.tag) {
+    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .dragonfly, .freebsd, .netbsd, .openbsd => true,
+    else => false,
+};
+
+/// Ends `child` without reaping it.
+fn endWithoutReaping(child: *const std.process.Child) !void {
+    try posix.kill(child.id.?, .KILL);
+}
+
+test "the ended query looks without waiting: running, then ended, as the wait says" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var child = try spawnSleeper(io, "5");
+    var p = try reactor.Process.open(io, child.id.?);
+    defer p.close(io);
+    try testing.expect(!p.ended());
+    try endWithoutReaping(&child);
+    try reactor.wait(io, .{ .process = &p }, ms(10_000));
+    try testing.expect(p.ended());
+    // Not reaped: asking again says the same, and the child's wait collects it.
+    try testing.expect(p.ended());
+    switch (try child.wait(io)) {
+        .signal => |sig| try testing.expectEqual(posix.SIG.KILL, sig),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "the ended query on a watch that asks, and on one already ended" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var child = try spawnSleeper(io, "5");
+    var asking: reactor.Process = .{ .watch = .asking, .id = child.id.? };
+    try testing.expect(!asking.ended());
+    var gone: reactor.Process = .{ .watch = .ended, .id = child.id.? };
+    try testing.expect(gone.ended());
+    try endWithoutReaping(&child);
+    // The kernel marks the child waitable a moment after the kill.
+    while (!asking.ended()) try io.sleep(.fromMilliseconds(1), .awake);
+    _ = try child.wait(io);
+}
+
+test "a process killed as it starts is watched, never only asked about" {
+    if (!is_bsd) return error.SkipZigTest;
+    const io = testing.io;
+    var refused: usize = 0;
+    // The window is a few milliseconds wide and opens when the kill comes
+    // soon after the exec: about one open in forty meets it.
+    for (0..240) |i| {
+        var child = try spawnSleeper(io, "5");
+        try io.sleep(.fromMilliseconds(1 + @as(i64, @intCast(i % 6))), .awake);
+        try endWithoutReaping(&child);
+        var p = try reactor.Process.open(io, child.id.?);
+        defer p.close(io);
+        if (p.watch == .exiting) refused += 1;
+        try testing.expect(p.watch != .asking);
+        try reactor.wait(io, .{ .process = &p }, ms(10_000));
+        _ = try child.wait(io);
+    }
+    std.debug.print("{d} of 240 opens met a process that was going\n", .{refused});
+}
+
+test "a watch on a process that is going wakes at its end, and not at another child's" {
+    if (!is_bsd) return error.SkipZigTest;
+    const io = testing.io;
+    var watched = try spawnSleeper(io, "5");
+    var p: reactor.Process = .{ .watch = try process_sys.exiting(watched.id.?), .id = watched.id.? };
+    defer p.close(io);
+    try testing.expect(p.watch == .exiting);
+    // Another child ends: its SIGCHLD reaches the watch, which looks on.
+    var other = try spawnSleeper(io, "0");
+    try testing.expectError(error.Timeout, reactor.wait(io, .{ .process = &p }, ms(100)));
+    _ = try other.wait(io);
+    try testing.expect(!p.ended());
+    // Its own end ends the wait; a waiter on a long timeout is not left to a slice.
+    var waiting = try io.concurrent(struct {
+        fn run(i: Io, q: *reactor.Process) reactor.WaitError!void {
+            return reactor.wait(i, .{ .process = q }, ms(10_000));
+        }
+    }.run, .{ io, &p });
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try endWithoutReaping(&watched);
+    try waiting.await(io);
+    try testing.expect(p.ended());
+    _ = try watched.wait(io);
+}
+
 // Signals.
 
 test "a signal reaches every listener that asked for it, and only those" {

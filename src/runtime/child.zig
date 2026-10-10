@@ -54,7 +54,7 @@ pub fn childWait(userdata: ?*anyopaque, child: *Child) Child.WaitError!Child.Ter
             error.Timeout, error.SystemResources, error.Unsupported, error.Unexpected => return onLane(r, child),
         },
         .ended => {},
-        .asking => return onLane(r, child),
+        .asking, .exiting => return onLane(r, child),
     }
     // Ended: std's wait reaps it at once.
     return reap(r, child);

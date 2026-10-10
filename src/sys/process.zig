@@ -1,9 +1,13 @@
 //! A descriptor that becomes readable when a child process ends, without
 //! reaping it: a pidfd on Linux, a kqueue holding one `EVFILT_PROC`
-//! `NOTE_EXIT` registration on Darwin and the BSDs. Where there is
-//! neither, or the kernel refuses a zombie (Darwin answers `ESRCH`),
-//! `waitid` with `WNOWAIT` says whether the child has ended, leaving it
-//! unreaped. Windows' process handles are waitable as they are.
+//! `NOTE_EXIT` registration on Darwin and the BSDs. A kqueue refuses a
+//! process that has ended (`ESRCH`), and Darwin one that is ending too, for
+//! up to a few milliseconds more during which `waitid` still says it runs:
+//! that watch is a kqueue on `SIGCHLD` instead, which turns readable when
+//! some child has ended and leaves it to `endedUnreaped` to say which.
+//! Where there is no descriptor at all, `waitid` with `WNOWAIT` says
+//! whether the child has ended, leaving it unreaped. Windows' process
+//! handles are waitable as they are.
 const builtin = @import("builtin");
 const std = @import("std");
 const posix = std.posix;
@@ -17,6 +21,10 @@ pub const Watch = union(enum) {
     descriptor: Io.File.Handle,
     /// It had ended when the watch was opened.
     ended,
+    /// The kernel refused a watch on a process that is ending, and the
+    /// descriptor turns readable at each `SIGCHLD`: ask `endedUnreaped`
+    /// whenever it does, and `drain` it when the answer is no.
+    exiting: Io.File.Handle,
     /// This system has no descriptor for it: ask `endedUnreaped`.
     asking,
 };
@@ -26,6 +34,12 @@ pub const OpenError = error{ ProcessNotFound, SystemResources, Unexpected };
 const is_bsd = switch (os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .dragonfly, .freebsd, .netbsd, .openbsd => true,
     else => false,
+};
+
+/// `SIGCHLD`'s number, whether the system spells its signals as an enum.
+const child_signal: usize = switch (@typeInfo(@TypeOf(c.SIG.CHLD))) {
+    .@"enum" => @backingInt(c.SIG.CHLD),
+    else => c.SIG.CHLD,
 };
 
 /// A watch on `pid`, a child of this process that nobody has reaped yet.
@@ -56,13 +70,60 @@ pub fn open(pid: posix.pid_t) OpenError!Watch {
         var nothing: [0]c.Kevent = undefined;
         const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
         if (c.kevent(queue, &change, 1, &nothing, 0, &zero) < 0) {
+            const refused = posix.errno(@as(c_int, -1));
             _ = c.close(queue);
-            // A zombie is refused with ESRCH: ask whether it ended.
-            return asked(pid);
+            // A zombie, or a process on its way to being one, is refused
+            // with ESRCH.
+            return if (refused == .SRCH) exiting(pid) else asked(pid);
         }
         return .{ .descriptor = queue };
     }
     return asked(pid);
+}
+
+/// A watch on a process the kernel will not attach to: ended already (it
+/// was a zombie), or ending (it will be one within moments). `SIGCHLD` is
+/// watched before the process is asked about, so an end that comes after
+/// the answer "running" is never missed.
+pub fn exiting(pid: posix.pid_t) OpenError!Watch {
+    if (!is_bsd) return asked(pid);
+    const queue = c.kqueue();
+    if (queue < 0) return error.SystemResources;
+    var change = [_]c.Kevent{.{
+        .ident = child_signal,
+        .filter = c.EVFILT.SIGNAL,
+        .flags = c.EV.ADD | c.EV.ENABLE | c.EV.CLEAR,
+        .fflags = 0,
+        .data = 0,
+        .udata = 0,
+    }};
+    var nothing: [0]c.Kevent = undefined;
+    const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
+    if (c.kevent(queue, &change, 1, &nothing, 0, &zero) < 0) {
+        _ = c.close(queue);
+        return asked(pid);
+    }
+    const answer = endedUnreaped(pid);
+    if (answer == .running) return .{ .exiting = queue };
+    _ = c.close(queue);
+    return switch (answer) {
+        .ended => .ended,
+        .running => unreachable, // unreachable: returned above
+        .unknown => error.ProcessNotFound,
+    };
+}
+
+/// Takes what a signal watch has queued, so it is readable again only for
+/// the next signal.
+pub fn drain(queue: Io.File.Handle) void {
+    if (!is_bsd) return; // an `exiting` watch exists on the kqueue systems alone
+    var events: [8]c.Kevent = undefined;
+    var none: [0]c.Kevent = undefined;
+    const zero: c.timespec = .{ .sec = 0, .nsec = 0 };
+    while (true) {
+        const got = c.kevent(queue, &none, 0, &events, events.len, &zero);
+        if (got < events.len) return;
+    }
 }
 
 fn asked(pid: posix.pid_t) OpenError!Watch {
@@ -75,7 +136,7 @@ fn asked(pid: posix.pid_t) OpenError!Watch {
 
 pub fn close(w: Watch, io: std.Io) void {
     switch (w) {
-        .descriptor => |fd| {
+        .descriptor, .exiting => |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
             file.close(io);
         },
