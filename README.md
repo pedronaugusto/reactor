@@ -73,6 +73,13 @@ The default disables it: the hosted loopback measurements found it slower
 at every tested size. `sqpoll` explicitly requests a kernel polling thread;
 an unsupported request returns an error. Both options are Linux-specific.
 
+`workers` defaults to the logical CPUs less one, which work that computes
+needs. Tasks that do little but wake one another, such as a client and a
+server in one runtime trading small messages, run faster on fewer: each
+exchange then crosses threads that sleep. On macOS with 15 workers such a
+benchmark ran slower than on 2 to 4; on Linux's io_uring it scaled to 4 and
+held there.
+
 `measure_stacks` enables diagnostic painting for overall touched depth.
 `stats().parked_high_water` is retained across task release;
 `stack_high_water` is available with painting enabled. Profiling commits and
