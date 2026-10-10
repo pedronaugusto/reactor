@@ -78,6 +78,7 @@ pub fn start(io: Io, which: []const Signal) StartError!Signals {
     var it = set.iterator();
     while (it.next()) |s| if (freeSlot(s) == null) return error.TooManyListeners;
     l.* = .{ .used = true, .notify = try .open(), .wanted = set };
+    l.wake = .{ .notify = l.notify };
     it = set.iterator();
     while (it.next()) |s| {
         const first = count(s) == 0;
@@ -110,6 +111,13 @@ pub fn stop(s: *Signals, io: Io) void {
     s.* = undefined;
 }
 
+/// The wake this listener's deliveries set, to wait on beside other members
+/// of a `waitAny` set (`.wake`): when it reports, `next` with a zero timeout
+/// takes what was delivered. Valid until `stop`.
+pub fn wake(s: *const Signals) *Wake {
+    return &s.listener.wake;
+}
+
 pub const NextError = error{ Timeout, Unexpected } || Io.Cancelable;
 
 /// The next signal delivered since the last `next`, lowest first when
@@ -119,8 +127,7 @@ pub fn next(s: *Signals, io: Io, timeout: Io.Timeout) NextError!Signal {
     const deadline = timeout.toDeadline(io);
     while (true) {
         if (l.take()) |sig| return sig;
-        var wake: Wake = .{ .notify = l.notify };
-        wait.wait(io, .{ .wake = &wake }, deadline) catch |err| return switch (err) {
+        wait.wait(io, .{ .wake = &l.wake }, deadline) catch |err| return switch (err) {
             error.Timeout => error.Timeout,
             error.Canceled => error.Canceled,
             error.Unsupported, error.Unexpected => error.Unexpected,
@@ -135,6 +142,8 @@ const Set = std.EnumSet(Signal);
 const Listener = struct {
     used: bool = false,
     notify: Notify = undefined,
+    /// The same kernel object as a member of a wait; see `wake`.
+    wake: Wake = undefined,
     wanted: Set = .empty,
     delivered: std.atomic.Value(u16) = .init(0),
 

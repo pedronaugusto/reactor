@@ -237,6 +237,20 @@ test "a signal reaches every listener that asked for it, and only those" {
     try testing.expectError(error.Timeout, second.next(io, ms(10)));
 }
 
+test "a listener's wake is a member of a wait beside other waitables, and next takes what it reported" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var s = try reactor.Signals.start(io, &.{.user1});
+    defer s.stop(io);
+    var other = try reactor.Wake.init(io);
+    defer other.deinit(io);
+    try testing.expectError(error.Timeout, reactor.waitAny(io, &.{ .{ .wake = &other }, .{ .wake = s.wake() } }, ms(10)));
+    try posix.raise(.USR1);
+    try testing.expectEqual(@as(usize, 1), try reactor.waitAny(io, &.{ .{ .wake = &other }, .{ .wake = s.wake() } }, ms(5000)));
+    try testing.expectEqual(reactor.Signals.Signal.user1, try s.next(io, ms(0)));
+    try testing.expectError(error.Timeout, s.next(io, ms(10)));
+}
+
 test "the last listener to stop puts the previous handler back" {
     if (is_windows) return error.SkipZigTest;
     const io = testing.io;
