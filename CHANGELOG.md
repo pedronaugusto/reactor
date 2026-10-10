@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Wake.handle` and `Wake.clear`: the kernel object a signal sets, and the way to clear it, for a program with a wait loop of its own. lookout hands the same descriptor to its own callers.
 - `Signals.wake`: the wake a listener's deliveries set, to wait on beside other members of a `waitAny` set. When it reports, `next` with a zero timeout takes what was delivered. A program that waits on its input and on its resize signal together no longer needs a handler and a pipe of its own.
 
 ### Breaking
