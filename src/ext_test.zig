@@ -36,7 +36,7 @@ fn closeAll(fds: []const posix.fd_t) void {
     for (fds) |fd| _ = posix.system.close(fd);
 }
 
-// Waits on std's `Io.Threaded`: the calling thread, in slices.
+// Waits on std's `Io.Threaded`: the calling thread, through its batch.
 
 test "a wait on Threaded reports the readable member and times out on none" {
     if (is_windows) return error.SkipZigTest;
@@ -76,13 +76,31 @@ fn waitForever(io: Io, w: *reactor.Wake) reactor.WaitError!void {
     return reactor.wait(io, .{ .wake = w }, .none);
 }
 
-test "a cancel ends a wait on Threaded within a slice" {
+test "a cancel ends a wait on Threaded" {
     const io = testing.io;
     var wake = try reactor.Wake.init(io);
     defer wake.deinit(io);
     var waiting = io.concurrent(waitForever, .{ io, &wake }) catch return error.SkipZigTest;
     try io.sleep(.fromMilliseconds(10), .awake);
     try testing.expectError(error.Canceled, waiting.cancel(io));
+}
+
+fn contextSwitches() i64 {
+    const usage = posix.getrusage(posix.rusage.SELF);
+    return @intCast(usage.nvcsw + usage.nivcsw);
+}
+
+test "a blocked wait on Threaded sleeps in one poll, not in slices, and a write ends it" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    const a = try pipe();
+    defer closeAll(&a);
+    const before = contextSwitches();
+    try testing.expectError(error.Timeout, reactor.wait(io, .{ .readable = a[0] }, ms(300)));
+    // Slices of 5 ms would switch about 60 times.
+    try testing.expect(contextSwitches() - before < 20);
+    _ = posix.system.write(a[1], "x", 1);
+    try reactor.wait(io, .{ .readable = a[0] }, .none);
 }
 
 // Processes.

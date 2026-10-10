@@ -147,14 +147,69 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable, kind: ?backend.K
     return true;
 }
 
-/// Waits on the calling thread, in slices between which `io` is asked
-/// for a cancel, until a member is ready or `deadline` passes.
+/// Waits on the calling thread until a member is ready or `deadline`
+/// passes: through `io`'s own concurrent batch where every member is a
+/// descriptor (`batched`), otherwise in slices between which `io` is asked
+/// for a cancel.
 fn sliced(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!usize {
     if (try once(io, set, poll.look)) |i| return i;
+    if (try batched(io, set, deadline)) |i| return i;
     while (true) {
         try io.checkCancel();
         const next = sliceFor(deadline.toDurationFromNow(io)) orelse return error.Timeout;
         if (try once(io, set, next)) |i| return i;
+    }
+}
+
+/// The longest one batch wait lasts when the caller gave no deadline.
+const batch_bound: Io.Clock.Duration = .{ .raw = .fromSeconds(3600), .clock = .awake };
+
+/// A wait through `io`'s concurrent batch: a zero-length read for each
+/// readable member and a zero-length write for each writable one, which an
+/// `Io` completes once its descriptor is ready, moving no bytes. `Io.Threaded`
+/// waits for them in one `poll` it can interrupt for a cancel, so a blocked
+/// wait costs no wake at all where slices cost one every `slice` (2 s
+/// blocked: 3 context switches against 341, lookout on reactor, 2026-10-10).
+/// Null when it cannot be used, and the caller slices: a member that is not
+/// a descriptor (a priority event, a process with no watch descriptor, a
+/// Windows object), an `Io` without concurrent batches, or one that
+/// completed a member that a look then found not ready (an `Io` whose
+/// zero-length operation does not wait for readiness).
+fn batched(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!?usize {
+    if (is_windows) return null;
+    var storage: [max]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(storage[0..set.len]);
+    for (set, 0..) |m, i| {
+        const handle: Io.File.Handle, const write = switch (m) {
+            .readable => |h| .{ h, false },
+            .writable => |h| .{ h, true },
+            .wake => |w| .{ w.notify.handle, false },
+            .process => |p| switch (p.watch) {
+                .descriptor => |h| .{ h, false },
+                else => return null,
+            },
+            .priority, .object => return null,
+        };
+        const file: Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
+        batch.addAt(@intCast(i), if (write)
+            .{ .file_write_streaming = .{ .file = file, .data = &.{""} } }
+        else
+            .{ .file_read_streaming = .{ .file = file, .data = &.{} } });
+    }
+    defer batch.cancel(io);
+    while (true) {
+        // Never `.none`: with one member and no deadline `Io.Threaded`
+        // makes the operation at once instead of polling for it.
+        const bound: Io.Timeout = switch (deadline) {
+            .none => .{ .deadline = .fromNow(io, batch_bound) },
+            else => deadline,
+        };
+        batch.awaitConcurrent(io, bound) catch |err| switch (err) {
+            error.Timeout => if (deadline == .none) continue else return error.Timeout,
+            error.ConcurrencyUnavailable => return null,
+            error.Canceled => return error.Canceled,
+        };
+        return try once(io, set, poll.look);
     }
 }
 
