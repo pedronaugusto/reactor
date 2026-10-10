@@ -95,6 +95,43 @@ fn readOne(io: Io, socket: net.Socket.Handle, buffer: []u8) (Io.Cancelable || Io
     return r.data_len;
 }
 
+test "a socket write the send buffer has room for is made at once; one that would wait goes to the ring" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var l: Loop = undefined;
+    l.init(testing.allocator, .{ .backend = .io_uring }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer l.deinit(testing.allocator);
+    var sockets: [2]linux.fd_t = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
+    defer for (sockets) |fd| {
+        _ = linux.close(fd);
+    };
+    var bytes: [4096]u8 = @splat(0x5a);
+    var write: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } };
+    try testing.expect(try l.start(&write));
+    try testing.expectEqual(bytes.len, try (try write.result.io).net_write);
+    // Fill the send buffer: the next write waits in the ring for room.
+    while (true) {
+        var fill: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } };
+        if (!try l.start(&fill)) {
+            var drain: [1 << 16]u8 = undefined;
+            while (true) {
+                const rc = linux.recvfrom(sockets[1], &drain, drain.len, linux.MSG.DONTWAIT, null, null);
+                if (linux.errno(rc) != .SUCCESS) break;
+            }
+            while (try l.run(.once) == 0) {}
+            var out: [1]*Loop.Op = undefined;
+            const done = l.reap(&out);
+            try testing.expectEqual(@as(usize, 1), done.len);
+            try testing.expect(try (try done[0].result.io).net_write > 0);
+            break;
+        }
+    }
+}
+
 test "a cancel ends a read the kernel holds" {
     var r: Runtime = undefined;
     try runtime(&r, 1);

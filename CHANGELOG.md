@@ -41,6 +41,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On io_uring a stream read fills every buffer it is given, as on the other backends and `Io.Threaded`: a socket read with more than one buffer is a `recvmsg` and a file read a `readv`. It used to read the first buffer alone, so a stream reader asked for a slice smaller than its own buffer read a slice at a time (64 MiB through 4 KiB slices: 16.4 ms, now 5.2 ms; `Io.Threaded` 4.6 ms, in the lima VM).
 - A wait on a descriptor that is not open is ready, as `poll` says for a closed one, on every backend and under `Io.Threaded`; a number below zero used to panic the kqueue backend, fail the epoll backend with `Unexpected`, complete io_uring's with `Unexpected` and never end a thread's wait. The operation that follows reports the error. The kqueue and epoll pollers answer `Unpollable` to a number no descriptor has.
 - On Darwin a `Process` opened for a child that is ending, which `kqueue` refuses for up to a few milliseconds while `waitid` still says it runs, watches `SIGCHLD` on a kqueue and asks again at each, instead of asking every 5 ms.
 - A cancel sent from another thread to a task parked on a different processor no longer names a task that has ended: the request now lives in the wait's own record, and the task does not leave the wait until the processor has served it. Before, a task whose operation completed as its cancel was queued could be released first, and the processor read the released record (a crash in safe builds, a lost or misdirected cancel otherwise).
@@ -56,6 +57,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- On io_uring a socket write is tried as a call first, as the readiness backends do, and goes to the ring only when the send buffer is full (not under SQPOLL, nor where a zero-copy send applies). 64 MiB between two tasks over loopback: 6.0 ms, now 5.0 ms (`Io.Threaded` 4.8 ms).
+- A processor between tasks with one task to run next no longer wakes an idle one for it: the processor woken could only take that task away. On io_uring one connection's 64-byte round trips went from 184k to 262k a second, reads under deadlines from 193k to 250k, pooled receives from 172k to 247k (lima VM, seven workers).
 - Time, identity and lock state use aegis types: the loop's timeline is `clock.Awake`, `Tick` and `Span`; a stack's number and its place in a size class are distinct; every lock sits beside the data it guards (`BlockingGuarded`, and `Guarded` for futex buckets); lane admission holds its executor capacity as a `Budget` reservation. A timer armed on the awake clock reads the clock once less.
 - A task in the LIFO slot no longer wakes an idle processor: it cannot be stolen. Only a task displaced into the queue does.
 - Only `connect` links a kernel timeout on io_uring; other deadlines arm the wheel and cancel, which costs nothing when the operation finishes first.

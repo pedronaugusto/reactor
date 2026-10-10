@@ -1094,7 +1094,11 @@ pub fn notify(s: *Scheduler, p: *Processor) void {
     if (s.shared.idle_count.load(.seq_cst) == 0) return;
     // A spinning processor will find it.
     if (s.shared.searching.load(.seq_cst) > 0) return;
-    if (p.local.isEmpty() and p.latency.isEmpty() and p.lifo == null) return;
+    const runnable = p.local.len() + p.latency.len() + @intFromBool(p.lifo != null);
+    if (runnable == 0) return;
+    // Between tasks, this processor runs the one task it has next: a
+    // processor woken for it would only take it away.
+    if (runnable == 1 and p.current == null) return;
     s.wakeIdle();
 }
 

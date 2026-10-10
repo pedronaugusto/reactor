@@ -167,7 +167,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     const ring = r.core.processors[0].loop.backend.io_uring;
     @memset(pool.memory, 0x3d);
     var write: Loop.Op = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = pool.memory[0..4096], .offset = 0 } } };
-    try ring.submit(&write);
+    try testing.expect(!try ring.submit(&write));
     const sqe = ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask];
     try testing.expectEqual(linux.IORING_OP.WRITE_FIXED, sqe.opcode);
     // Use the ordinary loop path for delivery accounting after inspecting.
@@ -188,7 +188,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     try testing.expectEqual(@as(usize, 4096), try write.result.write_at);
     @memset(pool.memory[4096..], 0);
     var read: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = pool.memory[4096..], .offset = 0 } } };
-    try ring.submit(&read);
+    try testing.expect(!try ring.submit(&read));
     try testing.expectEqual(linux.IORING_OP.READ_FIXED, ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask].opcode);
     sink.completed = false;
     while (!sink.completed) try ring.poll(.forever, &sink);

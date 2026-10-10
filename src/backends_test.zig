@@ -346,6 +346,45 @@ test "a pipe in blocking mode is read when it is ready, and written in pieces it
     }
 }
 
+test "a stream read fills every buffer it is given, a reader's slice and then its own buffer, on each backend" {
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        const io = r.io();
+        var sent: [3000]u8 = undefined;
+        for (&sent, 0..) |*byte, i| byte.* = @truncate(i *% 13);
+
+        // A socket: what one call reads is all that was there, the slice
+        // filled first.
+        const pair = try tcpPair(io);
+        defer for (pair) |s| s.close(io);
+        var w = pair[1].writer(io, &.{});
+        try w.interface.writeAll(&sent);
+        var slice: [100]u8 = undefined;
+        var buffer: [4096]u8 = undefined;
+        var data: [2][]u8 = .{ &slice, &buffer };
+        // Loopback queues a write's bytes before the write returns.
+        const got = (try (try io.operate(.{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } })).net_read).data_len;
+        try testing.expectEqual(sent.len, got);
+        try testing.expectEqualSlices(u8, sent[0..100], &slice);
+        try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
+
+        // A pipe, the same.
+        const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+        defer read_end.close(io);
+        defer write_end.close(io);
+        var pw = write_end.writerStreaming(io, &.{});
+        try pw.interface.writeAll(&sent);
+        const n = try (try io.operate(.{ .file_read_streaming = .{ .file = read_end, .data = &data } })).file_read_streaming;
+        try testing.expectEqual(sent.len, n);
+        try testing.expectEqualSlices(u8, sent[0..100], &slice);
+        try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
+    }
+}
+
 fn readBatch(io: Io, sockets: [2]net.Socket.Handle, buffers: *[2][8]u8) !usize {
     var storage: [2]Io.Operation.Storage = undefined;
     var batch: Io.Batch = .init(&storage);

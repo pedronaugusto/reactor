@@ -95,7 +95,7 @@ pub const Backend = union(enum) {
     /// backend found it complete at once, its result set.
     pub fn submit(b: *Backend, o: anytype) SubmitError!bool {
         switch (b.*) {
-            .io_uring => |u| if (has_uring) try u.submit(o) else unreachable, // unreachable: no such backend here
+            .io_uring => |u| if (has_uring) return u.submit(o) else unreachable, // unreachable: no such backend here
             .epoll => |e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
             .kqueue => |k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here

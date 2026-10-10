@@ -15,11 +15,15 @@
 //! - lanes: `reactor.blocking` of an empty call on the `general` lane.
 //! - deadlines: 64-byte round trips on one connection, each read under
 //!   `net.Deadlines`.
+//! - stream: 64 MiB over loopback TCP between two tasks, written in 64 KiB
+//!   pieces and read through `Io.Reader` (a 64 KiB buffer): whole buffers,
+//!   and 4 KiB slices.
 //!
 //! `--io threaded` runs the `Io` workloads on std's `Io.Threaded` instead,
 //! for the same numbers on the interface's baseline; `--backend epoll`
-//! (or `kqueue`, `io_uring`) picks reactor's backend. Timings are
-//! wall-clock on this machine; CI only compiles this file.
+//! (or `kqueue`, `io_uring`) picks reactor's backend; `--stats` prints the
+//! runtime's steal and forced-yield counts after the workloads. Timings
+//! are wall-clock on this machine; CI only compiles this file.
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -53,10 +57,12 @@ const Config = struct {
     zero_copy_min: ?usize = null,
     sqpoll: bool = false,
     bytes: usize = 64 << 10,
+    mib: usize = 16,
     msg_ring_off: bool = false,
     linked_timeout_off: bool = false,
     fixed_files_off: bool = false,
     files_pool: bool = false,
+    stats: bool = false,
 
     fn wants(c: Config, workload: []const u8) bool {
         const o = c.only orelse return true;
@@ -76,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--task-size")) {
             i += 1;
             c.task_size = try std.fmt.parseInt(usize, args[i], 10);
-        } else if (std.mem.eql(u8, arg, "--latency")) c.latency = true else if (std.mem.eql(u8, arg, "--linked-timeout-off")) c.linked_timeout_off = true else if (std.mem.eql(u8, arg, "--fixed-files-off")) c.fixed_files_off = true else if (std.mem.eql(u8, arg, "--files-pool")) c.files_pool = true else if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
+        } else if (std.mem.eql(u8, arg, "--latency")) c.latency = true else if (std.mem.eql(u8, arg, "--linked-timeout-off")) c.linked_timeout_off = true else if (std.mem.eql(u8, arg, "--fixed-files-off")) c.fixed_files_off = true else if (std.mem.eql(u8, arg, "--files-pool")) c.files_pool = true else if (std.mem.eql(u8, arg, "--stats")) c.stats = true else if (std.mem.eql(u8, arg, "--smoke")) c.smoke = true else if (std.mem.eql(u8, arg, "--json")) c.json = true else if (std.mem.eql(u8, arg, "--io")) {
             i += 1;
             c.threaded = std.mem.eql(u8, args[i], "threaded");
         } else if (std.mem.eql(u8, arg, "--only")) {
@@ -91,6 +97,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--registered")) c.registered = true else if (std.mem.eql(u8, arg, "--sqpoll")) c.sqpoll = true else if (std.mem.eql(u8, arg, "--msg-ring-off")) c.msg_ring_off = true else if (std.mem.eql(u8, arg, "--zero-copy-min")) {
             i += 1;
             c.zero_copy_min = if (std.mem.eql(u8, args[i], "off")) null else try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--mib")) {
+            i += 1;
+            c.mib = try std.fmt.parseInt(usize, args[i], 10);
+            if (c.mib == 0 or c.mib > 4096) return error.InvalidSize;
         } else if (std.mem.eql(u8, arg, "--bytes")) {
             i += 1;
             c.bytes = try std.fmt.parseInt(usize, args[i], 10);
@@ -155,13 +165,18 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("files")) try files(r, gpa, io, c);
     if (c.wants("open-stat")) try openStat(r, io, c);
     if (c.wants("bulk")) try bulk(r, gpa, io, c);
+    if (c.wants("stream")) try streams(r, io, c);
     if (c.wants("waits")) try waits(r, io, c);
     if (c.wants("lanes")) try lanes(r, io, c);
     if (c.wants("deadlines")) try deadlines(r, io, c);
     if (c.wants("connect")) try connects(r, io, c);
     if (c.wants("resolve")) try resolves(r, io, c);
     if (c.wants("receiver")) try receivers(r, gpa, io, c);
-    _ = runtime;
+    if (c.stats) if (runtime) |rt| {
+        const s = rt.stats();
+        try r.w.print("stats    workers={d} steals={d} forced_yields={d}\n", .{ s.workers, s.steals, s.forced_yields });
+        try r.w.flush();
+    };
 }
 
 fn now(io: Io) Io.Timestamp {
@@ -672,7 +687,7 @@ fn drainBulk(io: Io, server: *Io.net.Server, total: usize) !void {
     _ = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{"ok"} } })).net_write;
 }
 fn bulk(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
-    const messages = if (c.smoke) 2 else @max(8, (16 << 20) / c.bytes);
+    const messages = if (c.smoke) 2 else @max(8, (c.mib << 20) / c.bytes);
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer server.deinit(io);
     var receiver = try io.concurrent(drainBulk, .{ io, &server, messages * c.bytes });
@@ -703,6 +718,78 @@ fn bulk(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
     const elapsed = nsBetween(start, now(io));
     try receiver.await(io);
     try r.line("bulk", "contiguous loopback send", @as(f64, @floatFromInt(messages * c.bytes)) / elapsed * std.time.ns_per_s / (1 << 20), "MiB/s");
+}
+
+// stream
+
+const StreamRead = enum { buffers, slices };
+
+/// Accepts one connection and writes `total` bytes to it in 64 KiB pieces.
+fn streamWriter(io: Io, server: *Io.net.Server, total: usize) !void {
+    const stream = try server.accept(io);
+    defer stream.close(io);
+    var piece: [64 << 10]u8 = undefined;
+    @memset(&piece, 0x69);
+    var sent: usize = 0;
+    while (sent < total) {
+        const n = try (try io.operate(.{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{piece[0..@min(piece.len, total - sent)]} } })).net_write;
+        if (n == 0) return error.ShortSend;
+        sent += n;
+    }
+}
+
+/// Reads `total` bytes through a stream reader: the reader's whole buffer
+/// each time, or into a 4 KiB slice, as a decoder copying out does.
+fn streamReader(io: Io, address: Io.net.IpAddress, total: usize, how: StreamRead) !void {
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var buffer: [64 << 10]u8 = undefined;
+    var reader = stream.reader(io, &buffer);
+    var received: usize = 0;
+    switch (how) {
+        .buffers => while (received < total) {
+            const got = try reader.interface.peekGreedy(1);
+            if (got[0] != 0x69 or got[got.len - 1] != 0x69) return error.BadPayload;
+            reader.interface.toss(got.len);
+            received += got.len;
+        },
+        .slices => {
+            var slice: [4 << 10]u8 = undefined;
+            while (received < total) {
+                const n = try reader.interface.readSliceShort(slice[0..@min(slice.len, total - received)]);
+                if (n == 0) return error.EndOfStream;
+                if (slice[0] != 0x69 or slice[n - 1] != 0x69) return error.BadPayload;
+                received += n;
+            }
+        },
+    }
+}
+
+fn streams(r: Report, io: Io, c: Config) !void {
+    const total: usize = if (c.smoke) 1 << 20 else 64 << 20;
+    const rounds: usize = if (c.smoke) 1 else 15;
+    for ([_]StreamRead{ .buffers, .slices }) |how| {
+        var best: f64 = std.math.inf(f64);
+        for (0..rounds) |_| {
+            var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+            defer server.deinit(io);
+            const start = now(io);
+            var writer = try io.concurrent(streamWriter, .{ io, &server, total });
+            // glint-ignore: Z026 -- cleanup after the run has judged the task; cancel hands back the task's own result, which the run no longer reads
+            defer _ = writer.cancel(io) catch {};
+            var reader = try io.concurrent(streamReader, .{ io, server.socket.address, total, how });
+            // glint-ignore: Z026 -- cleanup after the run has judged the task; cancel hands back the task's own result, which the run no longer reads
+            defer _ = reader.cancel(io) catch {};
+            try reader.await(io);
+            try writer.await(io);
+            best = @min(best, nsBetween(start, now(io)));
+        }
+        const name = switch (how) {
+            .buffers => "64 MiB, reader buffers, best",
+            .slices => "64 MiB, 4 KiB slices, best",
+        };
+        try r.line("stream", name, best / std.time.ns_per_ms, "ms");
+    }
 }
 
 fn spawnOptions(r: Report, io: Io, c: Config) !void {

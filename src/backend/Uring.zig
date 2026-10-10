@@ -321,7 +321,35 @@ pub fn consumePublished(u: *Uring) void {
     }
 }
 
-pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!void {
+/// Hands `o` to the ring; true when it was made at once instead, its
+/// result set (a socket write the send buffer had room for).
+pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!bool {
+    if (o.kind == .io and o.kind.io == .net_write and u.sendsNow(o.kind.io.net_write)) if (results.attempt(o.kind.io)) |result| {
+        o.result = .{ .io = result };
+        return true;
+    };
+    u.queue(o);
+    return false;
+}
+
+/// Whether a socket write is tried as a call before it goes to the ring.
+/// A send rarely waits, and made on the ring it costs a park and a reap;
+/// once the send buffer is full, the kernel retries it only when this
+/// thread next enters the ring: a bulk transfer over loopback ran 20%
+/// slower than `Io.Threaded` through the ring, and level tried first. Not
+/// under SQPOLL, whose point is no system calls, nor where a zero-copy
+/// send was asked for.
+fn sendsNow(u: *const Uring, w: Io.Operation.NetWrite) bool {
+    if (u.ring.flags & linux.IORING_SETUP_SQPOLL != 0) return false;
+    const min = u.zero_copy_min orelse return true;
+    if (!u.features.zero_copy) return true;
+    var total: usize = w.header.len;
+    for (w.data) |d| total +|= d.len;
+    return total < min;
+}
+
+/// Queues `o` on the ring; its completion comes back through `poll`.
+fn queue(u: *Uring, o: anytype) void {
     // The kernel's linked timeout is two more entries and a timer in the
     // kernel for each operation, and most operations finish before their
     // deadline: a read under a deadline lost 60% of its rate on a two-thread
@@ -458,14 +486,24 @@ const max_rw = 0x7ffff000;
 fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void {
     const sqe = u.entry();
     switch (operation.*) {
-        .file_read_streaming => |r| sqe.prep_read(r.file.handle, firstBuffer(r.data), std.math.maxInt(u64)),
+        // A read fills every buffer it is given, as `Threaded`'s does: a
+        // stream reader passes the caller's slice and then its own buffer,
+        // and reading only the first costs a call per slice.
+        .file_read_streaming => |r| if (nonEmpty(r.data) <= 1) {
+            sqe.prep_read(r.file.handle, firstBuffer(r.data), std.math.maxInt(u64));
+        } else {
+            o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
+            const m = &o.state.storage.scratch.io_uring.message;
+            sqe.prep_readv(r.file.handle, m.iovecs[0..gather(&m.iovecs, r.data)], std.math.maxInt(u64));
+        },
         .file_write_streaming => |w| sqe.prep_write(w.file.handle, firstChunk(w.header, w.data, w.splat), std.math.maxInt(u64)),
-        .net_read => |r| if (r.control.len == 0) {
+        .net_read => |r| if (r.control.len == 0 and nonEmpty(r.data) <= 1) {
             sqe.prep_recv(r.socket_handle, firstBuffer(r.data), 0);
         } else {
             o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.storage.scratch.io_uring.message;
-            m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = gather(&m.iovecs, r.data), .control = r.control.ptr, .controllen = @intCast(r.control.len), .flags = 0 };
+            const control: ?*anyopaque = if (r.control.len == 0) null else r.control.ptr;
+            m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = gather(&m.iovecs, r.data), .control = control, .controllen = @intCast(r.control.len), .flags = 0 };
             sqe.prep_recvmsg(r.socket_handle, &m.header, posix.MSG.CMSG_CLOEXEC);
         },
         .net_write => |w| {
@@ -738,7 +776,7 @@ fn settle(u: *Uring, o: anytype, sink: anytype) void {
         if (o.kind == .io and o.kind.io == .net_write) {
             o.state.uring = .{ .use_copy = true };
             u.active -= 1;
-            u.submit(o) catch unreachable; // unreachable: native submission queues or flushes an SQE
+            u.queue(o);
             return;
         }
     }
@@ -807,6 +845,13 @@ fn firstChunk(header: []const u8, data: []const []const u8, splat: usize) []cons
     const last = data[data.len - 1];
     if (splat > 0 and last.len > 0) return last[0..@min(last.len, max_rw)];
     return &.{};
+}
+
+/// How many of a read's buffers are not empty.
+fn nonEmpty(data: []const []u8) usize {
+    var n: usize = 0;
+    for (data) |d| n += @intFromBool(d.len > 0);
+    return n;
 }
 
 /// The non-empty buffers of a read, at most the iovec array's length.
