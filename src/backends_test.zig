@@ -385,6 +385,60 @@ test "a stream read fills every buffer it is given, a reader's slice and then it
     }
 }
 
+fn writeAll(io: Io, stream: net.Stream, bytes: []const u8) !void {
+    var w = stream.writer(io, &.{});
+    try w.interface.writeAll(bytes);
+}
+
+/// Drains `fd` outside the runtime when the test has stalled, so a loop
+/// thread stuck in a blocking send is let go and the test can fail.
+const Watchdog = struct {
+    fd: posix.fd_t,
+    finished: std.atomic.Value(bool) = .init(false),
+    stalled: std.atomic.Value(bool) = .init(false),
+
+    fn run(w: *Watchdog) void {
+        const io = testing.io;
+        for (0..200) |_| {
+            if (w.finished.load(.acquire)) return;
+            io.sleep(.fromMilliseconds(10), .awake) catch return;
+        }
+        while (!w.finished.load(.acquire)) {
+            w.stalled.store(true, .release);
+            var scratch: [1 << 16]u8 = undefined;
+            const rc = posix.system.recvfrom(w.fd, &scratch, scratch.len, posix.MSG.DONTWAIT, null, null);
+            if (posix.errno(rc) != .SUCCESS) io.sleep(.fromMilliseconds(1), .awake) catch return;
+        }
+    }
+};
+
+test "a write larger than the socket's buffers waits for the reader instead of holding the loop, with no worker to spare" {
+    for (readiness) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        const io = r.io();
+        const pair = try tcpPair(io);
+        defer for (pair) |s| s.close(io);
+        const big = try testing.allocator.alloc(u8, 8 << 20);
+        defer testing.allocator.free(big);
+        for (big, 0..) |*byte, i| byte.* = @truncate(i *% 31);
+        // pair[1] is the connecting end, which comes back in blocking mode.
+        var watchdog: Watchdog = .{ .fd = pair[0].socket.handle };
+        const thread = try std.Thread.spawn(.{}, Watchdog.run, .{&watchdog});
+        defer thread.join();
+        defer watchdog.finished.store(true, .release);
+        var writing = try io.concurrent(writeAll, .{ io, pair[1], big });
+        const got = try testing.allocator.alloc(u8, big.len);
+        defer testing.allocator.free(got);
+        var reader = pair[0].reader(io, &.{});
+        try reader.interface.readSliceAll(got);
+        try writing.await(io);
+        try testing.expect(!watchdog.stalled.load(.acquire));
+        try testing.expectEqualSlices(u8, big, got);
+    }
+}
+
 fn readBatch(io: Io, sockets: [2]net.Socket.Handle, buffers: *[2][8]u8) !usize {
     var storage: [2]Io.Operation.Storage = undefined;
     var batch: Io.Batch = .init(&storage);

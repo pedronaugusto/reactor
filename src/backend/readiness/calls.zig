@@ -3,7 +3,9 @@
 //! None of them waits. Each errno is mapped as `Io.Threaded` maps it for
 //! the same call, so a program sees the same errors on either `Io`.
 //!
-//! Sockets are read and written with `MSG_DONTWAIT`, whatever their mode.
+//! Sockets are read and written with `MSG_DONTWAIT`, whatever their mode,
+//! except where a send ignores it (Darwin, `socket.send_honors_dontwait`):
+//! the backend puts a socket there in non-blocking mode before it writes.
 //! Other descriptors are called only once `ready` says they are, in their
 //! own mode: one read takes what is there, and one write is kept within
 //! what a pipe takes whole (a write may always be short).

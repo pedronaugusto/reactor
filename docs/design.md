@@ -68,6 +68,8 @@ A deadline is the wheel's timer and a cancel of the operation, except for
 a linked timeout is two more entries and a kernel timer to save a cancel that
 most operations never need.
 
+Sockets are called with `MSG_DONTWAIT`, which a send on Darwin ignores while the socket is in blocking mode: there the backend puts a socket in non-blocking mode before it writes to it (`socket.send_honors_dontwait`), where elsewhere every socket keeps the mode it was opened in.
+
 Readiness records retain terminal read edges through the final bytes and EOF.
 A close epoch invalidates that hint along with cached readiness and stream
 kind before a descriptor number is reused.

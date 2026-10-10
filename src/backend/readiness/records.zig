@@ -97,8 +97,10 @@ pub fn Records(comptime Waiter: type) type {
             read_ended: bool = false,
             /// Whether the descriptor is a byte stream, once asked.
             stream: ?bool = null,
-            /// A listening socket the backend switched to non-blocking mode.
-            listener: bool = false,
+            /// The backend switched the descriptor to non-blocking mode: a
+            /// listening socket, and where a send ignores `MSG_DONTWAIT`
+            /// (`socket.send_honors_dontwait`) a socket that is written.
+            nonblocking: bool = false,
             /// Events in a row that found nobody waiting: at two the record
             /// lets go of the descriptor, which is waited on elsewhere now.
             idle_events: u8 = 0,

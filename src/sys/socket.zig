@@ -34,6 +34,15 @@ pub const Start = enum { blocking, nonblocking };
 
 const nonblock_flag: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
 
+/// Whether a send with `MSG_DONTWAIT` returns instead of waiting for room on
+/// a socket in blocking mode. Darwin's `send`, `sendto` and `sendmsg` wait
+/// anyway (its receives do not): a stream write larger than the free room in
+/// the send buffer then holds the calling thread until the peer has read,
+/// which on a loop whose reader is another task of that thread is forever.
+/// Where this is false a readiness loop writes only to sockets in
+/// non-blocking mode, and a socket it connects stays in it.
+pub const send_honors_dontwait = !builtin.os.tag.isDarwin();
+
 /// A socket of `family`, close-on-exec; on Darwin, where a send has no
 /// `MSG_NOSIGNAL` on every path, one that never raises `SIGPIPE`.
 pub fn open(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.Protocol, start: Start) OpenError!Handle {

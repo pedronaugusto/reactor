@@ -33,6 +33,7 @@ const op = @import("op.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const calls = @import("readiness/calls.zig");
+const socket = @import("../sys/socket.zig");
 const closes = @import("readiness/closes.zig");
 const records_ = @import("readiness/records.zig");
 
@@ -246,6 +247,7 @@ pub fn Readiness(comptime Poller: type) type {
                 .io => |operation| {
                     const fd, const direction = calls.subject(operation);
                     const how = calls.howOf(operation);
+                    self.nonblockingToSend(operation, fd);
                     // Known not ready: wait for the event without a call.
                     if (how == .call and self.notReady(fd, direction)) return self.park(w, fd, direction, how);
                     if (now(operation, fd, direction, how)) |result| {
@@ -263,12 +265,12 @@ pub fn Readiness(comptime Poller: type) type {
                 .accept => |fd| {
                     const index = try self.recordFor(fd);
                     const r = self.records.at(index);
-                    if (!r.listener) {
+                    if (!r.nonblocking) {
                         _ = calls.makeNonblocking(fd) catch |err| {
                             o.result = .{ .accept = err };
                             return true;
                         };
-                        r.listener = true;
+                        r.nonblocking = true;
                     }
                     if (calls.accept(fd)) |result| {
                         o.result = .{ .accept = result };
@@ -382,6 +384,23 @@ pub fn Readiness(comptime Poller: type) type {
             return drained;
         }
 
+        /// A socket about to be written is in non-blocking mode where its
+        /// send would otherwise wait for room (`socket.send_honors_dontwait`).
+        /// Once for the record; a descriptor that cannot be switched is left
+        /// to the call, which reports it.
+        fn nonblockingToSend(self: *Self, operation: Io.Operation, fd: posix.fd_t) void {
+            if (comptime socket.send_honors_dontwait) return;
+            switch (operation) {
+                .net_write, .net_send => {},
+                else => return,
+            }
+            const index = self.recordFor(fd) catch return;
+            const r = self.records.at(index);
+            if (r.nonblocking) return;
+            _ = calls.makeNonblocking(fd) catch return;
+            r.nonblocking = true;
+        }
+
         /// `operation` made now if it can be without waiting.
         fn now(operation: Io.Operation, fd: posix.fd_t, direction: Direction, how: How) ?Io.Operation.Result {
             return switch (how) {
@@ -415,6 +434,7 @@ pub fn Readiness(comptime Poller: type) type {
             e.* = .{ .token = token };
             const fd, const direction = calls.subject(operation);
             const how = calls.howOf(operation);
+            self.nonblockingToSend(operation, fd);
             if (now(operation, fd, direction, how)) |result| {
                 e.outcome = .{ .result = result };
                 return self.finish(&e.waiter);
@@ -540,7 +560,7 @@ pub fn Readiness(comptime Poller: type) type {
                     // kernel has dropped that registration.
                     _ = self.endAll(index);
                     r.registered = .{};
-                    r.listener = false;
+                    r.nonblocking = false;
                     r.ready = .both;
                     r.available = null;
                     r.stream = null;

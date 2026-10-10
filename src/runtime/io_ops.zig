@@ -359,7 +359,8 @@ pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, option
     const r = Core.running(userdata);
     if (outsideBorrowed(r)) return borrowed(r, "netConnectIp", .{ address, options });
     // On epoll and kqueue the socket connects in non-blocking mode, made so
-    // at its creation, and is put back once connected.
+    // at its creation, and is put back once connected, except where a send
+    // ignores `MSG_DONTWAIT` (Darwin): there it stays so.
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
     const fd = socket.open(Io.Threaded.posixAddressFamily(address), options.mode, options.protocol, start) catch |err| return narrow(net.IpAddress.ConnectError, err);
     errdefer {
@@ -375,7 +376,7 @@ pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, option
         error.SystemResources => error.SystemResources,
     };
     o.result.connect catch |err| return narrow(net.IpAddress.ConnectError, err);
-    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.IpAddress.ConnectError, err);
+    if (start == .nonblocking and socket.send_honors_dontwait) socket.setBlocking(fd) catch |err| return narrow(net.IpAddress.ConnectError, err);
     return .{ .handle = fd, .address = socket.localAddress(fd) catch |err| return narrow(net.IpAddress.ConnectError, err) };
 }
 
@@ -414,7 +415,7 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
         error.Timeout => unreachable, // unreachable: no deadline given
     };
     o.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
-    if (start == .nonblocking) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
+    if (start == .nonblocking and socket.send_honors_dontwait) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
     return fd;
 }
 
