@@ -327,7 +327,12 @@ pub fn attempt(operation: Io.Operation) ?Io.Operation.Result {
             var splat: [Threaded.splat_buffer_size]u8 = undefined;
             const count = scatterWrite(&iovecs, &splat, w.header, w.data, w.splat);
             const msg: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = @ptrCast(&iovecs), .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // safe: the kernel only reads what a send gives it, through the same layout
-            const rc = linux.sendmsg(w.socket_handle, &msg, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
+            // One piece and no control messages: `send`, which copies no
+            // message header in.
+            const rc = if (count == 1 and w.control.len == 0)
+                linux.sendto(w.socket_handle, @ptrCast(iovecs[0].base), iovecs[0].len, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL, null, 0)
+            else
+                linux.sendmsg(w.socket_handle, &msg, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL);
             const e = linux.errno(rc);
             if (e == .AGAIN) return null;
             return .{ .net_write = if (e == .SUCCESS) rc else netWrite(e) };
