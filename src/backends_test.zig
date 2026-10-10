@@ -439,6 +439,44 @@ test "a write larger than the socket's buffers waits for the reader instead of h
     }
 }
 
+/// Writes nothing to `file` over and over: each completes at once, so the
+/// task spends its budget and yields, without ever waiting. Records the
+/// threads it ran on other than `home`.
+fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value(bool), away: *std.atomic.Value(u32)) Io.Cancelable!void {
+    while (!stop.load(.acquire)) {
+        // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
+        _ = (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming catch {};
+        if (std.Thread.getCurrentId() != home) _ = away.fetchAdd(1, .monotonic);
+    }
+}
+
+test "a task behind the root on the home processor is offered to an idle processor, on each backend" {
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 1);
+        defer r.deinit();
+        const io = r.io();
+        const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+        defer read_end.close(io);
+        defer write_end.close(io);
+        var stop: std.atomic.Value(bool) = .init(false);
+        var away: std.atomic.Value(u32) = .init(0);
+        // The root stays on the home processor; the task it starts queues
+        // behind it there, and the idle worker takes it.
+        var task = try io.concurrent(yieldAway, .{ io, write_end, std.Thread.getCurrentId(), &stop, &away });
+        var spins: u32 = 0;
+        while (away.load(.monotonic) == 0 and spins < 1_000_000) : (spins += 1) {
+            // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
+            _ = (try io.operate(.{ .file_write_streaming = .{ .file = write_end, .data = &.{""} } })).file_write_streaming catch {};
+        }
+        stop.store(true, .release);
+        try task.await(io);
+        try testing.expect(away.load(.monotonic) > 0);
+    }
+}
+
 fn readBatch(io: Io, sockets: [2]net.Socket.Handle, buffers: *[2][8]u8) !usize {
     var storage: [2]Io.Operation.Storage = undefined;
     var batch: Io.Batch = .init(&storage);

@@ -1097,8 +1097,13 @@ pub fn notify(s: *Scheduler, p: *Processor) void {
     const runnable = p.local.len() + p.latency.len() + @intFromBool(p.lifo != null);
     if (runnable == 0) return;
     // Between tasks, this processor runs the one task it has next: a
-    // processor woken for it would only take it away.
-    if (runnable == 1 and p.current == null) return;
+    // processor woken for it would only take it away. Not when tasks that
+    // cannot leave wait here too (the root, a task holding a deadline): the
+    // queued one then waits behind them, and an idle processor runs it
+    // meanwhile. A root writing to a task that reads ran on one thread,
+    // turn about, until this (1 GiB over loopback: 7.6 GiB/s, now 9.0, lima
+    // VM, three workers).
+    if (runnable == 1 and p.current == null and p.pinned.isEmpty() and p.latency_pinned.isEmpty()) return;
     s.wakeIdle();
 }
 
