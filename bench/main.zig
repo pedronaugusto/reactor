@@ -2,6 +2,9 @@
 //! [-- --io threaded] [-- --only <workload>]`.
 //!
 //! - spawn: `concurrent` + `await` of an empty task; a group of 10,000.
+//! - idle: 10,000 loopback connections, each with a task parked in a read
+//!   on its server end; the growth of peak resident memory per connection
+//!   (run it alone, `--only idle`, so the peak before is the program's own).
 //! - compute: 4096 tasks of about 50 microseconds of arithmetic, in a group.
 //! - wake: two tasks handing a futex word back and forth, on one worker and
 //!   across workers.
@@ -16,12 +19,14 @@
 //! - lanes: `reactor.blocking` of an empty call on the `general` lane.
 //! - deadlines: 64-byte round trips on one connection, each read under
 //!   `net.Deadlines`.
+//! - bulk: 256 MiB over loopback TCP from the root to a task, written in
+//!   64 KiB pieces and read 16 KiB at a time.
 //! - stream: 64 MiB over loopback TCP between two tasks, written in 64 KiB
 //!   pieces and read through `Io.Reader` (a 64 KiB buffer): whole buffers,
 //!   and 4 KiB slices.
 //!
-//! `--messages N` sets the echo's messages and `--mib N` the bulk transfer's
-//! size.
+//! `--connections N` sets the idle connections, `--messages N` the echo's
+//! messages and `--mib N` the bulk transfer's size.
 //!
 //! `--io threaded` runs the `Io` workloads on std's `Io.Threaded` instead,
 //! for the same numbers on the interface's baseline; `--backend epoll`
@@ -61,8 +66,9 @@ const Config = struct {
     zero_copy_min: ?usize = null,
     sqpoll: bool = false,
     bytes: usize = 64 << 10,
-    mib: usize = 16,
+    mib: usize = 256,
     messages: usize = 200_000,
+    connections: usize = 10_000,
     msg_ring_off: bool = false,
     linked_timeout_off: bool = false,
     fixed_files_off: bool = false,
@@ -102,6 +108,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--registered")) c.registered = true else if (std.mem.eql(u8, arg, "--sqpoll")) c.sqpoll = true else if (std.mem.eql(u8, arg, "--msg-ring-off")) c.msg_ring_off = true else if (std.mem.eql(u8, arg, "--zero-copy-min")) {
             i += 1;
             c.zero_copy_min = if (std.mem.eql(u8, args[i], "off")) null else try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--connections")) {
+            i += 1;
+            c.connections = try std.fmt.parseInt(usize, args[i], 10);
+            if (c.connections == 0) return error.InvalidSize;
         } else if (std.mem.eql(u8, arg, "--messages")) {
             i += 1;
             c.messages = try std.fmt.parseInt(usize, args[i], 10);
@@ -175,6 +185,7 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("files")) try files(r, gpa, io, c);
     if (c.wants("open-stat")) try openStat(r, io, c);
     if (c.wants("bulk")) try bulk(r, gpa, io, c);
+    if (c.wants("idle")) try idle(r, gpa, io, c);
     if (c.wants("stream")) try streams(r, io, c);
     if (c.wants("waits")) try waits(r, io, c);
     if (c.wants("lanes")) try lanes(r, io, c);
@@ -226,6 +237,69 @@ fn spawn(r: Report, io: Io, c: Config) !void {
     }
     const t3 = now(io);
     try r.line("spawn", "group of 10k, concurrent + await", nsBetween(t2, t3) / @as(f64, @floatFromInt(members * rounds)), "ns/task");
+}
+
+// idle
+
+fn idleReader(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
+    defer stream.close(io);
+    var buffer: [64]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    _ = (io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }) catch return).net_read catch return;
+}
+
+fn idleAccept(io: Io, server: *Io.net.Server, count: usize, readers: *Io.Group) Io.Cancelable!void {
+    for (0..count) |_| {
+        const stream = server.accept(io) catch return;
+        readers.concurrent(io, idleReader, .{ io, stream }) catch {
+            stream.close(io);
+            return;
+        };
+    }
+}
+
+/// Peak resident bytes of this process so far.
+fn peakResident() usize {
+    if (comptime builtin.os.tag == .windows) return 0;
+    const usage = std.posix.getrusage(std.posix.rusage.SELF);
+    const raw: usize = @intCast(usage.maxrss);
+    // Darwin reports bytes, the others KiB.
+    return if (comptime builtin.os.tag.isDarwin()) raw else raw * 1024;
+}
+
+/// As many descriptors as the hard limit allows: two per connection.
+fn raiseDescriptorLimit() void {
+    if (comptime builtin.os.tag == .windows) return;
+    var limit = std.posix.getrlimit(.NOFILE) catch return;
+    const cap: std.posix.rlim_t = if (comptime builtin.os.tag.isDarwin()) @min(limit.max, 245_760) else limit.max;
+    if (limit.cur >= cap) return;
+    limit.cur = cap;
+    // glint-ignore: Z026 -- refused, the limit stays; a connect past it fails and says so
+    std.posix.setrlimit(.NOFILE, limit) catch {};
+}
+
+fn idle(r: Report, gpa: std.mem.Allocator, io: Io, c: Config) !void {
+    if (comptime builtin.os.tag == .windows) return;
+    raiseDescriptorLimit();
+    const n: usize = if (c.smoke) 16 else c.connections;
+    const before = peakResident();
+    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .kernel_backlog = 4096 });
+    defer server.deinit(io);
+    var readers: Io.Group = .init;
+    defer readers.cancel(io);
+    var acceptor = try io.concurrent(idleAccept, .{ io, &server, n, &readers });
+    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
+    defer acceptor.cancel(io) catch {};
+    const clients = try gpa.alloc(Io.net.Stream, n);
+    defer gpa.free(clients);
+    var opened: usize = 0;
+    defer for (clients[0..opened]) |s| s.close(io);
+    while (opened < n) : (opened += 1) clients[opened] = try server.socket.address.connect(io, .{ .mode = .stream });
+    try acceptor.await(io);
+    // Every reader reaches its read and parks.
+    try io.sleep(.fromMilliseconds(200), .awake);
+    const after = peakResident();
+    try r.line("idle", "resident bytes per idle connection", @as(f64, @floatFromInt(after -| before)) / @as(f64, @floatFromInt(n)), "B/conn");
 }
 
 // compute
