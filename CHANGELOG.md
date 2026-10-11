@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- reactor is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, example and benchmarks are the development build's (`bay test`, `bay bench`). What a project that depends on reactor builds is unchanged: the `reactor` module and its library.
+
 ### Added
 
 - `Wake.handle` and `Wake.clear`: the kernel object a signal sets, and the way to clear it, for a program with a wait loop of its own. lookout hands the same descriptor to its own callers.

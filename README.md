@@ -175,15 +175,16 @@ to 16 KiB pages; reserved address space is separate from resident memory.
 
 ## Built with
 
-Production code depends on Zig std and aegis. Repository checks use preflight;
-properties, faults, virtual time and conformance use shakedown as a lazy
-test-only dependency.
+Production code depends on Zig std and aegis. reactor is developed with
+[bay](https://github.com/pedronaugusto/bay): repository checks use preflight, and
+properties, faults, virtual time and conformance use shakedown, both as dev
+dependencies that a project depending on reactor never sees.
 
 ## Testing
 
-Use `zig build test -Dtest-filter=<name>` for a focused test, `zig build lint`
-for source and architecture checks, and `zig build check` to compile tests,
-examples and the own benchmarks. `zig build bench` runs manual timings; CI
+Use `bay test -Dtest-filter=<name>` for a focused test, `bay lint`
+for source and architecture checks, and `bay check` to compile tests,
+examples and the own benchmarks. `bay bench` runs manual timings; CI
 compiles them without timing. Native lifetime regressions live in
 [src/later_test.zig](src/later_test.zig) and
 [src/r1_regression_test.zig](src/r1_regression_test.zig).
