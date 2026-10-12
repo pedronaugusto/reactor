@@ -82,6 +82,5 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const p = b.dependency("reactor", .{ .target = target, .optimize = optimize }).builder;
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
-    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "reactor", .module = reactor }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("OOM");
+    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "reactor", .module = reactor }}) catch @panic("OOM");
 }
