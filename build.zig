@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// reactor's development: its tests, example and benchmarks under preflight's
-/// gate, with shakedown bound to reactor's aegis. Run through bay.
+/// gate. Run through bay.
 pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -57,10 +57,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     b.getInstallStep().dependOn(&tests.step);
     b.getInstallStep().dependOn(&example.step);
 
-    // The test doubles and the conformance suite are shakedown's, bound to
-    // reactor's own aegis, so the tests link one.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    tools.shakedown.useAegis(shakedown, aegis);
+    // The test doubles and the conformance suite are shakedown's.
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     tools.preflight.addCi(b, p, .{
         .tests = test_step,
@@ -84,8 +82,6 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const p = b.dependency("reactor", .{ .target = target, .optimize = optimize }).builder;
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
-    // The same binding as `useAegis`, which only a `dev` has the tools for: one aegis is linked.
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize, .aegis = .consumer });
-    shakedown.module("shakedown").addImport("aegis", aegis);
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "reactor", .module = reactor }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } }) catch @panic("OOM");
 }
