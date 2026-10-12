@@ -7,7 +7,9 @@
 //!   the host hands back through `complete`. A handle is bound to the port
 //!   of the first loop that uses it, for the handle's life: an entry that
 //!   reaches a loop for another loop's operation is posted on to that
-//!   loop's port, so a task may use a socket from any processor.
+//!   loop's port, so a task may use a socket from any processor. A loop
+//!   whose thread may be away from it binds to another loop's port
+//!   instead (`binds_to`), so no other loop's completion waits for it.
 //! - **Skip on success**: a handle is bound with the port skipped for calls
 //!   that complete at once, so a receive with data waiting is one call and
 //!   no entry; `submit` reports it finished. A call that fails at once
@@ -171,6 +173,12 @@ timer_armed: bool = false,
 timer_at: timeline.Awake = .fromRaw(0),
 /// Set by `wake` until its entry is taken: later wakes post nothing.
 wake_pending: std.atomic.Value(bool) = .init(false),
+/// The port the handles this loop uses first are bound to, when not its
+/// own. Every loop's entries for a handle arrive on its port, and that
+/// port's loop passes them on: a runtime's home loop runs only while the
+/// root waits in the runtime (its thread is the host's otherwise, in a
+/// join or a call of its own), so with workers it binds to a worker's.
+binds_to: ?Handle = null,
 slots: []Slot,
 free: ?*Slot = null,
 
@@ -214,9 +222,15 @@ fn OpOf(comptime SinkPtr: type) type {
     return @typeInfo(@typeInfo(@TypeOf(Sink.complete)).@"fn".param_types[1].?).pointer.child;
 }
 
-/// Binds `handle` to this loop's port unless it is bound already.
+/// Binds `handle` to `bindingPort` unless it is bound already.
 fn bindHandle(b: *Iocp, handle: Handle) bool {
-    return sys.bindOnce(handle, b.port, key());
+    return sys.bindOnce(handle, b.bindingPort(), key());
+}
+
+/// The port this loop binds handles to: its own, or `binds_to`. A port a
+/// job reports on is chosen the same way.
+pub fn bindingPort(b: *const Iocp) Handle {
+    return b.binds_to orelse b.port;
 }
 
 // Submission.

@@ -142,6 +142,12 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         loop_internal.setBatchSink(&p.loop, .{ .context = c, .complete = batch.completed });
         made += 1;
     }
+    // A handle's entries arrive on one port for its life; the home loop's
+    // is served only while the root waits in the runtime. With workers,
+    // the handles it binds go to the first worker's port.
+    if (comptime builtin.os.tag == .windows and fiber.supported) if (c.processors.len > 1 and c.processors[0].loop.backend == .iocp) {
+        c.processors[0].loop.backend.iocp.binds_to = c.processors[1].loop.backend.iocp.port;
+    };
 
     try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = (aegis.int.Checked(u32).init(options.max_tasks).add(options.max_lookups) catch return error.TooManyTasks).raw() +| 1 });
     errdefer c.lanes.deinit(gpa);

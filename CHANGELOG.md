@@ -87,5 +87,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A group's `await` returns only after every member has given its stack back, without members holding the group's lock for the release.
 - Foreign spawning and wakes retain the destination scheduler; ring messages never cross runtimes.
 - A ring-message wake is submitted at once, so a task that spawns in a loop or computes cannot leave a sleeping worker asleep with work queued for it.
+- On IOCP a worker's operation on a socket the root used first no longer waits for the root to come back to the runtime. A handle's completions arrive on one port for its life, and the home loop's port is served only while the root waits in the runtime: a thread reading a socket the root had accepted, while the root joined that thread, waited forever. With workers, the home loop binds its handles, and attaches jobs, to the first worker's port, which passes the root's own entries on.
 
 [Unreleased]: https://github.com/pedronaugusto/reactor/commits/main

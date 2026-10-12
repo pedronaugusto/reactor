@@ -57,7 +57,9 @@ pub fn attach(io: Io, job: windows.HANDLE) AttachError!Job {
             if (core.backendKind() == .iocp) {
                 const record = core.jobs.acquire(io) orelse return error.SystemResources;
                 errdefer record.release();
-                const port = core.processors[0].loop.backend.iocp.port;
+                // Where the home loop binds handles: a port some thread
+                // serves even while the root is away from the runtime.
+                const port = core.processors[0].loop.backend.iocp.bindingPort();
                 try associate(duplicate, @ptrFromInt(record.key()), port); // safe: the kernel carries this integer key without dereferencing it
                 return .{ .port = port, .job = duplicate, .record = record };
             }

@@ -255,8 +255,9 @@ test "a thread outside the runtime reads and writes a socket the runtime's tasks
     defer for (pair) |s| s.close(io);
     var buffer: [16]u8 = undefined;
     var n: usize = 0;
-    // The socket is bound to the home processor's port; the outside
-    // thread's operations run on a worker, whose entries come back to it.
+    // The outside thread's operations run on a worker, the root's on the
+    // home processor: the loop whose port the socket is bound to passes
+    // the other's entries on.
     const thread = try std.Thread.spawn(.{}, fromOutside, .{ io, pair[1].socket.handle, &buffer, &n });
     var got: [16]u8 = undefined;
     try testing.expectEqual(@as(usize, 7), try readOne(io, pair[0].socket.handle, &got));
@@ -264,6 +265,125 @@ test "a thread outside the runtime reads and writes a socket the runtime's tasks
     thread.join();
     try testing.expectEqual(@as(usize, 5), n);
     try testing.expectEqualStrings("reply", buffer[0..5]);
+}
+
+/// The test's own end of a wait: a word a thread outside the runtime sets
+/// once its task is done, waited on by the root in no `Io` call of the
+/// runtime's (as in a join), or in one.
+const Done = struct {
+    word: std.atomic.Value(u32) = .init(0),
+
+    fn set(d: *Done, io: Io) void {
+        d.word.store(1, .release);
+        Io.Threaded.global_single_threaded.io().futexWake(u32, &d.word.raw, 1);
+        io.futexWake(u32, &d.word.raw, 1);
+    }
+
+    /// Waits in the system's own `Io` for at most `limit`: the runtime's
+    /// home loop is served by nobody meanwhile. Whether it was set.
+    fn awaitAway(d: *Done, limit: Io.Duration) bool {
+        const system = Io.Threaded.global_single_threaded.io();
+        const deadline: Io.Clock.Timestamp = .fromNow(system, .{ .raw = limit, .clock = .awake });
+        while (d.word.load(.acquire) == 0) {
+            if (deadline.durationFromNow(system).raw.nanoseconds <= 0) return false;
+            system.futexWaitTimeout(u32, &d.word.raw, 0, .{ .deadline = deadline }) catch unreachable; // unreachable: the system's Io cancels nothing here
+        }
+        return true;
+    }
+
+    /// Waits in the runtime: the root's processor runs meanwhile.
+    fn awaitIn(d: *Done, io: Io) void {
+        while (d.word.load(.acquire) == 0) io.futexWaitUncancelable(u32, &d.word.raw, 0);
+    }
+};
+
+/// Reads `socket`, to which nothing is written: the read waits in the
+/// kernel until its deadline cancels it there.
+fn readUntilDeadline(io: Io, socket: net.Socket.Handle) !void {
+    var buffer: [8]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    try testing.expectError(error.Timeout, io.operateTimeout(.{ .net_read = .{ .socket_handle = socket, .data = &data } }, timeoutMs(10)));
+}
+
+/// Started from a thread outside the runtime, the task goes to the global
+/// queue: only a worker takes it while the root is away.
+fn readOnWorker(io: Io, socket: net.Socket.Handle, done: *Done, out: *anyerror!void) void {
+    defer done.set(io);
+    var reader = io.concurrent(readUntilDeadline, .{ io, socket }) catch |err| {
+        out.* = err;
+        return;
+    };
+    out.* = reader.await(io);
+}
+
+test "a worker's read on a socket the home loop used first ends while the root is away from the runtime" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    // A pair made with std's own Io: no loop has used either end.
+    const system = Io.Threaded.global_single_threaded.io();
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(system, .{ .reuse_address = true });
+    defer server.deinit(system);
+    var client = try server.socket.address.connect(system, .{ .mode = .stream });
+    defer client.close(system);
+    const accepted = try server.accept(system);
+    // Through the runtime from here, so its binding is forgotten at close.
+    defer accepted.close(io);
+    // The root uses it first, on the home loop: a write the kernel takes
+    // at once.
+    try writeAll(io, accepted.socket.handle, "x");
+    var done: Done = .{};
+    var outcome: anyerror!void = error.NotRun;
+    const thread = try std.Thread.spawn(.{}, readOnWorker, .{ io, accepted.socket.handle, &done, &outcome });
+    // The cancel's entry arrives on the socket's port while the root waits
+    // in a call of its own.
+    const in_time = done.awaitAway(.fromSeconds(2));
+    done.awaitIn(io);
+    thread.join();
+    try outcome;
+    try testing.expect(in_time);
+}
+
+/// Waits for the job to report a process joining it.
+fn joinedReported(io: Io, job: *reactor.Job) !void {
+    while (true) switch (try job.next(io, timeoutMs(5000))) {
+        .new_process => return,
+        else => {},
+    };
+}
+
+fn joinedOnWorker(io: Io, job: *reactor.Job, done: *Done, out: *anyerror!void) void {
+    defer done.set(io);
+    var watcher = io.concurrent(joinedReported, .{ io, job }) catch |err| {
+        out.* = err;
+        return;
+    };
+    out.* = watcher.await(io);
+}
+
+test "a job's messages reach a worker's task while the root is away from the runtime" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const handle = CreateJobObjectW(null, null) orelse return error.SystemResources;
+    defer std.os.windows.CloseHandle(handle);
+    var job = try reactor.Job.attach(io, handle);
+    defer job.detach(io);
+    var child = try std.process.spawn(testing.io, .{ .argv = &.{ "cmd.exe", "/c", "ping -n 3 127.0.0.1 >nul" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+    defer child.kill(testing.io);
+    var done: Done = .{};
+    var outcome: anyerror!void = error.NotRun;
+    const thread = try std.Thread.spawn(.{}, joinedOnWorker, .{ io, &job, &done, &outcome });
+    try testing.expect(AssignProcessToJobObject(handle, child.id.?) != .FALSE);
+    const in_time = done.awaitAway(.fromSeconds(2));
+    done.awaitIn(io);
+    thread.join();
+    try outcome;
+    try testing.expect(in_time);
 }
 
 test "a child's output through its pipe, and its exit through a wait packet" {
