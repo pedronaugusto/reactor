@@ -113,7 +113,10 @@ fn openWindows(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.
         else => |e| e,
     };
     errdefer close(handle);
-    afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.REUSE_UNICASTPORT, @as(u32, 1)) catch |err| return switch (err) {
+    // Ephemeral port reuse is a connection's option: AFD refuses it on a
+    // datagram endpoint (`STATUS_INVALID_PARAMETER`). std sets it on every
+    // socket, so its UDP connect always fails; this one sets it on streams.
+    if (mode == .stream) afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.REUSE_UNICASTPORT, @as(u32, 1)) catch |err| return switch (err) {
         error.SystemResources => error.SystemResources,
         error.Unexpected => error.Unexpected,
     };

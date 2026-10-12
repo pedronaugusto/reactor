@@ -215,6 +215,21 @@ test "a cancelled accept loses no connection: the next accept takes it" {
     try testing.expectEqual(@as(usize, 1), try readOne(io, accepted.socket.handle, &buffer));
 }
 
+test "a datagram socket connects, which names its own end" {
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const address: net.IpAddress = .{ .ip4 = .loopback(0) };
+    const peer = try address.bind(io, .{ .mode = .dgram });
+    defer peer.close(io);
+    // No packet: the connect picks the route, and the end it leaves from.
+    const connected = try peer.address.connect(io, .{ .mode = .dgram });
+    defer connected.close(io);
+    try testing.expectEqual(@as(u8, 127), connected.socket.address.ip4.bytes[0]);
+    try testing.expect(connected.socket.address.getPort() != 0);
+}
+
 test "datagrams: a send and a receive with the sender's address" {
     var r: Runtime = undefined;
     try runtime(&r, 1);
