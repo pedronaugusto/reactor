@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A context switch on x86_64 keeps what the code that switched holds in vector registers. The switch declared them clobbered only by their AVX-512 names, `zmm`, which the compiler does not take on a CPU without AVX-512, so it left `xmm6` to `xmm15`, which Windows has a callee keep, to whichever context ran next: values a task held in them across a switch came back overwritten, a slice's pointer among them, in optimized builds on Windows. The switch declares them as `xmm` and `ymm` too.
+
 ## [0.2.0] - 2026-10-12
 
 ### Breaking
