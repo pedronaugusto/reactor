@@ -9,14 +9,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - reactor is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, example and benchmarks are the development build's (`bay test`, `bay bench`). What a project that depends on reactor builds is unchanged: the `reactor` module and its library.
-
-### Added
-
-- `Wake.handle` and `Wake.clear`: the kernel object a signal sets, and the way to clear it, for a program with a wait loop of its own. lookout hands the same descriptor to its own callers.
-- `Signals.wake`: the wake a listener's deliveries set, to wait on beside other members of a `waitAny` set. When it reports, `next` with a zero timeout takes what was delivered. A program that waits on its input and on its resize signal together no longer needs a handler and a pipe of its own.
-
-### Breaking
-
 - Byte counts in the options are aegis `units.Bytes`: `Runtime.Options.stack_size`, `zero_copy_min` (here and in `Loop.Options`), each `stack_classes` entry's `size`, `TaskOptions.stack_size`, an owned lane's `scratch_bytes` and `net.Receiver.Pool.Options.buffer_len`. Write `.stack_size = .fromRaw(256 << 10)`.
 - reactor depends on aegis, which depends on std alone. A project that builds the `reactor` module fetches it too.
 - `Runtime.start` creates the scheduler workers and prepares the owned offload lanes; fixed-signature `std.Io` operations require a successful start, checked in safe builds. A failed start must be deinitialized.
@@ -47,23 +39,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Atomic task summaries in `dump`, a worker crash summary, and ThreadSanitizer fiber annotations.
 - Bounded Windows Job notification storage on runtime completion ports; detach removes the association.
 - On Linux a runtime's `childWait` waits on the child's pidfd in the task's own loop.
-
-### Fixed
-
-- On io_uring a stream read fills every buffer it is given, as on the other backends and `Io.Threaded`: a socket read with more than one buffer is a `recvmsg` and a file read a `readv`. It used to read the first buffer alone, so a stream reader asked for a slice smaller than its own buffer read a slice at a time (64 MiB through 4 KiB slices: 16.4 ms, now 5.2 ms; `Io.Threaded` 4.6 ms, in the lima VM).
-- On Darwin a stream write larger than the room in the send buffer no longer holds the loop's thread until the peer has read. Darwin's `send` ignores `MSG_DONTWAIT` on a socket in blocking mode (its receives honor it), so a task writing 64 MiB blocked its thread, and with the reader on that thread's own queue (`workers = 0`, or a reader left in the LIFO slot) the program never finished. A readiness backend there puts a socket in non-blocking mode before its first write, and a socket reactor connects stays in it, as an accepted one already was.
-- A wait on a descriptor that is not open is ready, as `poll` says for a closed one, on every backend and under `Io.Threaded`; a number below zero used to panic the kqueue backend, fail the epoll backend with `Unexpected`, complete io_uring's with `Unexpected` and never end a thread's wait. The operation that follows reports the error. The kqueue and epoll pollers answer `Unpollable` to a number no descriptor has.
-- On Darwin a `Process` opened for a child that is ending, which `kqueue` refuses for up to a few milliseconds while `waitid` still says it runs, watches `SIGCHLD` on a kqueue and asks again at each, instead of asking every 5 ms.
-- A cancel sent from another thread to a task parked on a different processor no longer names a task that has ended: the request now lives in the wait's own record, and the task does not leave the wait until the processor has served it. Before, a task whose operation completed as its cancel was queued could be released first, and the processor read the released record (a crash in safe builds, a lost or misdirected cancel otherwise).
-- A deadline past the end of the awake timeline (584 years) armed on the loop no longer panics in safe builds or wraps in fast ones; it saturates, and the wait never ends. A `Loop.nextTimeout` or kernel wait to it is long, not negative.
-- A task count within 63 of 2^32 no longer wraps the slab count, a stack size past the address space or a stride that does not fit is refused with `SystemResources` instead of overflowing, and a worker count of 65,535 no longer wraps the processor count; `Runtime.init` returns `SystemResources`.
-- Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and run accepted work on the lane; foreign-runtime callers resume on their own scheduler.
-- Failed IP and Unix connects invalidate cached readiness before closing an unpublished socket.
-- Readiness backends retain terminal read events through final bytes and EOF instead of parking after a short final read.
-- Child wait and kill close their POSIX pipes through the runtime, invalidating cached readiness registrations before descriptor reuse.
-- A group's `await` returns only after every member has given its stack back, without members holding the group's lock for the release.
-- Foreign spawning and wakes retain the destination scheduler; ring messages never cross runtimes.
-- A ring-message wake is submitted at once, so a task that spawns in a loop or computes cannot leave a sleeping worker asleep with work queued for it.
+- `Wake.handle` and `Wake.clear`: the kernel object a signal sets, and the way to clear it, for a program with a wait loop of its own. lookout hands the same descriptor to its own callers.
+- `Signals.wake`: the wake a listener's deliveries set, to wait on beside other members of a `waitAny` set. When it reports, `next` with a zero timeout takes what was delivered. A program that waits on its input and on its resize signal together no longer needs a handler and a pipe of its own.
 
 ### Changed
 
@@ -90,5 +67,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Processors publish idleness before checking remote work, so lane completions cannot miss their wake; global completions also wake an embedded host and make `Runtime.nextTimeout` return zero.
 - Accept-ahead requests keep at most eight accepted or pending sockets per listener; burst connections stay in the kernel backlog. `Loop.UringFeatures.accept_ahead` controls this optimization.
 - DNS and Receiver keep their deadlines over `Io` implementations without concurrent network batches; canceled fallback operations drain before returning their borrowed buffers.
+- Pins aegis 0.1.0.
+
+### Fixed
+
+- On io_uring a stream read fills every buffer it is given, as on the other backends and `Io.Threaded`: a socket read with more than one buffer is a `recvmsg` and a file read a `readv`. It used to read the first buffer alone, so a stream reader asked for a slice smaller than its own buffer read a slice at a time (64 MiB through 4 KiB slices: 16.4 ms, now 5.2 ms; `Io.Threaded` 4.6 ms, in the lima VM).
+- On Darwin a stream write larger than the room in the send buffer no longer holds the loop's thread until the peer has read. Darwin's `send` ignores `MSG_DONTWAIT` on a socket in blocking mode (its receives honor it), so a task writing 64 MiB blocked its thread, and with the reader on that thread's own queue (`workers = 0`, or a reader left in the LIFO slot) the program never finished. A readiness backend there puts a socket in non-blocking mode before its first write, and a socket reactor connects stays in it, as an accepted one already was.
+- A wait on a descriptor that is not open is ready, as `poll` says for a closed one, on every backend and under `Io.Threaded`; a number below zero used to panic the kqueue backend, fail the epoll backend with `Unexpected`, complete io_uring's with `Unexpected` and never end a thread's wait. The operation that follows reports the error. The kqueue and epoll pollers answer `Unpollable` to a number no descriptor has.
+- On Darwin a `Process` opened for a child that is ending, which `kqueue` refuses for up to a few milliseconds while `waitid` still says it runs, watches `SIGCHLD` on a kqueue and asks again at each, instead of asking every 5 ms.
+- A cancel sent from another thread to a task parked on a different processor no longer names a task that has ended: the request now lives in the wait's own record, and the task does not leave the wait until the processor has served it. Before, a task whose operation completed as its cancel was queued could be released first, and the processor read the released record (a crash in safe builds, a lost or misdirected cancel otherwise).
+- A deadline past the end of the awake timeline (584 years) armed on the loop no longer panics in safe builds or wraps in fast ones; it saturates, and the wait never ends. A `Loop.nextTimeout` or kernel wait to it is long, not negative.
+- A task count within 63 of 2^32 no longer wraps the slab count, a stack size past the address space or a stride that does not fit is refused with `SystemResources` instead of overflowing, and a worker count of 65,535 no longer wraps the processor count; `Runtime.init` returns `SystemResources`.
+- Raw offloads and blocking hooks called from outside reactor tasks honor lane refusal and run accepted work on the lane; foreign-runtime callers resume on their own scheduler.
+- Failed IP and Unix connects invalidate cached readiness before closing an unpublished socket.
+- Readiness backends retain terminal read events through final bytes and EOF instead of parking after a short final read.
+- Child wait and kill close their POSIX pipes through the runtime, invalidating cached readiness registrations before descriptor reuse.
+- A group's `await` returns only after every member has given its stack back, without members holding the group's lock for the release.
+- Foreign spawning and wakes retain the destination scheduler; ring messages never cross runtimes.
+- A ring-message wake is submitted at once, so a task that spawns in a loop or computes cannot leave a sleeping worker asleep with work queued for it.
 
 [Unreleased]: https://github.com/pedronaugusto/reactor/commits/main
