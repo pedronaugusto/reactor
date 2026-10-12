@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
 ### Breaking
 
 - reactor is developed with [bay](https://github.com/pedronaugusto/bay): preflight and shakedown are dev dependencies, and the tests, example and benchmarks are the development build's (`bay test`, `bay bench`). What a project that depends on reactor builds is unchanged: the `reactor` module and its library.
