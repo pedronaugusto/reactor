@@ -534,8 +534,15 @@ noinline fn recurse(depth: u32) u32 {
     return recurse(depth - 1) +% pad[511];
 }
 
+/// `depth` frames of its own above the walk, in every build mode: the
+/// recursive call is no tail call, which an optimized build would make a
+/// loop of, folding the frames into one.
 noinline fn walk(depth: u32) usize {
-    if (depth > 0) return walk(depth - 1);
+    if (depth > 0) {
+        const frames = walk(depth - 1);
+        std.mem.doNotOptimizeAway(frames);
+        return frames;
+    }
     var addresses: [32]usize = undefined;
     const trace = std.debug.captureCurrentStackTrace(.{}, &addresses);
     return trace.return_addresses.len;
