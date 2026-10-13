@@ -10,8 +10,8 @@
             .hash = "aegis-0.1.3-rsxouhQiBwCaQ9NGzUiaQ1xdrFSNYoi3u0Z6sLjI5lrv",
         },
         .shuttle = .{
-            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.1.1#94b72355521cca001d1ce9e56e90e3762e285713",
-            .hash = "shuttle-0.1.1-0xOo5tboAgDCcWAl48Jrzgc1EaJiHWUs_Cy0mbQhlv0m",
+            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.0#92e5fc8d2f481a1717f8a3566019e4874852e3f7",
+            .hash = "shuttle-0.2.0-0xOo5hj8AgD7ads9zradzPFjPzanebRrdxXDtDQJd5Pb",
         },
     },
     .dev_dependencies = .{
