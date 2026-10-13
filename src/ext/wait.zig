@@ -115,7 +115,7 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
         return index;
     }
     const lane_io = core.lanes.executor(.wait);
-    return lane_call.call(&core.scheduler, &core.lanes, .wait, &sliced, .{ lane_io, set, timeout.toDeadline(io) });
+    return lane_call.call(&core.lanes, .wait, &sliced, .{ lane_io, set, timeout.toDeadline(io) });
 }
 
 /// Each member as a descriptor the loop can wait on; false when one is

@@ -44,7 +44,7 @@ fn iocp(r: *Core) bool {
 
 fn onLane(r: *Core, comptime lane: Lanes.Lane, comptime name: []const u8, args: anytype) @typeInfo(@typeInfo(@FieldType(Io.VTable, name)).pointer.child).@"fn".return_type.? {
     const lane_io = r.lanes.executor(lane);
-    return lane_call.call(&r.scheduler, &r.lanes, lane, @field(lane_io.vtable, name), .{lane_io.userdata} ++ args);
+    return lane_call.call(&r.lanes, lane, @field(lane_io.vtable, name), .{lane_io.userdata} ++ args);
 }
 
 /// A file call per `Options.files` where it is no ring operation: on the
@@ -455,11 +455,11 @@ pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
         const pipes = takePipes(child);
         defer closePipes(r, pipes);
         const executor = r.lanes.executor(.wait);
-        return lane_call.control(&r.scheduler, &r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
+        return lane_call.control(&r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
     }
     if (iocp(r)) forgetPipes(child);
     const executor = r.lanes.executor(.wait);
-    lane_call.control(&r.scheduler, &r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
+    lane_call.control(&r.lanes, .wait, executor.vtable.childKill, .{ executor.userdata, child });
 }
 
 /// Transfer pipe cleanup from std's direct close to the runtime's close path.

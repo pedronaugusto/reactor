@@ -40,21 +40,20 @@ pub fn Result(comptime F: type) type {
 }
 
 /// Fixed std.Io slots keep their specified result and cancellation shape.
-pub fn call(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
-    return perform(ReturnOf(@TypeOf(func)), false, false, s, lanes, lane, func, args);
+pub fn call(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
+    return perform(ReturnOf(@TypeOf(func)), false, false, lanes, lane, func, args);
 }
 
 /// Termination has capacity independent of occupied ordinary wait slots.
-pub fn control(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
-    return perform(ReturnOf(@TypeOf(func)), false, true, s, lanes, lane, func, args);
+pub fn control(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnOf(@TypeOf(func)) {
+    return perform(ReturnOf(@TypeOf(func)), false, true, lanes, lane, func, args);
 }
 
 /// A refused raw call never ran; all result shapes report the refusal.
-pub fn fallible(s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
+pub fn fallible(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) Result(@TypeOf(func)) {
     if (!lanes.started) return error.ConcurrencyUnavailable;
-    const owner = if (Scheduler.processor()) |p| p.scheduler else s;
     if (Scheduler.current() == null and !lanes.inlined()) return fromThread(Result(@TypeOf(func)), true, false, lanes, lane, func, args);
-    return perform(Result(@TypeOf(func)), true, false, owner, lanes, lane, func, args);
+    return perform(Result(@TypeOf(func)), true, false, lanes, lane, func, args);
 }
 
 /// A caller outside the fiber scheduler still submits raw work to its lane.
@@ -99,10 +98,13 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
     return c.result;
 }
 
-fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, s: *Scheduler, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
+fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
     if (comptime !raw) std.debug.assert(lanes.started);
     if (lanes.inlined()) return direct(lanes, lane, func, args);
     const t = Scheduler.current() orelse return fromThread(R, raw, control_, lanes, lane, func, args);
+    // The caller is woken by its own scheduler: a task of another runtime
+    // may call this one's lanes.
+    const owner = Scheduler.processor().?.scheduler;
     const previous_lane = t.lane;
     t.lane = lane;
     defer t.lane = previous_lane;
@@ -146,7 +148,7 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, s: *Sc
         .func = func,
         .args = args,
         .task = t,
-        .scheduler = s,
+        .scheduler = owner,
         .lanes = lanes,
     };
     while (!lanes.admit(&c.job)) {

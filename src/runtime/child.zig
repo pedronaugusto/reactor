@@ -67,5 +67,5 @@ fn reap(r: *Core, child: *Child) Child.WaitError!Child.Term {
 
 fn onLane(r: *Core, child: *Child) Child.WaitError!Child.Term {
     const lane_io = r.lanes.executor(.wait);
-    return lane_call.call(&r.scheduler, &r.lanes, .wait, lane_io.vtable.childWait, .{ lane_io.userdata, child });
+    return lane_call.call(&r.lanes, .wait, lane_io.vtable.childWait, .{ lane_io.userdata, child });
 }

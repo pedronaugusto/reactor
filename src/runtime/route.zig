@@ -27,7 +27,7 @@ pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotF
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
             const r = Core.running(userdata);
             const io = r.lanes.executor(lane);
-            return lane_call.call(&r.scheduler, &r.lanes, lane, @field(io.vtable, name), .{io.userdata} ++ rest);
+            return lane_call.call(&r.lanes, lane, @field(io.vtable, name), .{io.userdata} ++ rest);
         }
     };
     return generate(Impl, name);
@@ -47,7 +47,7 @@ pub fn files(comptime name: []const u8) *const SlotFn(name) {
                 if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ rest)) |result| return result;
             }
             const io = r.lanes.executor(.general);
-            return lane_call.call(&r.scheduler, &r.lanes, .general, @field(io.vtable, name), .{io.userdata} ++ rest);
+            return lane_call.call(&r.lanes, .general, @field(io.vtable, name), .{io.userdata} ++ rest);
         }
     };
     return generate(Impl, name);

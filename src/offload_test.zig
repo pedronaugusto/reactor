@@ -17,16 +17,8 @@ const Refusing = shakedown.Layer(u8, .{ .groupConcurrent = struct {
 fn mark(ran: *bool) void {
     ran.* = true;
 }
-fn hookMark(context: *anyopaque) void {
-    const ran: *bool = @ptrCast(@alignCast(context)); // safe: the retained test boolean
-    mark(ran);
-}
 fn raw(io: Io, ran: *bool) anyerror!void {
     return reactor.blocking(io, .general, mark, .{ran});
-}
-fn hooked(io: Io, ran: *bool) anyerror!void {
-    const hook = reactor.blockingHook(io);
-    return hook.call(hook.context, hookMark, ran);
 }
 const Outside = struct {
     io: Io,
@@ -37,7 +29,6 @@ const Outside = struct {
     fn checkRefusal(io: Io) !void {
         var ran = false;
         try testing.expectError(error.ConcurrencyUnavailable, raw(io, &ran));
-        try testing.expectError(error.ConcurrencyUnavailable, hooked(io, &ran));
         try testing.expect(!ran);
     }
     fn accepted(c: *Outside) void {
@@ -54,8 +45,7 @@ const Outside = struct {
         return reactor.blocking(io, .general, threadId, .{});
     }
     fn hookedId(io: Io, id: *std.Thread.Id) anyerror!void {
-        const hook = reactor.blockingHook(io);
-        return hook.call(hook.context, hookId, id);
+        return reactor.syncLane(io, null, hookId, id);
     }
     fn checkAccepted(io: Io) !void {
         const caller = threadId();

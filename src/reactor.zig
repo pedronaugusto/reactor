@@ -30,8 +30,7 @@ pub const Job = ext.Job;
 /// Calls that can take milliseconds, off the workers.
 pub const blocking = ext.blocking.blocking;
 /// Adapter for a library's raw device flush calls.
-pub const BlockingHook = ext.blocking.Hook;
-pub const blockingHook = ext.blocking.blockingHook;
+pub const syncLane = ext.blocking.syncLane;
 /// Signals and console control events, to several listeners each.
 pub const Signals = ext.Signals;
 /// Connect with a timeout, bounded lookups, aborts, deadlines, receivers.

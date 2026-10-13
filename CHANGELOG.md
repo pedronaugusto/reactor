@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `blockingHook` and `BlockingHook` are gone; `syncLane(io, context, function, argument)` takes their place with the contract of airlock's `Blocking.run`, so `.blocking = .{ .run = reactor.syncLane }` runs airlock's device flushes on the `sync` lane. Its signature is fixed, so it waits for a lane slot as a `std.Io` slot does and never refuses; it returns `Canceled` only when the call never started, and a call that started finishes and succeeds.
+
+### Fixed
+
+- A task of one runtime that called another runtime's lanes (a std file call through the other's `Io`, `blocking`, `wait` in slices) was woken on the other runtime's scheduler: it went on there, a processor of a runtime it does not belong to. It is woken by its own.
+
 ## [0.3.1] - 2026-10-13
 
 ### Added

@@ -446,24 +446,58 @@ test "a zero timeout consumes a ready Wake and otherwise times out" {
     try testing.expectError(error.Timeout, reactor.wait(io, .{ .wake = &wake }, ms(0)));
 }
 
-test "a blocking hook runs a library's raw call on the sync lane" {
+test "syncLane runs a library's raw call on the sync lane, and on the caller under another Io" {
     try skipWithoutFibers();
     const Call = struct {
         fn run(context: *anyopaque) void {
             const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the test passed the thread id
             id.* = std.Thread.getCurrentId();
         }
+        fn fromTask(io: std.Io) !void {
+            var id: std.Thread.Id = std.Thread.getCurrentId();
+            try reactor.syncLane(io, null, run, &id);
+            try testing.expect(id != std.Thread.getCurrentId());
+        }
     };
     var t: Threads = undefined;
     try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
     var id: std.Thread.Id = undefined;
-    const hook = reactor.blockingHook(t.io());
-    try hook.call(hook.context, Call.run, &id);
+    try reactor.syncLane(t.io(), null, Call.run, &id);
     try testing.expect(id != std.Thread.getCurrentId());
-    const inline_hook = reactor.blockingHook(testing.io);
-    try inline_hook.call(inline_hook.context, Call.run, &id);
+    var task = try t.io().concurrent(Call.fromTask, .{t.io()});
+    try task.await(t.io());
+    try reactor.syncLane(testing.io, null, Call.run, &id);
     try testing.expectEqual(std.Thread.getCurrentId(), id);
+}
+
+test "syncLane: a task canceled before its call starts gets Canceled, and the call never runs" {
+    try skipWithoutFibers();
+    const Call = struct {
+        var go: std.atomic.Value(bool) = .init(false);
+        fn mark(context: *anyopaque) void {
+            const ran: *bool = @ptrCast(@alignCast(context)); // safe: the test passed its boolean
+            ran.* = true;
+        }
+        /// Computes until the cancel is in, then calls.
+        fn task(io: std.Io, ran: *bool) std.Io.Cancelable!void {
+            while (!go.load(.acquire)) std.atomic.spinLoopHint();
+            return reactor.syncLane(io, null, mark, ran);
+        }
+        fn release() void {
+            std.Io.Threaded.global_single_threaded.io().sleep(.fromMilliseconds(10), .awake) catch {};
+            go.store(true, .release);
+        }
+    };
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
+    defer t.deinit();
+    var ran = false;
+    var future = try t.io().concurrent(Call.task, .{ t.io(), &ran });
+    const releaser = try std.Thread.spawn(.{}, Call.release, .{});
+    defer releaser.join();
+    try testing.expectError(error.Canceled, future.cancel(t.io()));
+    try testing.expect(!ran);
 }
 
 test "job notification storage bounds messages and ignores retired attachments" {
@@ -580,23 +614,6 @@ test "r6: refused void value and narrow offloads return an error without running
     var task = try io.concurrent(checkOffloadRefusal, .{io});
     try task.await(io);
     try testing.expectEqual(@as(u64, 0), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].@"inline");
-}
-
-fn refusedHook(context: *anyopaque) void {
-    const ran: *bool = @ptrCast(@alignCast(context)); // safe: the test passed its live boolean
-    ran.* = true;
-}
-
-test "r6: a refused blocking hook returns an error without touching its context" {
-    try skipWithoutFibers();
-    var refusing: RefusingOffload = .init(testing.io, 0);
-    var t: Threads = undefined;
-    try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10), .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
-    defer t.deinit();
-    var ran = false;
-    const hook = reactor.blockingHook(t.io());
-    try testing.expectError(error.ConcurrencyUnavailable, hook.call(hook.context, refusedHook, &ran));
-    try testing.expect(!ran);
 }
 
 fn originalOffloadError() error{RawFailure}!void {

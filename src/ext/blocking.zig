@@ -3,7 +3,6 @@ const std = @import("std");
 const Io = std.Io;
 
 const Lanes = @import("../Lanes.zig");
-const Core = @import("../runtime/Core.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const native = @import("native.zig");
 
@@ -26,25 +25,33 @@ pub fn blocking(io: Io, lane: Lanes.Lane, function: anytype, args: std.meta.Args
     const core = native.runtimeOf(io) orelse return @call(.auto, function, args);
     const entered = native.enter();
     defer native.leave(entered);
-    return lane_call.fallible(&core.scheduler, &core.lanes, lane, &function, args);
+    return lane_call.fallible(&core.lanes, lane, &function, args);
 }
 
-/// A raw call adapter for libraries that keep their own syscall vocabulary.
-/// The library puts arguments and the typed result in its own context.
-pub const Hook = struct {
-    context: ?*anyopaque,
-    call: *const fn (?*anyopaque, *const fn (*anyopaque) void, *anyopaque) Error!void,
-};
-
-/// Device flushes use the sync lane. Another Io executes on the caller.
-/// No Io is retained: the application's runtime must outlive the hook.
-pub fn blockingHook(io: Io) Hook {
-    return .{ .context = native.runtimeOf(io), .call = invoke };
-}
-
-fn invoke(context: ?*anyopaque, function: *const fn (*anyopaque) void, args: *anyopaque) Error!void {
-    const core = if (context) |c| @as(*Core, @ptrCast(@alignCast(c))) else return function(args); // safe: blockingHook retained the recognized core
+/// The executor a library that keeps its own syscalls takes for its raw
+/// blocking calls (airlock's `Blocking.run`, for its device flushes):
+/// `function(argument)` on the runtime's `sync` lane, the calling task parked
+/// meanwhile; on the calling thread under any other `Io`. Its signature is
+/// fixed, as a `std.Io` slot's is, so it waits for a lane slot as they do
+/// and never refuses. `Canceled` only when the call never started; a call
+/// that started finishes and succeeds, its cancel left pending for the
+/// caller's next cancelation point, so a completed sync's error is never
+/// hidden. `function` and `argument` are borrowed for the call alone, and
+/// `function` makes no `Io` call. `context` is not used: the `io` given
+/// with each call names the runtime.
+pub fn syncLane(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
+    _ = context;
+    const core = native.runtimeOf(io) orelse {
+        try io.checkCancel();
+        return function(argument);
+    };
     const entered = native.enter();
     defer native.leave(entered);
-    return lane_call.fallible(&core.scheduler, &core.lanes, .sync, function, .{args});
+    return lane_call.call(&core.lanes, .sync, &Raw.run, .{ function, argument });
 }
+
+const Raw = struct {
+    fn run(function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
+        function(argument);
+    }
+};

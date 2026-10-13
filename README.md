@@ -156,8 +156,13 @@ counted by `reactor.fallbacks()`.
 - **`blocking(io, lane, f, args)`**: a raw call that can take milliseconds,
   run on one of the runtime's lanes (`sync`, `lookup`, `wait`, `general`).
   Use `try`: even a void function returns `Canceled` or
-  `ConcurrencyUnavailable` when it could not run. `blockingHook` has the same
-  fallible contract. Refused work never runs inline.
+  `ConcurrencyUnavailable` when it could not run. Refused work never runs
+  inline.
+- **`syncLane`**: the executor a library with its own syscalls takes for its
+  raw blocking calls, such as airlock's `Blocking` for its device flushes
+  (`.blocking = .{ .run = reactor.syncLane }`): the call on the `sync` lane,
+  waiting for a slot as a `std.Io` slot does; `Canceled` only when it never
+  started.
 - **`Signals`**: signals and console control events, to several listeners.
 - **`net`**: `connect` with a timeout, a bounded `resolve`, `abort`,
   per-operation `Deadlines`, and a `Receiver` whose idle connections hold no

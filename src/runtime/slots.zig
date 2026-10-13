@@ -383,7 +383,7 @@ fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     switch (deadline.clock) {
         .cpu_process, .cpu_thread => {
             const lane_io = r.lanes.executor(.wait);
-            return lane_call.call(&r.scheduler, &r.lanes, .wait, lane_io.vtable.sleep, .{ lane_io.userdata, timeout });
+            return lane_call.call(&r.lanes, .wait, lane_io.vtable.sleep, .{ lane_io.userdata, timeout });
         },
         else => perform.sleep(&r.scheduler, deadline) catch |err| switch (err) {
             error.Canceled => return error.Canceled,

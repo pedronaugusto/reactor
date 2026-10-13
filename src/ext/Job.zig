@@ -107,7 +107,7 @@ pub fn next(j: *Job, io: Io, timeout: Io.Timeout) NextError!Message {
     const entered = native.enter();
     defer native.leave(entered);
     if (!native.taskRuntime(core)) return take(io, j.port, deadline);
-    return lane_call.call(&core.scheduler, &core.lanes, .wait, &take, .{ core.lanes.executor(.wait), j.port, deadline });
+    return lane_call.call(&core.lanes, .wait, &take, .{ core.lanes.executor(.wait), j.port, deadline });
 }
 
 fn take(io: Io, port: windows.HANDLE, deadline: Io.Timeout) NextError!Message {
