@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-13
+
 ### Added
 
 - A task that runs its own code past `handoff_after` (a computing loop) loses its processor to a spare thread, as a blocking call does, when tasks wait there or its loop has operations in flight, so they go on; the task rejoins a processor at its next call into the runtime, and the root takes the home processor back. Under `stealing` and `per_core` alike, on epoll, kqueue and IOCP with workers. No signals: the task itself is never interrupted. `Stats.handoffs` counts both kinds.
