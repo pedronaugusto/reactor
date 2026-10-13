@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-13
+
 ### Breaking
 
 - reactor depends on [shuttle](https://github.com/pedronaugusto/shuttle) at run time: a task is a shuttle context on a stack from shuttle's pool, and switches to its scheduler through shuttle's handoff. A project that depends on reactor fetches shuttle with it.
