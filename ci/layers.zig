@@ -122,6 +122,8 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
         .unresolved_only = true,
         .except_targets = &.{
             "aegis",
+            // Tests only: airlock's syncs through `syncLane`.
+            "airlock",
             "builtin",
             "shakedown",
             "shuttle",

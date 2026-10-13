@@ -24,5 +24,9 @@
             .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.1#1fd9fd619b105a65c7478525dfd83f24004e1b8a",
             .hash = "shakedown-0.4.1-BR8U4z_qFQBovSS7wrfzvzZO0Vb8tTGeXEXcEUBXzxQE",
         },
+        .airlock = .{
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.1#071738b5f733cb0b9ef83532bba6bd831a5dd540",
+            .hash = "airlock-0.3.1-rfvu6Bz1BQA9KJ2iSefdcu14GkFIAdFUjR1_DKQWMpNE",
+        },
     },
 }

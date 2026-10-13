@@ -10,6 +10,7 @@
   ],
   "test_dependencies": [
     "shakedown",
+    "airlock",
     "preflight_order",
     "preflight_runner_options"
   ],

@@ -67,6 +67,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The test doubles and the conformance suite are shakedown's.
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("shakedown", shakedown.module("shakedown"));
+    // airlock's device flushes through `syncLane`, the executor reactor
+    // supplies for its `Blocking`.
+    test_module.addImport("airlock", b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock"));
     tools.preflight.addCi(b, p, .{
         .tests = test_step,
         .portable_tests = true,

@@ -20,6 +20,7 @@ test {
     _ = @import("threaded_test.zig");
     _ = @import("ext_test.zig");
     _ = @import("offload_test.zig");
+    _ = @import("airlock_test.zig");
     _ = @import("net_test.zig");
     _ = @import("resolve_test.zig");
     _ = @import("accept_test.zig");

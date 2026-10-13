@@ -485,7 +485,7 @@ test "syncLane: a task canceled before its call starts gets Canceled, and the ca
             return reactor.syncLane(io, null, mark, ran);
         }
         fn release() void {
-            std.Io.Threaded.global_single_threaded.io().sleep(.fromMilliseconds(10), .awake) catch {};
+            std.Io.Threaded.global_single_threaded.io().sleep(.fromMilliseconds(10), .awake) catch unreachable; // unreachable: nothing cancels this plain thread
             go.store(true, .release);
         }
     };
