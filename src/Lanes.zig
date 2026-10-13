@@ -425,11 +425,10 @@ fn start(l: *Lanes, job: *Job) bool {
 fn reject(l: *Lanes, first: *Job) void {
     var job = first;
     while (true) {
-        const following = l.next(job.lane);
+        const refused = l.next(job.lane);
         job.rejected = true;
         finish(job);
-        job = following orelse return;
-        if (!job.rejected) return;
+        job = refused orelse return;
     }
 }
 
@@ -439,13 +438,16 @@ fn runEntry(context: *const anyopaque) void {
     const c: *const Context = @ptrCast(@alignCast(context)); // safe: `start` passed a `Context`
     const job = c.job;
     job.run(job);
-    const following = if (job.control) null else c.lanes.next(job.lane);
+    const refused = if (job.control) null else c.lanes.next(job.lane);
     finish(job);
-    if (following) |next_job| if (next_job.rejected) c.lanes.reject(next_job);
+    if (refused) |next_job| c.lanes.reject(next_job);
 }
 
 /// A call on `lane` ended: the oldest queued one takes its slot, or the
-/// slot is freed.
+/// slot is freed. The queued call when the executor refused it, which then
+/// holds the slot until `reject` passes it on; null otherwise. A call that
+/// started is never returned: it may have ended, and its frame be gone,
+/// by the time the caller looked at it.
 fn next(l: *Lanes, lane: Lane) ?*Job {
     var held = l.states[@backingInt(lane)].queue.acquireUncancelable(system());
     defer held.deinit(system());
@@ -455,8 +457,7 @@ fn next(l: *Lanes, lane: Lane) ?*Job {
         return null;
     };
     // Publish the execution group before a cancellation can observe unqueued work.
-    if (!l.start(job)) job.rejected = true;
-    return job;
+    return if (l.start(job)) null else job;
 }
 
 fn finish(job: *Job) void {
