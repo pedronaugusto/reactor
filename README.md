@@ -62,7 +62,7 @@ out of `max_tasks`. `concurrentWith(io, options, f, args)` chooses a reserved
 `stack_size` and a `priority` (`normal` or `latency`). Latency work receives
 up to eight turns before queued normal work, on CPU and blocking lanes.
 Byte counts in the options are aegis `units.Bytes`, written
-`.stack_size = .fromRaw(256 << 10)`; a size or count too large to map or
+`.stack_size = .literal("256KiB")`; a size or count too large to map or
 allocate is refused with an error.
 
 `net.Receiver.Pool.Options.registered` registers the pool on each native

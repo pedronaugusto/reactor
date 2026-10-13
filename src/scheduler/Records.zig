@@ -2,6 +2,7 @@
 //! stack, and each stack index has one writer while its task runs.
 const Records = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Task = @import("Task.zig");
 const op = @import("../backend/op.zig");
@@ -109,7 +110,7 @@ pub fn dump(records: *const Records, writer: *Io.Writer) Io.Writer.Error!void {
         if (summary.state == .free) continue;
         const operation = summary.operation;
         const lane = summary.lane;
-        try writer.print("task={d} kind={s} state={s} worker={d} start=0x{x} parked_operation={s} lane={s} parked_stack={d}\n", .{
+        try writer.print("task={d} kind={s} state={s} worker={d} start=0x{x} parked_operation={s} lane={s} parked_stack={f}\n", .{
             i,
             @tagName(@as(Task.Kind, @fromBackingInt(summary.kind))),
             @tagName(summary.state),
@@ -117,7 +118,7 @@ pub fn dump(records: *const Records, writer: *Io.Writer) Io.Writer.Error!void {
             record.spawned_at.load(.monotonic),
             if (operation == no_operation) "none" else @tagName(@as(std.meta.Tag(op.Kind), @fromBackingInt(@intCast(operation)))),
             if (lane == no_lane) "none" else @tagName(@as(Lanes.Lane, @fromBackingInt(@intCast(lane)))),
-            summary.high_water,
+            aegis.units.Bytes(u64).fromRaw(summary.high_water),
         });
     }
 }

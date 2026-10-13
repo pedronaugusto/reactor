@@ -6,9 +6,10 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "docs", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.3#4e37678e9ff0d78ada850ed4dc00f714bbc8441c",
-            .hash = "aegis-0.1.3-rsxouhQiBwCaQ9NGzUiaQ1xdrFSNYoi3u0Z6sLjI5lrv",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.5#ced62c02cfa3be28b834e14e34533aff84b489fd",
+            .hash = "aegis-0.1.5-rsxoujOxBwA9ptJaF5wEA2P5rIM0Xj1S1qps_rgA2txC",
         },
+
         .shuttle = .{
             .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.0#92e5fc8d2f481a1717f8a3566019e4874852e3f7",
             .hash = "shuttle-0.2.0-0xOo5hj8AgD7ads9zradzPFjPzanebRrdxXDtDQJd5Pb",

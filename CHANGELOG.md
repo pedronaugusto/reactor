@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A stall's log line and `Runtime.dump`'s stack depths are written in aegis's text forms (`held processor 0 for 13ms164us`, `parked_stack=48KiB`), which `parse` reads back. Pins aegis 0.1.5.
 - airlock is a development dependency: a test runs its file and directory syncs through `syncLane` from a task and from the root, each on the `sync` lane.
 
 ### Fixed

@@ -17,6 +17,7 @@ const Monitor = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -199,7 +200,8 @@ fn record(m: *Monitor, stall: Stall) void {
         if (site.* == stall.site) return;
         if (site.* == no_site) {
             site.* = stall.site;
-            std.log.scoped(.reactor).warn("a task started at 0x{x} held processor {d} for {d} µs without switching out", .{ stall.site, stall.processor, @divFloor(stall.duration.nanoseconds, std.time.ns_per_us) });
+            const held = aegis.units.Duration(.microsecond, u64).fromIoDuration(stall.duration, .down) catch aegis.units.Duration(.microsecond, u64).fromRaw(std.math.maxInt(u64));
+            std.log.scoped(.reactor).warn("a task started at 0x{x} held processor {d} for {f} without switching out", .{ stall.site, stall.processor, held });
             return;
         }
     }
