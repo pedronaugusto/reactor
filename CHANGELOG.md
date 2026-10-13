@@ -12,7 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Every `std.Io` slot and extension call takes the calling thread's processor back from lending on the way in and lends it on the way out, where the monitor hands processors on: about 4 ns a call on an M3 under kqueue (a wake between two tasks 32 → 40 ns, a `concurrent` and `await` of an empty task 72 → 85 ns), 3 to 6 ns on Linux under epoll. In a process where no runtime lends (io_uring, no workers, no monitor) a call pays one load of a process-wide count.
+- Every `std.Io` slot and extension call takes the calling thread's processor back from lending on the way in and lends it on the way out, where the monitor hands processors on: about 4 ns a call on an M3 under kqueue (a wake between two tasks 32 → 40 ns, a `concurrent` and `await` of an empty task 72 → 85 ns), 3 to 6 ns on Linux under epoll. In a process where no runtime lends (io_uring, no workers, no monitor) a call pays one load of a process-wide count and its bracket: on Linux under io_uring a wake 35 → 36 ns, a `concurrent` and `await` 64 → 70 ns.
 - Handoff applies under `per_core` too: a task whose processor went to a spare comes back to that processor. A processor is handed on only when it has work only its owner can do.
 - Runs on shuttle 0.2, whose context is what a switch saves and no more: a task's record keeps its stack's number and no copy of the stack, 192 bytes where it was 256 on aarch64 (shuttle's context 40 bytes, from 112). Pins shuttle 0.2.0 and, for development, shakedown 0.4.1.
 - `spares` defaults to one per processor, so every processor can go to a spare while the thread that lent it still runs its task (was workers / 2).
