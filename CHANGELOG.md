@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The release tier runs the hardened profile: the suite with safety on, a bounded fuzz campaign over the scheduler's properties, and the suite under ThreadSanitizer, through a new `unit` step that runs the suite alone.
+
 ### Fixed
 
 - A group's last member touched the group after leaving its `token` null, which std's `Group.await` and `cancel` read without the runtime as a group that holds nothing: an owner that saw it null and reused the group at once (a `var group: Io.Group = .init` in a loop) or freed it raced the member's unlock. ThreadSanitizer found it; 0.2.3 had it too. The last member now marks the token ended, its last touch of the group, and only the runtime's await or cancel leaves it null; the group's lock lives in the token beside the first member.

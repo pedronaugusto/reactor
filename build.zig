@@ -45,7 +45,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_module.addAnonymousImport("threaded.source", .{ .root_source_file = threaded_source });
     const tests = b.addTest(.{ .name = "reactor-tests", .filters = filters, .root_module = test_module });
     const test_step = b.step("test", "Run the tests and example");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    // The suite alone: what the hardened profile fuzzes and runs under
+    // ThreadSanitizer, without the example and the gate.
+    const unit = b.step("unit", "Run the test suite alone");
+    unit.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(unit);
     const check = b.step("check", "Compile the tests, library, example and benchmarks without running them");
     check.dependOn(&tests.step);
     check.dependOn(&library.step);
@@ -66,6 +70,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     tools.preflight.addCi(b, p, .{
         .tests = test_step,
         .portable_tests = true,
+        // The release tier fuzzes the scheduler's properties and runs the
+        // suite under ThreadSanitizer, where a race between a task and the
+        // thread that awaits it shows.
+        .hardened = .{ .fuzz_step = "unit", .tsan_step = "unit" },
         .bench = .{
             .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "v11-prepare", .source = "bench/v11/prepare.zig", .timed = false } },
             .imports = benchImports,
