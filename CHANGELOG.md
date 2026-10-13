@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A group's last member touched the group after leaving its `token` null, which std's `Group.await` and `cancel` read without the runtime as a group that holds nothing: an owner that saw it null and reused the group at once (a `var group: Io.Group = .init` in a loop) or freed it raced the member's unlock. ThreadSanitizer found it; 0.2.3 had it too. The last member now marks the token ended, its last touch of the group, and only the runtime's await or cancel leaves it null; the group's lock lives in the token beside the first member.
+- A group whose token reads null has every member's stack back. Through std's shortcut for an empty group, an await could return while a member was still giving its stack back, so a program that took the stacks again at once could be refused with `ConcurrencyUnavailable`; the token now goes null only after the runtime's await has waited for the stacks.
+
 ## [0.3.0] - 2026-10-13
 
 ### Breaking

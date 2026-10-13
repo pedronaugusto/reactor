@@ -79,7 +79,12 @@ kind before a descriptor number is reused.
 A group's `await` returns only once every member has given its stack back.
 Members count themselves in before they leave the group and out after the
 release, so the group's lock is held for the unlink alone and the awaiter
-waits outside it.
+waits outside it. std reads the group's `token` without the runtime, and
+`Group.await` and `cancel` return at once when it is null, after which the
+owner may reuse or free the group. So only the runtime's own await or cancel
+leaves it null, after that wait: the last member to leave marks it ended, its
+last touch of the group. The token carries the group's lock too, in a low bit
+beside the first member.
 
 Initialization unwinds each acquisition with `errdefer`. Tables, stacks and
 lane closure/scratch slots are reserved there. The caller must finish or

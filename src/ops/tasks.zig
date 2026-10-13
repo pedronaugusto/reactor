@@ -3,9 +3,9 @@
 //!
 //! A future's task keeps its stack after it ends, because its result lives
 //! there, until the awaiter copies the result and gives the stack back. A
-//! group member gives its stack back as it ends. A group's `token` points
-//! at its first member while it has any; its `state` holds a lock bit, a
-//! canceled bit, and the awaiter.
+//! group member gives its stack back as it ends. A group's `token` holds its
+//! lock bit and points at its first member while it has any; its `state`
+//! holds a canceled bit and the awaiter.
 const std = @import("std");
 const aegis = @import("aegis");
 const assert = std.debug.assert;
@@ -118,10 +118,28 @@ fn schedulerOf(t: *Task) *Scheduler {
 }
 
 // Groups.
+//
+// std reads a group's `token` without the runtime: null means the group holds
+// nothing, and `Group.await` and `cancel` return at once, after which its
+// owner may reuse or free it. So only the runtime's own await or cancel leaves
+// the token null, once every member has left the group and given its stack
+// back. The last member to leave leaves it `ended`, its last touch of the
+// group. The token also carries the group's lock, in a low bit beside the
+// first member.
 
+const locked_bit: usize = 0b01;
+/// No members, and no await or cancel has settled the group yet.
+const ended: usize = 0b10;
+const flags: usize = locked_bit | ended;
+
+comptime {
+    assert(@alignOf(Task) > flags);
+}
+
+/// The canceled bit and the awaiter, read and written under the lock alone.
 const State = packed struct(usize) {
-    locked: bool = false,
     canceled: bool = false,
+    _: u1 = 0,
     /// The awaiter's address, shifted right by 2.
     awaiter: @Int(.unsigned, @bitSizeOf(usize) - 2) = 0,
 
@@ -137,30 +155,34 @@ const State = packed struct(usize) {
     }
 };
 
-fn stateOf(g: *Io.Group) *usize {
-    return &g.state;
+fn tokenOf(g: *Io.Group) *usize {
+    return @ptrCast(&g.token.raw); // safe: an optional pointer is one word, null as zero
 }
 
-fn lockGroup(g: *Io.Group) State {
+fn stateOf(g: *Io.Group) *State {
+    return @ptrCast(&g.state); // safe: `State` is a packed `usize`, and `state` is the runtime's
+}
+
+/// Locks `g`; returns its token as it was, unlocked.
+fn lockGroup(g: *Io.Group) usize {
     while (true) {
-        const old: State = @bitCast(@atomicRmw(usize, stateOf(g), .Or, 1, .acquire));
-        if (!old.locked) {
-            var held = old;
-            held.locked = true;
-            return held;
-        }
-        while (@as(State, @bitCast(@atomicLoad(usize, stateOf(g), .monotonic))).locked) std.atomic.spinLoopHint();
+        const old = @atomicRmw(usize, tokenOf(g), .Or, locked_bit, .acquire);
+        if (old & locked_bit == 0) return old;
+        while (@atomicLoad(usize, tokenOf(g), .monotonic) & locked_bit != 0) std.atomic.spinLoopHint();
     }
 }
 
-fn unlockGroup(g: *Io.Group, st: State) void {
-    var released = st;
-    released.locked = false;
-    @atomicStore(usize, stateOf(g), @bitCast(released), .release);
+fn unlockGroup(g: *Io.Group, token: usize) void {
+    @atomicStore(usize, tokenOf(g), token, .release);
 }
 
-fn head(g: *Io.Group) ?*Task {
-    return @ptrCast(@alignCast(g.token.raw)); // safe: only tasks are stored in a group's token
+/// The token of a group whose first member is `t`, unlocked.
+fn tokenFor(t: *Task) usize {
+    return @intFromPtr(t); // safe: a task is aligned past the flag bits (checked above)
+}
+
+fn firstOf(token: usize) ?*Task {
+    return @ptrFromInt(token & ~flags); // safe: only tasks are stored in a group's token
 }
 
 /// Starts `start(context)` as a member of `g`; `ConcurrencyUnavailable`
@@ -173,12 +195,11 @@ pub fn groupConcurrent(s: *Scheduler, g: *Io.Group, context: []const u8, context
     t.start = .{ .member = start };
     t.spawned_at = spawned_at;
     t.group = g;
-    const st = lockGroup(g);
-    t.group_next = head(g);
-    if (head(g)) |first| first.group_prev = t;
-    g.token.store(t, .release);
-    if (st.canceled) _ = t.cancel.fetchOr(1, .monotonic);
-    unlockGroup(g, st);
+    const first = firstOf(lockGroup(g));
+    t.group_next = first;
+    if (first) |member| member.group_prev = t;
+    if (stateOf(g).canceled) _ = t.cancel.fetchOr(1, .monotonic);
+    unlockGroup(g, tokenFor(t));
     s.place(t);
 }
 
@@ -198,16 +219,18 @@ fn memberDone(context: *anyopaque, t: *Task) void {
     // awaiter that finds the group empty can wait for the stacks without
     // every member holding the group's lock for the release.
     p.retiring.store(p.retiring.load(.monotonic) +% 1, .release);
-    var st = lockGroup(g);
-    if (t.group_prev) |prev| prev.group_next = t.group_next else g.token.store(t.group_next, .release);
+    var first = firstOf(lockGroup(g));
+    if (t.group_prev) |prev| prev.group_next = t.group_next else first = t.group_next;
     if (t.group_next) |next| next.group_prev = t.group_prev;
-    const last = head(g) == null;
-    const a = if (last) st.awaiterPtr() else null;
-    if (last) st = st.withAwaiter(null);
-    unlockGroup(g, st);
+    var a: ?*Task.Awaiter = null;
+    if (first) |member| unlockGroup(g, tokenFor(member)) else {
+        a = stateOf(g).awaiterPtr();
+        stateOf(g).* = .{};
+        unlockGroup(g, ended);
+    }
     s.release(t);
     p.retiring.store(p.retiring.load(.monotonic) -% 1, .release);
-    if (a) |awaiter| wakeAwaiter(s, awaiter);
+    if (a) |awaiter| wakeAwaiter(s, awaiter); // safe: an awaiter waits until woken, and its record with it
 }
 
 const GroupWait = struct {
@@ -224,20 +247,24 @@ const GroupWait = struct {
     }
 };
 
+/// Requests every member's cancel and marks the group, so members started
+/// before it empties are born canceled; an empty group stays unmarked.
 fn cancelMembers(g: *Io.Group) void {
-    var st = lockGroup(g);
-    st.canceled = true;
-    var it = head(g);
+    const token = lockGroup(g);
+    const first = firstOf(token);
+    if (first != null) stateOf(g).canceled = true;
+    var it = first;
     while (it) |member| : (it = member.group_next) member.requestCancel();
-    unlockGroup(g, st);
+    unlockGroup(g, token);
 }
 
-const Registration = struct { group: *Io.Group, awaiter: *Task.Awaiter, state: State };
+const Registration = struct { group: *Io.Group, awaiter: *Task.Awaiter, token: usize };
 
 fn registerGroupAwaiter(context: *anyopaque, t: *Task) void {
     _ = t;
     const r: *Registration = @ptrCast(@alignCast(context)); // safe: `waitGroup` passed its registration
-    unlockGroup(r.group, r.state.withAwaiter(r.awaiter));
+    stateOf(r.group).* = stateOf(r.group).withAwaiter(r.awaiter);
+    unlockGroup(r.group, r.token);
 }
 
 /// Waits until `g` has no members. Cancelable: a cancel is passed to every
@@ -245,19 +272,20 @@ fn registerGroupAwaiter(context: *anyopaque, t: *Task) void {
 pub fn groupAwait(s: *Scheduler, g: *Io.Group) Io.Cancelable!void {
     const t = Scheduler.current() orelse {
         waitGroupThread(g);
-        return s.awaitRetired();
+        return settle(s, g);
     };
     var w: GroupWait = .{ .group = g };
     t.enterWait(&w.hook) catch {
         // A cancel was already due: pass it on and wait for the members.
         cancelMembers(g);
         waitGroup(g, t);
-        s.awaitRetired();
+        settle(s, g);
         return error.Canceled;
     };
     waitGroup(g, t);
-    s.awaitRetired();
+    // Out of the wait first: its cancel hook may lock the group until then.
     t.leaveWait();
+    settle(s, g);
     if (w.fired) return t.acknowledge();
 }
 
@@ -265,23 +293,33 @@ pub fn groupAwait(s: *Scheduler, g: *Io.Group) Io.Cancelable!void {
 pub fn groupCancel(s: *Scheduler, g: *Io.Group) void {
     cancelMembers(g);
     if (Scheduler.current()) |t| waitGroup(g, t) else waitGroupThread(g);
+    settle(s, g);
+}
+
+/// `g` has no members: once every member that left it has given its stack
+/// back, its token goes null and the group is its owner's again.
+fn settle(s: *Scheduler, g: *Io.Group) void {
     s.awaitRetired();
+    const token = lockGroup(g);
+    assert(firstOf(token) == null);
+    unlockGroup(g, 0);
 }
 
 fn waitGroup(g: *Io.Group, t: *Task) void {
-    const st = lockGroup(g);
-    if (head(g) == null) return unlockGroup(g, st);
+    const token = lockGroup(g);
+    if (firstOf(token) == null) return unlockGroup(g, token);
     var a: Task.Awaiter = .{ .task = t };
-    var r: Registration = .{ .group = g, .awaiter = &a, .state = st };
+    var r: Registration = .{ .group = g, .awaiter = &a, .token = token };
     // The group stays locked until the task is off its stack.
     Scheduler.park(.{ .func = registerGroupAwaiter, .context = &r });
 }
 
 fn waitGroupThread(g: *Io.Group) void {
-    const st = lockGroup(g);
-    if (head(g) == null) return unlockGroup(g, st);
+    const token = lockGroup(g);
+    if (firstOf(token) == null) return unlockGroup(g, token);
     var a: Task.Awaiter = .{ .task = null };
-    unlockGroup(g, st.withAwaiter(&a));
+    stateOf(g).* = stateOf(g).withAwaiter(&a);
+    unlockGroup(g, token);
     const sys = Scheduler.system();
     while (a.done.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &a.done.raw, 0);
 }

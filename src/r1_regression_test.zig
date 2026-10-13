@@ -189,6 +189,42 @@ test "R1 group await waits for a member still returning its stack" {
     try testing.expect(released.load(.acquire));
 }
 
+test "R1 a group that reads empty has every member's stack back" {
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .workers = 3, .max_tasks = 32, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer runtime.deinit();
+    try runtime.start();
+    const io = runtime.io();
+    const Nap = struct {
+        fn run(i: Io) Io.Cancelable!void {
+            try i.sleep(.fromMicroseconds(50), .awake);
+        }
+    };
+    // std's `await` returns without the runtime once the token reads null,
+    // so that read alone must find every stack back: a thread outside the
+    // runtime reads the pool's count the moment it sees it (a stack given
+    // back after the token went null is caught here in every run).
+    const Observer = struct {
+        fn run(r: *Runtime, group: *Io.Group, seen: *u32) void {
+            while (group.token.load(.acquire) != null) std.atomic.spinLoopHint();
+            seen.* = r.core.scheduler.stacks.inUse();
+        }
+    };
+    for (0..500) |_| {
+        var group: Io.Group = .init;
+        for (0..8) |_| try group.concurrent(io, Nap.run, .{io});
+        var seen: u32 = undefined;
+        const observer = try std.Thread.spawn(.{}, Observer.run, .{ &runtime, &group, &seen });
+        try io.sleep(.fromMicroseconds(200), .awake);
+        try group.await(io);
+        observer.join();
+        try testing.expectEqual(@as(u32, 0), seen);
+    }
+}
+
 const CrossRuntime = struct {
     mode: enum { wake, spawn },
     scheduling: Scheduler.Scheduling = .stealing,
