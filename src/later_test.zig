@@ -11,7 +11,7 @@ const loop_internal = @import("loop/internal.zig");
 const Runtime = reactor.Runtime;
 const Driver = @import("testing/Driver.zig");
 const perform = @import("ops/perform.zig");
-const Stacks = @import("fiber/Stacks.zig");
+const stacks_ = @import("scheduler/stacks.zig");
 const pending = @import("backend/pending.zig");
 const UringState = @import("backend/op.zig").UringState;
 
@@ -149,7 +149,7 @@ fn witness(_: void, c: *shakedown.Case) !void {
 
 test "later: a scheduler property failure shrinks and its tape replays" {
     var report: shakedown.CheckReport = undefined;
-    try testing.expectError(error.PropertyFailed, shakedown.check(testing.allocator, {}, witness, .{ .cases = 32, .seed = 7, .diagnostics = &report }));
+    try testing.expectError(error.PropertyFailed, shakedown.check(testing.allocator, {}, witness, .{ .cases = 32, .seed = 7, .diagnostics = &report, .fuzz = false }));
     defer report.deinit();
     try testing.expectEqual(error.ExpectedWitness, report.err);
     try testing.expect(report.shrink_runs > 0);
@@ -157,7 +157,7 @@ test "later: a scheduler property failure shrinks and its tape replays" {
     defer text.deinit();
     try (shakedown.Source.Tape{ .choices = report.tape }).format(&text.writer);
     var replay: shakedown.CheckReport = undefined;
-    try testing.expectError(error.PropertyFailed, shakedown.check(testing.allocator, {}, witness, .{ .cases = 0, .regressions = &.{text.written()}, .diagnostics = &replay }));
+    try testing.expectError(error.PropertyFailed, shakedown.check(testing.allocator, {}, witness, .{ .cases = 0, .regressions = &.{text.written()}, .diagnostics = &replay, .fuzz = false }));
     defer replay.deinit();
     try testing.expectEqualSlices(u64, report.tape, replay.tape);
 }
@@ -820,15 +820,14 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
 }
 
 fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
-    var stacks: Stacks = undefined;
-    try stacks.init(gpa, .{ .count = 12, .size = .fromRaw(64 << 10), .classes = &.{ .{ .count = 3, .size = .fromRaw(128 << 10) }, .{ .count = 2, .size = .fromRaw(256 << 10) } } });
+    var stacks = try stacks_.init(gpa, .{ .count = 12, .size = .fromRaw(64 << 10), .classes = &.{ .{ .count = 3, .size = .fromRaw(128 << 10) }, .{ .count = 2, .size = .fromRaw(256 << 10) } } });
     defer stacks.deinit(gpa);
-    const ordinary = stacks.take().?;
-    const explicit = stacks.takeSized(.fromRaw(200 << 10)).?;
-    try testing.expectEqual(@as(usize, 256 << 10), stacks.sizeAt(explicit.stack));
-    try testing.expectEqual(@as(u32, 2), stacks.inUse(.monotonic));
-    stacks.give(explicit.stack);
-    stacks.give(ordinary.stack);
+    const ordinary = stacks_.take(&stacks, .fromRaw(64 << 10), null).?;
+    const explicit = stacks_.take(&stacks, .fromRaw(64 << 10), .fromRaw(200 << 10)).?;
+    try testing.expectEqual(@as(usize, 256 << 10), explicit.size().raw());
+    try testing.expectEqual(@as(u32, 2), stacks.inUse());
+    stacks.give(explicit);
+    stacks.give(ordinary);
 }
 test "later: stack class initialization rolls back every allocation failure" {
     var allocator = shakedown.alloc.NoResize.init(testing.allocator);

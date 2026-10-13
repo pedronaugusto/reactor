@@ -112,7 +112,9 @@ Benchmarks are code in `bench/`; measurements are maintained separately.
   `Batch.awaitConcurrent` never return while the kernel still holds a buffer.
 - **Work stealing**, or `per_core` shared nothing; the root never leaves the
   thread that built the runtime.
-- **No allocation after `init`.** Stacks are reserved in slabs at `init`; lane
+- **No allocation after `init`.** Stacks are reserved in slabs at `init`, in
+  [shuttle](https://github.com/pedronaugusto/shuttle)'s pool, each with its own
+  guard; lane
   closures come from a pool reserved there.
 - **`Loop`**: one thread's completion engine with no threads of its own, driven
   by `run(.nowait)`, `run(.once)` or `run(.until)`, completions by callback or
@@ -175,7 +177,10 @@ to 16 KiB pages; reserved address space is separate from resident memory.
 
 ## Built with
 
-Production code depends on Zig std and aegis. reactor is developed with
+Production code depends on Zig std, aegis and
+[shuttle](https://github.com/pedronaugusto/shuttle): a task is a shuttle context
+on a stack from shuttle's pool, and a task's switch to its scheduler is
+shuttle's handoff. reactor is developed with
 [bay](https://github.com/pedronaugusto/bay): repository checks use preflight, and
 properties, faults, virtual time and conformance use shakedown, both as dev
 dependencies that a project depending on reactor never sees.

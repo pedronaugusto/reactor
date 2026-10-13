@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- reactor depends on [shuttle](https://github.com/pedronaugusto/shuttle) at run time: a task is a shuttle context on a stack from shuttle's pool, and switches to its scheduler through shuttle's handoff. A project that depends on reactor fetches shuttle with it.
+
+### Changed
+
+- A task's switch is inline, where it was a call: a call and its return, to and from different contexts, cost the return predictor a miss each way. On an M3, a wake between two tasks takes 34 ns where it took 69, and a `concurrent` and `await` of an empty task 72 ns where it took 102 (Linux on the same machine: 36 and 66 ns, from 71 and 93). A group of 10,000 members costs more each, 211 ns where it took 177 (293 from 230 on Linux): more of each task's record and stack is touched where 10,000 are live.
+- The stacks are shuttle's pool, each with its own guard below it; the context switch, the first frame, the Windows stack bounds and the ThreadSanitizer annotations are shuttle's. The default class stays kept for the tasks that ask no size (`Pool.takeExactly`), and a stack's number for the records and trims is `Pool.number`.
+- Pins preflight 0.4.3 and aegis 0.1.3.
+
+### Fixed
+
+- The test that a scheduler property's failure shrinks and replays runs its property on seeded cases alone (`.fuzz = false`): built for the fuzzer, it ran the fuzzer's inputs instead and failed.
+
 ## [0.2.3] - 2026-10-12
 
 ### Changed

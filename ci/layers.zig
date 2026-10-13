@@ -6,7 +6,6 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "system calls", .patterns = &.{
         "src/sys.zig",
         "src/sys/crash.zig",
-        "src/sys/memory.zig",
         "src/sys/socket.zig",
         "src/sys/file.zig",
         "src/sys/afd.zig",
@@ -21,10 +20,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys/lookup_windows.zig",
         "src/sys/receive.zig",
     } },
-    .{ .name = "fibers, time and lanes", .patterns = &.{
-        "src/fiber.zig",
-        "src/fiber/Stacks.zig",
-        "src/fiber/Stacks/Pool.zig",
+    .{ .name = "time and lanes", .patterns = &.{
         "src/Wheel.zig",
         "src/clock.zig",
         "src/Lanes.zig",
@@ -59,6 +55,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "scheduler", .patterns = &.{
         "src/Scheduler.zig",
         "src/scheduler/Task.zig",
+        "src/scheduler/stacks.zig",
         "src/scheduler/Records.zig",
         "src/scheduler/Trims.zig",
         "src/scheduler/run_queue.zig",
@@ -127,6 +124,7 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
             "aegis",
             "builtin",
             "shakedown",
+            "shuttle",
             // The death test selects one test through its portable runner.
             "preflight_order",
             "preflight_runner_options",

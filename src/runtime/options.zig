@@ -23,7 +23,7 @@ pub const Files = enum {
 
 pub const Offload = Lanes.Config;
 
-pub const StackClass = @import("../fiber/Stacks.zig").Class;
+pub const StackClass = @import("../scheduler/stacks.zig").Class;
 
 /// The workers a runtime starts when `Options.workers` is null: the logical
 /// CPUs less the home thread's, and on Darwin a quarter of them (at least

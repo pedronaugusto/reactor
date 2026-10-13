@@ -16,13 +16,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 const clocks = @import("../clock.zig");
-const fiber = @import("../fiber.zig");
+const shuttle = @import("shuttle");
 const op = @import("../backend/op.zig");
-const Stacks = @import("../fiber/Stacks.zig");
+const stacks = @import("stacks.zig");
 const Lanes = @import("../Lanes.zig");
 
 /// Saved registers while the task is not running.
-context: fiber.Context = undefined,
+context: shuttle.Context = .{},
 /// The one queue the task is in: a run queue, the inject queue, a
 /// processor's pinned queue or inbox.
 next: ?*Task = null,
@@ -31,7 +31,7 @@ next: ?*Task = null,
 /// they are served (`Scheduler.leaveWait`).
 cancel_messages: std.atomic.Value(u32) = .init(0),
 /// Its stack among the runtime's; null for the root, which runs on its thread's.
-stack: ?Stacks.Stack = null,
+stack: ?stacks.Number = null,
 /// The immutable upper bound, also used for parked stack watermarks.
 stack_top: usize = 0,
 kind: Kind,

@@ -14,7 +14,7 @@ const std = @import("std");
 const Io = std.Io;
 const windows = std.os.windows;
 
-const fiber = @import("../fiber.zig");
+const supported = @import("../Scheduler.zig").supported;
 const Notifications = @import("../backend/iocp/Notifications.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const poll = @import("../sys/poll.zig");
@@ -52,7 +52,7 @@ pub fn attach(io: Io, job: windows.HANDLE) AttachError!Job {
     const process = win32.GetCurrentProcess();
     if (win32.DuplicateHandle(process, job, process, &duplicate, 0, .FALSE, 2) == .FALSE) return error.SystemResources;
     errdefer windows.CloseHandle(duplicate);
-    if (comptime is_windows and fiber.supported) {
+    if (comptime is_windows and supported) {
         if (native.runtimeOf(io)) |core| {
             if (core.backendKind() == .iocp) {
                 const record = core.jobs.acquire(io) orelse return error.SystemResources;

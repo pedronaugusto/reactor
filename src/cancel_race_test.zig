@@ -6,7 +6,7 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const Runtime = @import("Runtime.zig");
 
 fn napper(io: Io, nap: Io.Duration) Io.Cancelable!void {
@@ -14,7 +14,7 @@ fn napper(io: Io, nap: Io.Duration) Io.Cancelable!void {
 }
 
 test "a cancel that races the end of its task finds the task's record intact" {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     const runtime = try testing.allocator.create(Runtime);
     defer testing.allocator.destroy(runtime);
     runtime.init(testing.allocator, .{ .workers = 3, .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none }) catch |err| switch (err) {

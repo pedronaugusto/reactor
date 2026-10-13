@@ -6,7 +6,7 @@ const Io = std.Io;
 
 const Loop = @import("Loop.zig");
 const Runtime = @import("Runtime.zig");
-const Stacks = @import("fiber/Stacks.zig");
+const stacks_ = @import("scheduler/stacks.zig");
 const clock = @import("clock.zig");
 const loop_internal = @import("loop/internal.zig");
 const Fake = @import("testing/Fake.zig");
@@ -14,9 +14,8 @@ const Fake = @import("testing/Fake.zig");
 test "a task count past what slabs can number is refused" {
     // The slab count rounds the task count up; at the top of the range that sum wrapped.
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var stacks: Stacks = undefined;
     // Linux without guard regions counts the mappings first and refuses the count itself.
-    if (stacks.init(failing.allocator(), .{ .count = std.math.maxInt(u32), .size = .fromRaw(64 << 10) })) |_| {
+    if (stacks_.init(failing.allocator(), .{ .count = std.math.maxInt(u32), .size = .fromRaw(64 << 10) })) |_| {
         return error.TestUnexpectedResult;
     } else |err| switch (err) {
         error.OutOfMemory, error.TooManyTasks => {},
@@ -25,9 +24,8 @@ test "a task count past what slabs can number is refused" {
 }
 
 test "a stack size past the address space is refused" {
-    var stacks: Stacks = undefined;
-    try testing.expectError(error.SystemResources, stacks.init(testing.allocator, .{ .count = 4, .size = .fromRaw(std.math.maxInt(usize)) }));
-    try testing.expectError(error.SystemResources, stacks.init(testing.allocator, .{ .count = 4, .size = .fromRaw(1 << 62) }));
+    try testing.expectError(error.SystemResources, stacks_.init(testing.allocator, .{ .count = 4, .size = .fromRaw(std.math.maxInt(usize)) }));
+    try testing.expectError(error.SystemResources, stacks_.init(testing.allocator, .{ .count = 4, .size = .fromRaw(1 << 62) }));
 }
 
 test "a deadline beyond the end of the timeline waits and cancels" {

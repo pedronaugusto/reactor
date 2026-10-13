@@ -12,14 +12,14 @@ const IpAddress = Io.net.IpAddress;
 
 const reactor = @import("reactor.zig");
 const Runtime = reactor.Runtime;
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const Scheduler = @import("Scheduler.zig");
 const Task = @import("scheduler/Task.zig");
 const native = @import("ext/native.zig");
 const shakedown = @import("shakedown");
 
 fn runtime(r: *Runtime, workers: u16) !void {
-    if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
+    if (builtin.os.tag != .linux or !supported) return error.SkipZigTest;
     r.init(testing.allocator, .{ .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
@@ -339,7 +339,7 @@ fn conformance(io: Io, failure: *shakedown.conformance.Failure, done: *std.atomi
 
 test "a runtime with no thread of its own runs the conformance suite in 1 ms frames, and starts no thread" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     const before = try threadSnapshot();
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .workers = 0, .offload = .none, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
@@ -531,7 +531,7 @@ test "a native receive alone returns from a loop waiting for a completion" {
 }
 
 test "provided buffer pools register before startup and during worker adoption" {
-    if (builtin.os.tag != .linux or !fiber.supported) return error.SkipZigTest;
+    if (builtin.os.tag != .linux or !supported) return error.SkipZigTest;
     for (0..16) |_| {
         var r: Runtime = undefined;
         r.init(testing.allocator, .{ .workers = 3, .max_tasks = 8 }) catch |err| switch (err) {

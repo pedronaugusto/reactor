@@ -9,7 +9,7 @@ const Io = std.Io;
 const posix = std.posix;
 
 const reactor = @import("reactor.zig");
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const Loop = @import("Loop.zig");
 const Driver = @import("testing/Driver.zig");
 const Threads = @import("testing/Threads.zig");
@@ -18,7 +18,7 @@ const Fake = @import("testing/Fake.zig");
 const is_windows = builtin.os.tag == .windows;
 
 fn skipWithoutFibers() !void {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
 }
 
 const small: reactor.Runtime.Options = .{ .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none };

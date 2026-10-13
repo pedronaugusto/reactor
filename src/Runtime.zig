@@ -124,7 +124,7 @@ pub fn stats(r: *Runtime) Stats {
         .stack_high_water = if (r.core.options.measure_stacks) overall else null,
         .stack_trims = r.core.scheduler.shared.stack_trims.load(.monotonic),
         .workers = @intCast(r.core.processors.len - 1),
-        .tasks = r.core.scheduler.stacks.inUse(.monotonic),
+        .tasks = r.core.scheduler.stacks.inUse(),
         .max_tasks = r.core.options.max_tasks,
         .steals = r.core.scheduler.shared.steals.load(.monotonic),
         .forced_yields = r.core.scheduler.shared.forced_yields.load(.monotonic),

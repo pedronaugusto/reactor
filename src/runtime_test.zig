@@ -8,12 +8,12 @@ const testing = std.testing;
 const Io = std.Io;
 const shakedown = @import("shakedown");
 
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const Driver = @import("testing/Driver.zig");
 const Threads = @import("testing/Threads.zig");
 
 fn skipWithoutFibers() !void {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
 }
 
 const Runtime = @import("Runtime.zig");
@@ -476,7 +476,7 @@ fn capturedChild(io: Io) !void {
 }
 
 test "r6: a native child drains empty and nonempty stdout and stderr before waiting" {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var runtime: Runtime = undefined;
     try runtime.init(testing.allocator, .{ .workers = 0, .max_tasks = 16 });
     defer runtime.deinit();

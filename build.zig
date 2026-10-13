@@ -6,7 +6,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
-    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
+    // A task's stack and switch are shuttle's.
+    const shuttle = b.dependency("shuttle", .{ .target = target, .optimize = optimize }).module("shuttle");
+    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle } } });
     b.installArtifact(b.addLibrary(.{ .name = "reactor", .root_module = module }));
 }
 
@@ -23,13 +25,14 @@ pub fn dev(b: *std.Build, tools: type) void {
     const library = package.artifact("reactor");
     const aegis_dependency = p.dependency("aegis", .{ .target = target, .optimize = optimize });
     const aegis = aegis_dependency.module("aegis");
+    const shuttle_dependency = p.dependency("shuttle", .{ .target = target, .optimize = optimize });
 
     const filters = if (test_filter) |filter| &.{filter} else &.{};
     const test_module = b.createModule(.{
         .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "aegis", .module = aegis }},
+        .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle_dependency.module("shuttle") } },
     });
     if (target.result.os.tag == .windows) {
         test_module.link_libc = true;
@@ -72,7 +75,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
     // A project that depends on reactor by path, with no packages to
     // fetch: the build a consumer gets.
-    tools.preflight.addConsumerCheck(b, p, .{ .package = "reactor", .program = p.path("ci/consumer.zig"), .packages = &.{aegis_dependency} });
+    tools.preflight.addConsumerCheck(b, p, .{ .package = "reactor", .program = p.path("ci/consumer.zig"), .packages = &.{ aegis_dependency, shuttle_dependency } });
 }
 
 /// reactor again, in the mode a benchmark builds in: an imported module keeps
@@ -81,6 +84,7 @@ pub fn dev(b: *std.Build, tools: type) void {
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const p = b.dependency("reactor", .{ .target = target, .optimize = optimize }).builder;
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
-    const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "aegis", .module = aegis }} });
+    const shuttle = p.dependency("shuttle", .{ .target = target, .optimize = optimize }).module("shuttle");
+    const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle } } });
     return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "reactor", .module = reactor }}) catch @panic("OOM");
 }

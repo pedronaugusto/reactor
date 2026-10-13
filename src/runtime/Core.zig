@@ -11,9 +11,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const backend = @import("../backend.zig");
-const fiber = @import("../fiber.zig");
-const Stacks = @import("../fiber/Stacks.zig");
-const memory = @import("../sys/memory.zig");
+const shuttle = @import("shuttle");
+const Stacks = @import("../scheduler/stacks.zig");
 const clock = @import("../clock.zig");
 const Lanes = @import("../Lanes.zig");
 const Lookup = @import("../ops/Lookup.zig");
@@ -45,7 +44,6 @@ lanes: Lanes,
 lookup: Lookup,
 jobs: if (builtin.os.tag == .windows) Notifications else void,
 /// The home processor's scheduler runs here while the root waits.
-home_stack: []align(memory.page_size_min) u8,
 started: std.atomic.Value(bool) = .init(false),
 stderr: Stderr = .{},
 csprngs: []Io.Threaded.Csprng,
@@ -83,7 +81,7 @@ pub const Construction = union(enum) {
 /// Builds everything: stacks reserved, tables, loops, lanes; starts no
 /// thread. The calling thread becomes the home thread. `c` must not move.
 pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtable: *const Io.VTable) InitError!void {
-    if (comptime !fiber.supported) return error.BackendUnavailable;
+    if (comptime !Scheduler.supported) return error.BackendUnavailable;
     const workers: u16 = options.workers orelse options_.defaultWorkers(builtin.os.tag, std.Thread.getCpuCount() catch 1);
     // The home processor and one for each worker: the count is the caller's, to its top.
     const count = (aegis.int.Checked(u16).init(workers).add(1) catch return error.SystemResources).raw();
@@ -97,7 +95,6 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .lanes = undefined,
         .lookup = undefined,
         .jobs = undefined,
-        .home_stack = undefined,
         .csprngs = undefined,
     };
     errdefer gpa.free(c.processors);
@@ -105,8 +102,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     errdefer gpa.free(c.csprngs);
     @memset(c.csprngs, .uninitialized);
 
-    var stacks: Stacks = undefined;
-    stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size, .classes = options.stack_classes }) catch |err| return switch (err) {
+    var stacks = Stacks.init(gpa, .{ .count = options.max_tasks, .size = options.stack_size, .classes = options.stack_classes }) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TooManyTasks => error.TooManyTasks,
         error.SystemResources => error.SystemResources,
@@ -120,6 +116,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .processors = c.processors,
         .root = &c.root,
         .stacks = stacks,
+        .stack_size = options.stack_size,
         .records = records,
         .trims = trims,
         .scheduling = if (workers == 0) .per_core else options.scheduling,
@@ -136,7 +133,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     for (c.processors, 0..) |*p, i| {
         p.* = .{ .scheduler = &c.scheduler, .index = @intCast(i), .loop = undefined };
         try c.buildLoop(p, how);
-        if (comptime builtin.os.tag == .windows and fiber.supported) if (p.loop.backend == .iocp) {
+        if (comptime builtin.os.tag == .windows and Scheduler.supported) if (p.loop.backend == .iocp) {
             p.loop.backend.iocp.notifications = &c.jobs;
         };
         loop_internal.setBatchSink(&p.loop, .{ .context = c, .complete = batch.completed });
@@ -145,7 +142,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     // A handle's entries arrive on one port for its life; the home loop's
     // is served only while the root waits in the runtime. With workers,
     // the handles it binds go to the first worker's port.
-    if (comptime builtin.os.tag == .windows and fiber.supported) if (c.processors.len > 1 and c.processors[0].loop.backend == .iocp) {
+    if (comptime builtin.os.tag == .windows and Scheduler.supported) if (c.processors.len > 1 and c.processors[0].loop.backend == .iocp) {
         c.processors[0].loop.backend.iocp.binds_to = c.processors[1].loop.backend.iocp.port;
     };
 
@@ -157,14 +154,10 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     c.lookup = try Lookup.init(gpa, options.max_lookups);
     errdefer c.lookup.deinit(gpa, &c.lanes);
 
-    c.home_stack = memory.reserve(home_stack_size) catch return error.SystemResources;
-    errdefer memory.release(c.home_stack);
-    memory.protect(c.home_stack[0..memory.pageSize()]) catch return error.SystemResources;
-
     const home = &c.processors[0];
-    const bottom = @intFromPtr(c.home_stack.ptr); // safe: the start of the mapping, for the stack's bounds
-    const top = bottom + c.home_stack.len;
-    home.sched_context = fiber.initial(.{ .top = top, .limit = bottom + memory.pageSize(), .bottom = bottom }, top, schedulerEntry, home);
+    var home_stack = shuttle.Stack.init(.{ .size = .fromRaw(home_stack_size) }) catch return error.SystemResources;
+    errdefer home_stack.deinit();
+    home.sched_context = shuttle.Context.init(home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
     c.root.processor = home;
     home.current = &c.root;
     Scheduler.enter(home);
@@ -214,10 +207,10 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
     }
 }
 
-/// The home processor's scheduler, entered the first time the root waits.
-fn schedulerEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) noreturn {
-    const home: *Processor = @ptrCast(@alignCast(arg)); // safe: `init` passed the home processor
-    home.afterSwitch(home.scheduler.root, message);
+/// The home processor's scheduler, entered the first time the root waits,
+/// once that switch has run what the root asked.
+fn homeScheduler(arg: ?*anyopaque) noreturn {
+    const home: *Processor = @ptrCast(@alignCast(arg.?)); // safe: `init` passed the home processor
     while (true) {
         home.schedule();
         // The home processor went to another thread while a task here sat
@@ -263,7 +256,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 
 pub fn stop(c: *Core) void {
     if (!c.started.load(.acquire)) return;
-    assert(c.scheduler.stacks.inUse(.acquire) == 0);
+    assert(c.scheduler.stacks.inUse() == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
     if (c.scheduler.monitor) |m| {
@@ -277,15 +270,15 @@ pub fn stop(c: *Core) void {
 
 pub fn deinit(c: *Core) void {
     c.stop();
-    assert(c.scheduler.stacks.inUse(.acquire) == 0);
+    assert(c.scheduler.stacks.inUse() == 0);
     Scheduler.leave();
     c.deinitMonitor();
     c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
-    fiber.deinit(&c.processors[0].sched_context);
+    var home_stack = c.processors[0].sched_context.deinit();
     c.scheduler.trims.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
-    memory.release(c.home_stack);
+    home_stack.deinit();
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);

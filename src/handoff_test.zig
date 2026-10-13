@@ -11,7 +11,7 @@ const posix = std.posix;
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
 const Scheduler = @import("Scheduler.zig");
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 
 const readiness: ?Loop.Backend = switch (builtin.os.tag) {
     .linux => .epoll,
@@ -70,7 +70,7 @@ fn fromOutside(io: Io, rendezvous: *Rendezvous, out: *anyerror!void) void {
 
 test "a worker stuck in a blocking file call hands its processor to a spare, and the tasks queued there run" {
     const backend = readiness orelse return error.SkipZigTest;
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .backend = backend, .workers = 2, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
@@ -99,7 +99,7 @@ test "a worker stuck in a blocking file call hands its processor to a spare, and
 
 fn fifoRuntime(r: *Runtime, workers: u16) !void {
     const backend = readiness orelse return error.SkipZigTest;
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
@@ -148,7 +148,7 @@ fn spinUntilStall(r: *Runtime) !void {
 
 test "a task that holds its processor past report_after without switching out is recorded as a stall" {
     const backend = readiness orelse return error.SkipZigTest;
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .backend = backend, .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .report_after = .fromMilliseconds(5) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
@@ -193,7 +193,7 @@ const Pipe = struct {
 };
 
 test "a synchronous Windows pipe read hands its IOCP processor to a spare" {
-    if (builtin.os.tag != .windows or !fiber.supported) return error.SkipZigTest;
+    if (builtin.os.tag != .windows or !supported) return error.SkipZigTest;
     var r: Runtime = undefined;
     try r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10) });
     defer r.deinit();

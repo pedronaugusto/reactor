@@ -5,8 +5,7 @@ const Scheduler = @import("../Scheduler.zig");
 const Driver = @import("../testing/Driver.zig");
 
 fn stackSize() usize {
-    const p = Scheduler.processor().?;
-    return p.scheduler.stacks.sizeAt(Scheduler.current().?.stack.?);
+    return Scheduler.current().?.context.stack.?.size().raw();
 }
 
 test "per-task sizes use init-reserved classes, remain bounded, and recycle" {

@@ -13,8 +13,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const clocks = @import("clock.zig");
-const fiber = @import("fiber.zig");
-const Stacks = @import("fiber/Stacks.zig");
+const shuttle = @import("shuttle");
+const stacks_ = @import("scheduler/stacks.zig");
 const Loop = @import("Loop.zig");
 const loop_internal = @import("loop/internal.zig");
 const Task = @import("scheduler/Task.zig");
@@ -27,6 +27,13 @@ pub const Monitor = @import("scheduler/Monitor.zig");
 pub const Spares = @import("scheduler/Spares.zig");
 
 pub const Scheduling = enum { stealing, per_core };
+
+/// Whether this target can run reactor's tasks.
+pub const supported = shuttle.supported and switch (builtin.os.tag) {
+    .linux, .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
+    .windows => builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64,
+    else => false,
+};
 
 /// Work another thread hands a processor, run on its thread.
 pub const Errand = struct {
@@ -104,7 +111,7 @@ pub const Processor = struct {
     on_home_thread: bool = false,
     loop: Loop,
     /// Where the scheduler waits while a task runs.
-    sched_context: fiber.Context = undefined,
+    sched_context: shuttle.Context = .{},
     /// The task running, if any.
     current: ?*Task = null,
     lifo: ?*Task = null,
@@ -206,7 +213,8 @@ pub const Processor = struct {
     /// What a switch into the scheduler asks it to do once the task's stack
     /// is still.
     pub const Message = struct {
-        switch_: fiber.Switch,
+        /// The processor whose scheduler the task switches to.
+        processor: *Processor,
         action: Action,
         /// A park whose stack holds pages a deeper park touched: once the
         /// task is off it, the loop may arm its trim.
@@ -503,26 +511,30 @@ pub const Processor = struct {
             p.site.store(t.spawned_at, .monotonic);
             p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
-        var s: fiber.Switch = .{ .old = &p.sched_context, .new = &t.context };
-        const back = fiber.switchTo(&s);
-        p.afterSwitchMode(watched, true, t, back);
+        // The task's switch back runs `afterSwitch` here, once its stack is still.
+        shuttle.handoff.switchTo(&p.sched_context, &t.context, null);
     }
 
-    /// What the scheduler does once `t` has switched back to it: `t`'s stack
-    /// is still now, so `t` may be published to whoever will resume it.
-    pub fn afterSwitch(p: *Processor, t: *Task, back: *const fiber.Switch) void {
-        if (p.scheduler.monitor != null) return p.afterSwitchMode(true, false, t, back);
-        return p.afterSwitchMode(false, false, t, back);
+    /// What the scheduler does once a task has switched back to it, run
+    /// by the switch on the scheduler's side: the task's stack is still
+    /// now, so it may be published to whoever will resume it.
+    pub fn afterSwitch(data: ?*anyopaque, from: *shuttle.Context) void {
+        const message: *const Message = @ptrCast(@alignCast(data.?)); // safe: every switch to a scheduler sends its message
+        const t: *Task = @fieldParentPtr("context", from);
+        const p = message.processor;
+        if (p.scheduler.monitor != null) return p.afterSwitchMode(true, t, message);
+        return p.afterSwitchMode(false, t, message);
     }
 
-    inline fn afterSwitchMode(p: *Processor, comptime watched: bool, comptime was_running: bool, t: *Task, back: *const fiber.Switch) void {
-        const message: *const Message = @alignCast(@fieldParentPtr("switch_", back)); // safe: the field belongs to this record
+    inline fn afterSwitchMode(p: *Processor, comptime watched: bool, t: *Task, message: *const Message) void {
         const action = message.action;
         // A spare owns the processor after handoff: touch no mutable state.
         if (watched) {
             if (action == .relocate) return relocated(p.scheduler, t);
-            // The first home entry parks the root without runTask starting it.
-            if (was_running) p.passes.store(p.passes.load(.monotonic) +% 1, .release);
+            // Odd while a task `runTask` started runs: the root's first park,
+            // which enters the home scheduler, ends no such run.
+            const passes = p.passes.load(.monotonic);
+            if (passes & 1 == 1) p.passes.store(passes +% 1, .release);
         }
         if (message.inspect or t.policy.measured) p.inspectStack(t, message.inspect);
         p.current = null;
@@ -539,12 +551,12 @@ pub const Processor = struct {
     /// Cold stack work uses only the owning, suspended task. Ordinary
     /// switches do not load shared diagnostic state or inspect trim records.
     fn inspectStack(p: *Processor, t: *Task, trimmable: bool) void {
-        const index = t.stack orelse return;
+        if (t.stack == null) return;
         if (t.policy.measured) {
-            const depth = p.scheduler.stacks.highWater(index);
+            const depth = stacks_.highWater(t.context.stack.?);
             if (depth > p.stack_high_water.load(.monotonic)) p.stack_high_water.store(depth, .monotonic);
         } else if (builtin.os.tag != .windows and trimmable) {
-            p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.records, &p.scheduler.stacks, &p.scheduler.shared.stack_trims, fiber.stackPointer(&t.context));
+            p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.records, &p.scheduler.shared.stack_trims, t.context.stackPointer());
         }
     }
 
@@ -712,7 +724,9 @@ const Shared = struct {
 
 processors: []Processor,
 root: *Task,
-stacks: Stacks,
+stacks: shuttle.Pool,
+/// The default class's size: what a task that asks no size takes.
+stack_size: stacks_.Bytes,
 records: Records,
 trims: Trims,
 scheduling: Scheduling,
@@ -804,38 +818,29 @@ pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Pro
 pub fn park(after: ?Processor.After) void {
     const p = heldNow().?;
     const t = p.current.?;
-    var message: Processor.Message = .{
-        .switch_ = .{ .old = &t.context, .new = &p.sched_context },
-        .action = .{ .park = after },
-    };
+    var message: Processor.Message = .{ .processor = p, .action = .{ .park = after } };
     if (t.stack != null) {
         const bytes = t.stack_top - @intFromPtr(&message); // safe: message is a live frame below this task's owned stack top
         const deepest = p.scheduler.records.parked(t, p.index, bytes);
         message.inspect = deepest > bytes + trim_gap;
     }
-    _ = fiber.switchTo(&message.switch_);
+    toScheduler(t, &p.sched_context, &message);
 }
 
 /// To the back of the queue.
 pub fn yield() void {
     const p = heldNow().?;
     const t = p.current.?;
-    var message: Processor.Message = .{
-        .switch_ = .{ .old = &t.context, .new = &p.sched_context },
-        .action = .yield,
-    };
-    _ = fiber.switchTo(&message.switch_);
+    var message: Processor.Message = .{ .processor = p, .action = .yield };
+    toScheduler(t, &p.sched_context, &message);
 }
 
 /// Ends the running task: `after` runs once it is off its stack.
 pub fn exit(after: Processor.After) noreturn {
     const p = heldNow().?;
     const t = p.current.?;
-    var message: Processor.Message = .{
-        .switch_ = .{ .old = &t.context, .new = &p.sched_context },
-        .action = .{ .exit = after },
-    };
-    _ = fiber.switchTo(&message.switch_);
+    var message: Processor.Message = .{ .processor = p, .action = .{ .exit = after } };
+    toScheduler(t, &p.sched_context, &message);
     unreachable; // unreachable: nothing switches back to an ended task
 }
 
@@ -985,7 +990,7 @@ pub const Blocking = struct {
     word: u32,
     /// The scheduler of the thread making the call: where the task leaves
     /// that thread if the processor goes elsewhere meanwhile.
-    home: fiber.Context,
+    home: shuttle.Context,
 };
 
 /// Before a call that may block its thread (std's file code, borrowed on a
@@ -1023,11 +1028,8 @@ pub fn leaveBlocking(b: *Blocking) void {
         b.processor.current = b.task;
         return;
     }
-    var message: Processor.Message = .{
-        .switch_ = .{ .old = &b.task.context, .new = &b.home },
-        .action = .relocate,
-    };
-    _ = fiber.switchTo(&message.switch_);
+    var message: Processor.Message = .{ .processor = b.processor, .action = .relocate };
+    toScheduler(b.task, &b.home, &message);
 }
 
 /// On the home thread: waits until the home processor is given back
@@ -1133,36 +1135,30 @@ pub fn wakeAll(s: *Scheduler) void {
 /// (aligned to `extra_align`) below its record for the caller's context
 /// and result; null when every stack is in use. `entry` runs first.
 pub inline fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
-    const taken = s.stacks.take() orelse return null;
-    return s.createAt(taken.stack, taken.at, kind, extra, extra_align, entry, .normal);
+    const taken = stacks_.take(&s.stacks, s.stack_size, null) orelse return null;
+    return s.createAt(taken, kind, extra, extra_align, entry, .normal);
 }
 
 pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?aegis.units.Bytes(usize), priority: Task.Priority) ?struct { *Task, [*]u8 } {
-    const taken = s.stacks.takeSized(size) orelse return null;
-    return s.createAt(taken.stack, taken.at, kind, extra, extra_align, entry, priority);
+    const taken = stacks_.take(&s.stacks, s.stack_size, size) orelse return null;
+    return s.createAt(taken, kind, extra, extra_align, entry, priority);
 }
 
-inline fn createAt(s: *Scheduler, index: Stacks.Stack, location: Stacks.Location, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
-    const pool = location.pool;
-    const top = pool.top(location.slot);
-    const record_at = std.mem.alignBackward(usize, top - @sizeOf(Task), @alignOf(Task));
-    const extra_at = extra_align.backward(record_at - extra);
-    const sp = std.mem.alignBackward(usize, extra_at, 16);
-    if (sp - pool.bottom(location.slot) < pool.size / 2 or !pool.reach(location.slot, sp - 48)) {
-        s.stacks.give(index);
-        return null;
-    }
-    if (s.measure_stacks and !s.stacks.paint(index, extra_at)) {
-        s.stacks.give(index);
-        return null;
-    }
-    const t: *Task = @ptrFromInt(record_at);
+inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
+    var stack = taken;
+    const top = stack.top;
+    const record: *Task = @ptrCast(@alignCast(stack.carve(@sizeOf(Task), .of(Task)) catch return s.refuse(stack))); // safe: carved for the record, aligned
+    const extra_at = @intFromPtr(stack.carve(extra, extra_align) catch return s.refuse(stack)); // safe: an address, for the caller's context and result
+    // A task whose record and context leave it less than half its stack
+    // would rather wait for a larger one.
+    if (stack.top - stack.bottom < (stack.end - stack.bottom) / 2) return s.refuse(stack);
+    if (s.measure_stacks and !stacks_.paint(&stack, extra_at)) return s.refuse(stack);
     // The task builder assigns its start/context and spawn site before
     // publication; runTask assigns execution budgets before entering it.
     // Cancellation and queue ownership are initialized here as usual.
-    t.* = .{
+    record.* = .{
         .kind = kind,
-        .stack = index,
+        .stack = .fromRaw(s.stacks.number(stack)),
         .stack_top = top,
         .policy = .{ .home = s.scheduling == .per_core, .priority = priority, .measured = s.measure_stacks },
         .start = undefined,
@@ -1170,8 +1166,14 @@ inline fn createAt(s: *Scheduler, index: Stacks.Stack, location: Stacks.Location
         .budget = undefined,
         .slice_start = undefined,
     };
-    t.context = fiber.initial(pool.stack(location.slot), sp, taskEntry, @ptrCast(@constCast(entry))); // safe: `taskEntry` casts it back to the entry it is
-    return .{ t, @ptrFromInt(extra_at) };
+    record.context = shuttle.Context.init(stack, shuttle.handoff.entry(taskBody), @ptrCast(@constCast(entry))) catch return s.refuse(stack); // safe: `taskBody` casts it back to the entry it is
+    return .{ record, @ptrFromInt(extra_at) };
+}
+
+/// Gives back a stack a task could not be made on.
+fn refuse(s: *Scheduler, stack: shuttle.Stack) ?struct { *Task, [*]u8 } {
+    s.stacks.give(stack);
+    return null;
 }
 
 /// Waits until every group member that has left its group has given its
@@ -1183,12 +1185,11 @@ pub fn awaitRetired(s: *Scheduler) void {
 
 /// Gives back the stack of a task that has ended and been forgotten.
 pub inline fn release(s: *Scheduler, t: *Task) void {
-    const index = t.stack.?;
-    s.stacks.ended(index, fiber.committedLimit(&t.context));
     s.records.release(t);
-    fiber.deinit(&t.context);
+    // On Windows the stack keeps what its task committed, for the next.
+    const stack = t.context.deinit();
     t.* = undefined;
-    s.stacks.give(index);
+    s.stacks.give(stack);
 }
 
 /// Where a newly made task runs first: the creator's processor, or,
@@ -1208,10 +1209,16 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
     s.inject(t);
 }
 
-fn taskEntry(arg: *anyopaque, message: *const fiber.Switch) callconv(.c) noreturn {
-    _ = message;
-    const entry: *const fn (t: *Task) noreturn = @ptrCast(@alignCast(arg)); // safe: `create` passed the entry
+/// A task's first code, once the switch that started it is finished.
+fn taskBody(arg: ?*anyopaque) noreturn {
+    const entry: *const fn (t: *Task) noreturn = @ptrCast(@alignCast(arg.?)); // safe: `create` passed the entry
     entry(current().?);
+}
+
+/// From a task to a scheduler's context, which runs `afterSwitch` with
+/// `message` once the task's stack is still.
+inline fn toScheduler(t: *Task, scheduler: *shuttle.Context, message: *Processor.Message) void {
+    shuttle.handoff.switchTo(&t.context, scheduler, .{ .run = Processor.afterSwitch, .data = message });
 }
 
 fn wakeProcessor(target: *Processor) void {

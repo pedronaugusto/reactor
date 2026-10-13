@@ -4,7 +4,7 @@ const testing = std.testing;
 const Io = std.Io;
 const shakedown = @import("shakedown");
 const reactor = @import("reactor.zig");
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const Scheduler = @import("Scheduler.zig");
 const Threads = @import("testing/Threads.zig");
 
@@ -67,7 +67,7 @@ const Outside = struct {
 };
 
 test "r6: raw offload refusal survives a caller outside every runtime" {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var refusing: Refusing = .init(testing.io, 0);
     var target: Threads = undefined;
     try target.init(testing.allocator, .{ .workers = 0, .max_tasks = 8, .offload = .{ .injected = .{ .io = refusing.io(), .capacity = 128 } } });
@@ -80,7 +80,7 @@ test "r6: raw offload refusal survives a caller outside every runtime" {
 }
 
 test "r6: accepted raw offloads from outside run on their lanes" {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var target: Threads = undefined;
     try target.init(testing.allocator, .{ .workers = 0, .max_tasks = 8 });
     defer target.deinit();
@@ -123,7 +123,7 @@ const Cross = struct {
 };
 
 test "r6: a foreign raw offload wakes its caller on the caller scheduler" {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     var c: Cross = .{};
     const thread = try std.Thread.spawn(.{}, Cross.target, .{&c});
     defer thread.join();

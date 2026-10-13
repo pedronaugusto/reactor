@@ -241,37 +241,6 @@ pub fn setTimer(timer: Handle, due: i64) TimerError!void {
     };
 }
 
-// The thread information block.
-
-/// The stack fields of the thread information block a fiber switch keeps
-/// right: Windows grows a stack by its guard page only inside these bounds,
-/// and stack walks stop at them.
-pub const StackBounds = extern struct {
-    /// One past the highest byte.
-    base: usize,
-    /// The lowest committed byte.
-    limit: usize,
-    /// The lowest reserved byte (`DeallocationStack`).
-    deallocation: usize,
-};
-
-/// `DeallocationStack`'s offset in a 64-bit TEB (x86-64 and AArch64).
-const deallocation_stack_offset = 0x1478;
-
-pub fn stackBounds() StackBounds {
-    const teb = windows.teb();
-    const deallocation: *usize = @ptrFromInt(@intFromPtr(teb) + deallocation_stack_offset); // safe: a field of the TEB std does not name
-    return .{ .base = @intFromPtr(teb.NtTib.StackBase), .limit = @intFromPtr(teb.NtTib.StackLimit), .deallocation = deallocation.* }; // safe: addresses, kept as integers
-}
-
-pub fn setStackBounds(b: StackBounds) void {
-    const teb = windows.teb();
-    const deallocation: *usize = @ptrFromInt(@intFromPtr(teb) + deallocation_stack_offset); // safe: a field of the TEB std does not name
-    teb.NtTib.StackBase = @ptrFromInt(b.base);
-    teb.NtTib.StackLimit = @ptrFromInt(b.limit);
-    deallocation.* = b.deallocation;
-}
-
 comptime {
     if (builtin.os.tag == .windows) std.debug.assert(@sizeOf(Entry) == 32);
 }

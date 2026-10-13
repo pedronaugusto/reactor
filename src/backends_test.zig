@@ -13,7 +13,7 @@ const shakedown = @import("shakedown");
 
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const reactor = @import("reactor.zig");
 const wait_ext = @import("ext/wait.zig");
 const kqueue_poller = @import("backend/readiness/Kqueue.zig");
@@ -33,7 +33,7 @@ const all: []const Loop.Backend = switch (builtin.os.tag) {
 };
 
 fn runtime(r: *Runtime, backend: Loop.Backend, workers: u16) !void {
-    if (!fiber.supported) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     r.init(testing.allocator, .{ .backend = backend, .workers = workers, .max_tasks = 512, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,

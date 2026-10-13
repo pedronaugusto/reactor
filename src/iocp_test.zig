@@ -11,11 +11,11 @@ const shakedown = @import("shakedown");
 
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
-const fiber = @import("fiber.zig");
+const supported = @import("Scheduler.zig").supported;
 const backend = @import("backend.zig");
 
 fn skipOffWindows() !void {
-    if (builtin.os.tag != .windows or !fiber.supported) return error.SkipZigTest;
+    if (builtin.os.tag != .windows or !supported) return error.SkipZigTest;
 }
 
 fn runtime(r: *Runtime, workers: u16) !void {

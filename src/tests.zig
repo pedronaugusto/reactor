@@ -5,7 +5,6 @@ test {
     _ = @import("wheel_test.zig");
     _ = @import("scheduler/run_queue_test.zig");
     _ = @import("runtime_test.zig");
-    _ = @import("fiber_test.zig");
     _ = @import("lanes_test.zig");
     _ = @import("boundary_test.zig");
     _ = @import("r1_regression_test.zig");

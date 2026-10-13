@@ -2,13 +2,15 @@
 
 reactor implements Zig's blocking-shaped `std.Io` on completion engines with
 stackful tasks. A host may use the single-threaded `Loop`, the `Runtime` that
-implements `std.Io`, or the any-Io extensions. Production code depends on std
-and [aegis](https://github.com/pedronaugusto/aegis), the family's safety types.
+implements `std.Io`, or the any-Io extensions. Production code depends on std,
+[aegis](https://github.com/pedronaugusto/aegis), the family's safety types, and
+[shuttle](https://github.com/pedronaugusto/shuttle), whose contexts, stacks and
+handoff a task runs on.
 
 ## Layers and state owners
 
 The production graph is enforced by [ci/layers.zig](../ci/layers.zig), lowest
-first: system calls; fibers, time and lanes; backends; loop; scheduler;
+first: system calls; time and lanes; backends; loop; scheduler;
 operations; runtime; extensions; root facade. Test sources belong to no
 production layer. Each backend imports the common interface, never another
 backend. The fake backend and virtual clock are test support.
@@ -192,9 +194,9 @@ code before.
   held by the call as a reservation from `admit` to `retire`, so a limit that
   would wrap refuses instead. The spare pool's processors and threads are
   `Buffer`s that cannot grow, and a Windows job's messages a `Ring` of 32.
-- **Identity.** A stack is a `Stacks.Stack` among all of a runtime's;
-  `Pool.Slot` is its place in one size class. `Stacks.locate` turns one into
-  the other and nothing else does. A provided-buffer group is a
+- **Identity.** A stack is a `stacks.Number` among all of a runtime's, which
+  shuttle's `Pool.number` gives; the records and trims beside the pool are
+  indexed by it. A provided-buffer group is a
   `BufferRing.Id` with `BufferRing.Entries` buffers.
 - **Bytes.** Stack sizes, `zero_copy_min`, a lane's scratch and a receiver
   pool's buffer length are `units.Bytes` in the options. Sizes and counts that
@@ -214,13 +216,13 @@ which beside the code (`glint-ignore: A004 -- <reason>: docs/design.md#safety-ty
   clock handed to a kernel timer, Windows' 100 ns, and the completion key a
   job notification carries (which holds the record's generation).
 - **measured-boundary**: the wheel's placement, validated where a tick enters.
-- **safe-type-internals**: `Stacks.locate` and the code that builds a stack
-  number from a slot, an atomic cell that holds an `Awake`'s integer.
+- **safe-type-internals**: an atomic cell that holds an `Awake`'s integer.
 - **design**, no type fits:
   - A bit lock inside a word: a task's `cancel` word and a group's `state`,
     which std's `Io.Group` lays out.
   - Lock-free structures: the run queues, the inboxes, and the tagged free
-    lists of stacks, lane closures and receive buffers. These are stacks of
+    lists of lane closures and receive buffers (shuttle's pool keeps the
+    stacks'). These are stacks of
     indices with a tag against ABA, not generation-checked slot maps, and no
     pool sits between the kernel and a lease.
   - The standard-error mutex, held across `lockStderr` and `unlockStderr`, two
