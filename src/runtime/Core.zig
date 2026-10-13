@@ -162,7 +162,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     // The home thread's scheduler is the home processor's, on a stack of
     // its own: the root, on the thread's own, switches to it to wait.
     const own = Scheduler.seatNow();
-    own.context = shuttle.Context.init(c.home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
+    own.context = shuttle.Context.init(&c.home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
     own.task = &c.root;
     c.root.seat = own;
     c.root.processor = home;
@@ -192,9 +192,11 @@ fn initMonitor(c: *Core, workers: u16) InitError!void {
     c.scheduler.monitor = monitor;
     if (!handoff) return;
     for (c.processors) |*p| p.lends = true;
+    _ = Scheduler.lending.fetchAdd(1, .monotonic);
 }
 
 fn deinitMonitor(c: *Core) void {
+    if (c.processors[0].lends) _ = Scheduler.lending.fetchSub(1, .monotonic);
     if (c.scheduler.monitor) |m| {
         m.deinit(c.gpa);
         c.gpa.destroy(m);
@@ -293,7 +295,7 @@ pub fn deinit(c: *Core) void {
     c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
     const own = Scheduler.seatNow();
-    _ = own.context.deinit();
+    own.context.deinit(&c.home_stack);
     own.* = .{};
     c.scheduler.trims.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);

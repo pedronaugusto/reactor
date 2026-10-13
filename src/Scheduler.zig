@@ -586,10 +586,10 @@ pub const Processor = struct {
     fn inspectStack(p: *Processor, t: *Task, trimmable: bool) void {
         if (t.stack == null) return;
         if (t.policy.measured) {
-            const depth = stacks_.highWater(t.context.stack.?);
+            const depth = stacks_.highWater(p.scheduler.stackOf(t));
             if (depth > p.stack_high_water.load(.monotonic)) p.stack_high_water.store(depth, .monotonic);
         } else if (builtin.os.tag != .windows and trimmable) {
-            p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.records, &p.scheduler.shared.stack_trims, t.context.stackPointer());
+            p.scheduler.trims.arm(&p.loop, p.index, t, &p.scheduler.records, &p.scheduler.stacks, &p.scheduler.shared.stack_trims, t.context.stackPointer());
         }
     }
 
@@ -831,6 +831,10 @@ pub const Seat = struct {
 };
 
 threadlocal var seat: Seat = .{};
+
+/// The runtimes in the process whose processors are lent: any thread may
+/// hold one of theirs and call into any runtime.
+pub var lending: std.atomic.Value(u32) = .init(0);
 
 /// The calling thread's seat, read afresh at every call.
 ///
@@ -1165,9 +1169,20 @@ fn comeBack(own: *Seat) bool {
 /// its processor was lent here, for `toUser` at the way out; null inside
 /// the runtime already, off any processor, or where processors are not
 /// lent. Nothing before it may touch the processor.
-pub noinline fn fromUser() ?*Task {
-    // Never inlined: the seat is read on the thread making the call.
-    return fromSeat(&seat);
+pub inline fn fromUser() ?*Task {
+    // A process with no runtime that lends reads nothing more.
+    if (lending.load(.monotonic) == 0) return null;
+    // The seat read first, before anything in the caller can move the task
+    // to another thread; nothing reads it directly after (`seatNow`, a
+    // call, reads it afresh), so the address is never one thread's taken
+    // for another's.
+    const own = &seat;
+    if (own.stage.raw & Stage.mode != Stage.user) return null;
+    return comeIn(own);
+}
+
+noinline fn comeIn(own: *Seat) ?*Task {
+    return fromSeat(own);
 }
 
 /// `fromUser` for the running task `t`, through its seat.
@@ -1407,7 +1422,7 @@ inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: 
         .budget = undefined,
         .slice_start = undefined,
     };
-    record.context = shuttle.Context.init(stack, shuttle.handoff.entry(taskBody), @ptrCast(@constCast(entry))) catch return s.refuse(stack); // safe: `taskBody` casts it back to the entry it is
+    record.context = shuttle.Context.init(&stack, shuttle.handoff.entry(taskBody), @ptrCast(@constCast(entry))) catch return s.refuse(stack); // safe: `taskBody` casts it back to the entry it is
     return .{ record, @ptrFromInt(extra_at) };
 }
 
@@ -1424,13 +1439,21 @@ pub fn awaitRetired(s: *Scheduler) void {
     for (s.processors) |*p| while (p.retiring.load(.acquire) != 0) std.atomic.spinLoopHint();
 }
 
-/// Gives back the stack of a task that has ended and been forgotten.
+/// Gives back the stack of a task that has ended and been forgotten. A
+/// task keeps only its stack's number; the pool describes the stack again.
 pub inline fn release(s: *Scheduler, t: *Task) void {
     s.records.release(t);
+    var stack = s.stackOf(t);
     // On Windows the stack keeps what its task committed, for the next.
-    const stack = t.context.deinit();
+    t.context.deinit(&stack);
     t.* = undefined;
     s.stacks.give(stack);
+}
+
+/// The stack task `t` runs on, as the pool handed it out: its bounds,
+/// before anything was carved from its top.
+pub fn stackOf(s: *const Scheduler, t: *const Task) shuttle.Stack {
+    return s.stacks.stackOf(t.stack.?.raw());
 }
 
 /// Where a newly made task runs first: the creator's processor, or,

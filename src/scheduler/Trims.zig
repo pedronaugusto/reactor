@@ -6,6 +6,7 @@ const Io = std.Io;
 const Task = @import("Task.zig");
 const Loop = @import("../Loop.zig");
 const Records = @import("Records.zig");
+const shuttle = @import("shuttle");
 
 const Record = struct {
     task: ?*Task = null,
@@ -24,6 +25,8 @@ const Bucket = struct {
     armed: bool = false,
     records: *Records = undefined,
     counter: *std.atomic.Value(u64) = undefined,
+    /// The stacks, which a task names by its number.
+    pool: *const shuttle.Pool = undefined,
 
     fn schedule(bucket: *Bucket) void {
         if (bucket.armed) return;
@@ -59,12 +62,13 @@ pub fn deinit(trims: *Trims, gpa: std.mem.Allocator) void {
 
 /// Off-stack before publishing the wake hook: retain the task on its loop
 /// and append in monotonic deadline order. Timer submission is best effort.
-pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Records, counter: *std.atomic.Value(u64), sp: usize) void {
+pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Records, pool: *const shuttle.Pool, counter: *std.atomic.Value(u64), sp: usize) void {
     const record = &trims.records[task.stack.?.raw()];
     const bucket = &trims.buckets[processor];
     std.debug.assert(record.task == null);
     bucket.loop = loop;
     bucket.records = records;
+    bucket.pool = pool;
     bucket.counter = counter;
     record.* = .{
         .task = task,
@@ -111,7 +115,7 @@ fn fired(loop: *Loop, op: *Loop.Op) void {
         if (record.deadline.nanoseconds > now.nanoseconds) break;
         unlink(record);
         const task = record.task.?;
-        task.context.stack.?.discard(record.keep_from);
+        bucket.pool.stackOf(task.stack.?.raw()).discard(record.keep_from);
         bucket.records.trimmed(task, task.stack_top - record.keep_from);
         _ = bucket.counter.fetchAdd(1, .monotonic);
         // The pin survives trimming until resume: foreign wakes still

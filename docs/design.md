@@ -46,8 +46,8 @@ sequentially consistent, so of the two at least one sees the other: the
 monitor backs off, or the thread waits until the monitor's look is over.
 The way in and out costs two stores and a load, no read-modify-write. Every
 runtime's slots take the calling thread's processor back on the way in,
-whichever runtime lent it (a task of one runtime may call another's); where
-the thread lends nothing that is one read of its seat.
+whichever runtime lent it (a task of one runtime may call another's); in a
+process where no runtime lends, that is one load of a process-wide count.
 
 The monitor reads a processor's lease word before its owner, and the owner
 is stored before the word when a thread takes the processor over, so a

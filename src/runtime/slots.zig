@@ -173,6 +173,11 @@ fn SlotFn(comptime name: []const u8) type {
     return @typeInfo(@FieldType(Io.VTable, name)).pointer.child;
 }
 
+fn records(comptime name: []const u8) bool {
+    for ([_][]const u8{ "async", "concurrent", "groupAsync", "groupConcurrent" }) |slot| if (std.mem.eql(u8, name, slot)) return true;
+    return false;
+}
+
 /// `raw`'s slot `name`, bracketed by `fromUser` and `toUser`.
 fn lent(comptime name: []const u8) *const SlotFn(name) {
     const info = @typeInfo(SlotFn(name)).@"fn";
@@ -183,9 +188,11 @@ fn lent(comptime name: []const u8) *const SlotFn(name) {
         inline fn call(args: anytype) R {
             const entered = Scheduler.fromUser();
             defer if (entered) |t| Scheduler.toUser(t);
-            // Inlined, so a slot that records its caller (`concurrent`, the
-            // group calls) sees the task's call site, not this one.
-            return @call(.always_inline, inner, args);
+            // A slot that records its caller (`concurrent`, `async`, the
+            // group calls) is inlined, so it sees the task's call site, not
+            // this one; the rest are called, where inlining would make a
+            // bracket's frame as large as the largest slot's.
+            return @call(if (records(name)) .always_inline else .auto, inner, args);
         }
     };
     return switch (P.len) {
