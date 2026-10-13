@@ -35,7 +35,7 @@ core: Core,
 /// no thread. The calling thread becomes the home thread. `r` must not
 /// move after this.
 pub fn init(r: *Runtime, gpa: Allocator, o: Options) InitError!void {
-    return r.core.init(gpa, o, .native, slots.tables);
+    return r.core.init(gpa, o, .native, &slots.vtable);
 }
 
 /// Creates scheduler workers and prepares lane execution/control capacity.

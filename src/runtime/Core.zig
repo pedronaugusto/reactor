@@ -34,10 +34,8 @@ pub const StartError = error{ SystemResources, Unexpected };
 
 gpa: Allocator,
 options: Options,
-/// The `Io` this core is handed out as: `Tables.lending` where processors
-/// are lent (`Processor.lends`), else `Tables.plain`.
+/// The `Io` this core is handed out as.
 vtable: *const Io.VTable,
-tables: Tables,
 /// The home processor's scheduler's stack, where it runs on the home thread.
 home_stack: shuttle.Stack = undefined,
 scheduler: Scheduler,
@@ -73,10 +71,6 @@ pub const Stderr = struct {
 
 /// How a runtime's loops are built: the system's backend, or one given
 /// per processor (reactor's tests: the seeded fake and a virtual clock).
-/// The runtime's slots: as they are, and lending the calling thread's
-/// processor between calls (`Scheduler.fromUser`).
-pub const Tables = struct { plain: *const Io.VTable, lending: *const Io.VTable };
-
 pub const Construction = union(enum) {
     native,
     custom: struct {
@@ -88,7 +82,7 @@ pub const Construction = union(enum) {
 
 /// Builds everything: stacks reserved, tables, loops, lanes; starts no
 /// thread. The calling thread becomes the home thread. `c` must not move.
-pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, tables: Tables) InitError!void {
+pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtable: *const Io.VTable) InitError!void {
     if (comptime !Scheduler.supported) return error.BackendUnavailable;
     const workers: u16 = options.workers orelse options_.defaultWorkers(builtin.os.tag, std.Thread.getCpuCount() catch 1);
     // The home processor and one for each worker: the count is the caller's, to its top.
@@ -96,8 +90,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, table
     c.* = .{
         .gpa = gpa,
         .options = options,
-        .vtable = tables.plain,
-        .tables = tables,
+        .vtable = vtable,
         .scheduler = undefined,
         .processors = try gpa.alloc(Processor, count),
         .root = .{ .kind = .root, .policy = .{ .home = true } },
@@ -199,7 +192,6 @@ fn initMonitor(c: *Core, workers: u16) InitError!void {
     c.scheduler.monitor = monitor;
     if (!handoff) return;
     for (c.processors) |*p| p.lends = true;
-    c.vtable = c.tables.lending;
 }
 
 fn deinitMonitor(c: *Core) void {
@@ -283,13 +275,12 @@ pub fn stop(c: *Core) void {
     // the host ran its own code; it stays held from here.
     _ = Scheduler.fromUser();
     assert(c.scheduler.stacks.inUse() == 0);
+    // The monitor first: it reads the seats of the threads that end next.
+    if (c.scheduler.monitor) |m| m.stop();
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
-    if (c.scheduler.monitor) |m| {
-        m.stop();
-        // Spares, and workers waiting as spares, see the stop.
-        c.scheduler.spares.stop();
-    }
+    // Spares, and workers waiting as spares, see the stop.
+    if (c.scheduler.monitor != null) c.scheduler.spares.stop();
     for (c.processors[1..]) |*p| if (p.thread) |t| t.join();
     c.started.store(false, .release);
 }

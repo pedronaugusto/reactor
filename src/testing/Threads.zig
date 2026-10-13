@@ -29,7 +29,7 @@ pub fn init(t: *Threads, gpa: Allocator, options: Runtime.Options) !void {
         .context = t,
         .backendFor = backendFor,
         .clock = .system,
-    } }, slots.tables);
+    } }, &slots.vtable);
     errdefer t.runtime.deinit();
     try t.runtime.start();
 }

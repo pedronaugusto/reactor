@@ -22,7 +22,8 @@ const io_ops = @import("io_ops.zig");
 
 const general = .general;
 
-pub const vtable: Io.VTable = .{
+/// The slots as they work, before the brackets `vtable` puts around them.
+pub const raw: Io.VTable = .{
     .crashHandler = crashHandler,
 
     .async = async,
@@ -144,15 +145,17 @@ pub const vtable: Io.VTable = .{
     .netLookup = io_ops.netLookup,
 };
 
-/// `vtable` with each slot taking the calling thread's processor back from
-/// lending on the way in and lending it again on the way out
-/// (`Scheduler.fromUser`, `toUser`): what a runtime hands out where its
-/// processors are lent, so a task that computes between calls costs its
-/// thread the processor, never the processor its queue. The slots that never
-/// touch the calling thread's processor stay `vtable`'s own: the crash
-/// handler, which must not move a crashing task, and the clocks.
-pub const lending: Io.VTable = table: {
-    var table = vtable;
+/// The runtime's table: `raw` with each slot taking the calling thread's
+/// processor back from lending on the way in and lending it again on the
+/// way out (`Scheduler.fromUser`, `toUser`), so a task that computes
+/// between calls costs its thread the processor, never the processor its
+/// queue. The processor is the calling thread's, whichever runtime it is
+/// (a task of one runtime may call another's), so every runtime's slots
+/// take it back; where the thread lends nothing it is one read of its seat.
+/// The slots that never touch the calling thread's processor stay `raw`'s:
+/// the crash handler, which must not move a crashing task, and the clocks.
+pub const vtable: Io.VTable = table: {
+    var table = raw;
     const info = @typeInfo(Io.VTable).@"struct";
     for (info.field_names) |name| {
         if (std.mem.eql(u8, name, "crashHandler") or std.mem.eql(u8, name, "now") or std.mem.eql(u8, name, "clockResolution")) continue;
@@ -161,23 +164,21 @@ pub const lending: Io.VTable = table: {
     break :table table;
 };
 
-pub const tables: Core.Tables = .{ .plain = &vtable, .lending = &lending };
-
 /// Whether `table` is a runtime's.
 pub fn isRuntime(table: *const Io.VTable) bool {
-    return table == &vtable or table == &lending;
+    return table == &vtable;
 }
 
 fn SlotFn(comptime name: []const u8) type {
     return @typeInfo(@FieldType(Io.VTable, name)).pointer.child;
 }
 
-/// `vtable`'s slot `name`, bracketed by `fromUser` and `toUser`.
+/// `raw`'s slot `name`, bracketed by `fromUser` and `toUser`.
 fn lent(comptime name: []const u8) *const SlotFn(name) {
     const info = @typeInfo(SlotFn(name)).@"fn";
     const P = info.param_types;
     const R = info.return_type.?;
-    const inner = @field(vtable, name);
+    const inner = @field(raw, name);
     const Bracket = struct {
         inline fn call(args: anytype) R {
             const entered = Scheduler.fromUser();
@@ -227,8 +228,9 @@ fn lent(comptime name: []const u8) *const SlotFn(name) {
 fn crashHandler(userdata: ?*anyopaque) void {
     const r = Core.running(userdata);
     // The crashing task may call the Io again while the panic is printed:
-    // nothing it waits on may be cancelled under it.
-    if (Scheduler.current()) |t| {
+    // nothing it waits on may be cancelled under it. Not through the
+    // processor, which the crashing thread may have lent.
+    if (Scheduler.runningTask()) |t| {
         t.execution.protection = .{ .user = .blocked, .acknowledged = true };
         var buffer: [256]u8 = undefined;
         const summary = std.mem.print(&buffer, "reactor: worker={d} task=0x{x} start=0x{x} operation={s} lane={s}\n", .{

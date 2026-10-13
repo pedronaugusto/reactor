@@ -228,6 +228,21 @@ test "the root computing in its host lends the home processor, and the task it s
     try testing.expect(r.stats().handoffs >= 3);
 }
 
+test "computing tasks on every processor at once, round after round: each processor keeps one owner as it moves" {
+    var r: Runtime = undefined;
+    try computingRuntime(&r, .stealing);
+    defer r.deinit();
+    for (0..20) |_| {
+        var cs: [4]Computing = @splat(.{});
+        var outcomes: [4]anyerror!void = @splat(error.NotRun);
+        var threads: [4]std.Thread = undefined;
+        for (&threads, &cs, &outcomes) |*t, *c, *o| t.* = try std.Thread.spawn(.{}, Computing.outside, .{ c, r.io(), o });
+        for (threads) |t| t.join();
+        for (outcomes) |o| try o;
+    }
+    try testing.expect(r.stats().handoffs >= 20);
+}
+
 fn spinUntilStall(r: *Runtime) !void {
     const clock_io = Io.Threaded.global_single_threaded.io();
     const start = Io.Clock.awake.now(clock_io);

@@ -245,7 +245,7 @@ test "no slot the runtime borrows on a worker calls back into its own Io" {
     defer g.deinit(gpa);
     var bad: usize = 0;
     inline for (borrowed) |slot| {
-        try testing.expect(@field(slots.vtable, slot) == route.borrowed(slot));
+        try testing.expect(@field(slots.raw, slot) == route.borrowed(slot));
         var impls = try g.implementations(gpa, slot);
         defer impls.deinit(gpa);
         try testing.expect(impls.items.len > 0);
@@ -269,7 +269,7 @@ test "no file slot the runtime runs on a worker inside a blocking bracket calls 
     var bad: usize = 0;
     inline for (on_worker ++ [_][]const u8{ "fileReadPositional", "fileWritePositional" }) |slot| {
         if (comptime !std.mem.startsWith(u8, slot, "fileReadPositional") and !std.mem.startsWith(u8, slot, "fileWritePositional")) {
-            try testing.expect(@field(slots.vtable, slot) == route.files(slot));
+            try testing.expect(@field(slots.raw, slot) == route.files(slot));
         }
         var impls = try g.implementations(gpa, slot);
         defer impls.deinit(gpa);

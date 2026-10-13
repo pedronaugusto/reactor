@@ -44,14 +44,23 @@ processor's lease. On the way in a thread stores its stage and then reads
 the lease; the monitor claims the lease and then reads the stage; all four
 sequentially consistent, so of the two at least one sees the other: the
 monitor backs off, or the thread waits until the monitor's look is over.
-The way in and out costs two stores and a load, no read-modify-write, and
-the slots are bracketed only in the table a lending runtime hands out
-(about 4 ns a call on an M3 under kqueue, where a thread-local read is a
-call; nothing under io_uring, which does not lend).
+The way in and out costs two stores and a load, no read-modify-write. Every
+runtime's slots take the calling thread's processor back on the way in,
+whichever runtime lent it (a task of one runtime may call another's); where
+the thread lends nothing that is one read of its seat.
 
-A lending that lasts `handoff_after`, seen in two samples, hands the
+The monitor reads a processor's lease word before its owner, and the owner
+is stored before the word when a thread takes the processor over, so a
+claim made on the word read fails once the processor changed hands. A
+lending that lasts `handoff_after`, seen in two samples, hands the
 processor to a spare thread when it has work only its owner can do: tasks
-queued there, or operations and timers in its loop. A thread that lost its
+queued there, operations and timers in its loop, the home thread asking for
+it. A thread giving the home processor back waits out a look of the
+monitor's, as one coming back in does. A spare holding the home processor
+keeps a ready root aside until the home thread asks, so the processor is
+never left with no thread while the home thread runs a task of its own.
+The monitor stops before any processor's thread may end: it reads their
+seats. A thread that lost its
 processor keeps running its task's own code, the processor's record of it
 another thread's by then, so a task finds its way back through its thread's
 seat: at its next call it leaves the thread, which waits as a spare, and

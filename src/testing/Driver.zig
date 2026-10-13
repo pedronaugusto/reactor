@@ -46,7 +46,7 @@ fn build(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Ru
         .context = d,
         .backendFor = backendFor,
         .clock = .{ .virtual = &d.virtual },
-    } }, slots.tables);
+    } }, &slots.vtable);
 }
 
 fn backendFor(context: *anyopaque, processor: u16) backend.Custom {

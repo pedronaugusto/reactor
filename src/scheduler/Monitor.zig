@@ -61,6 +61,8 @@ word: std.atomic.Value(u32) = .init(0),
 slow: std.atomic.Value(bool) = .init(false),
 parked: std.atomic.Value(bool) = .init(false),
 stalls: std.atomic.Value(u64) = .init(0),
+/// Set by `stop`.
+quit: std.atomic.Value(bool) = .init(false),
 handoffs: std.atomic.Value(u64) = .init(0),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
@@ -99,8 +101,10 @@ pub fn poke(m: *Monitor) void {
     system().futexWake(u32, &m.word.raw, 1);
 }
 
-/// At stop.
+/// At stop, before any processor's thread may end: the monitor reads their
+/// seats.
 pub fn stop(m: *Monitor) void {
+    m.quit.store(true, .release);
     _ = m.word.fetchAdd(1, .release);
     system().futexWake(u32, &m.word.raw, 1);
     if (m.thread) |t| t.join();
@@ -112,7 +116,7 @@ pub fn stop(m: *Monitor) void {
 /// `isLent`, `isBlocked`, `handOff` and `allIdle`.
 pub fn run(m: *Monitor, s: anytype) void {
     var delay = shortest;
-    while (!s.stopping.load(.acquire)) {
+    while (!m.quit.load(.acquire)) {
         const t = now();
         var watching = false;
         for (s.processors, m.samples) |*p, *sample| {
@@ -125,7 +129,7 @@ pub fn run(m: *Monitor, s: anytype) void {
             m.slow.store(true, .monotonic);
             // A processor that leaves its kernel wait after this check
             // sees `parked` and wakes the monitor.
-            if (s.allIdle() and !s.stopping.load(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
+            if (s.allIdle() and !m.quit.load(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
             m.parked.store(false, .monotonic);
             delay = shortest;
             continue;
@@ -140,6 +144,10 @@ pub fn run(m: *Monitor, s: anytype) void {
 /// lending, or one task holding it, since the last sample.
 fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) bool {
     var watching = false;
+    // The word before the owner: the owner is stored first (`holdFrom`),
+    // so the owner read is the word's or a later one's, and a stale pair
+    // fails the claim.
+    const word = p.lease.load(.acquire);
     if (p.owner.load(.acquire)) |owner| {
         const stage = owner.stage.load(.acquire);
         if (s.isLent(stage)) {
@@ -153,7 +161,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) b
             } else {
                 watching = true;
                 if (m.handoff and clocks.since(sample.stage_since, t).compare(m.handoff_after) != .lt) {
-                    if (s.handOff(p, owner, stage)) _ = m.handoffs.fetchAdd(1, .monotonic);
+                    if (s.handOff(p, word, owner, stage)) _ = m.handoffs.fetchAdd(1, .monotonic);
                 }
             }
         }

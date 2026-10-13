@@ -15,6 +15,7 @@ const Io = std.Io;
 const net = Io.net;
 
 const native = @import("../native.zig");
+const Core = @import("../../runtime/Core.zig");
 
 pub const Options = struct {
     mode: net.Socket.Mode = .stream,
@@ -35,11 +36,18 @@ pub const Connected = struct {
 /// `error.Timeout` when the timeout passed first.
 pub const Error = net.IpAddress.ConnectError;
 
+/// Whether the caller is one of `core`'s tasks, read as a call in.
+fn onTask(core: *Core) bool {
+    const entered = native.enter();
+    defer native.leave(entered);
+    return native.taskRuntime(core);
+}
+
 pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
     if (options.local_address != null or !options.interface.isNone()) return bound(io, address, options);
     const plain: net.IpAddress.ConnectOptions = .{ .mode = options.mode, .protocol = options.protocol };
     if (options.timeout == .none) return .{ .stream = try address.connect(io, plain) };
-    if (native.runtimeOf(io)) |core| if (native.taskRuntime(core)) {
+    if (native.runtimeOf(io)) |core| if (onTask(core)) {
         var timed = plain;
         timed.timeout = options.timeout;
         return .{ .stream = try address.connect(io, timed) };

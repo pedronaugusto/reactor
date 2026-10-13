@@ -144,6 +144,9 @@ pub const Processor = struct {
     passes: std.atomic.Value(u32) = .init(0),
     /// Where the running task was started.
     site: std.atomic.Value(usize) = .init(0),
+    /// The root, ready, while another thread holds the home processor and
+    /// the home thread has not asked for it yet; given back with it.
+    root_aside: bool = false,
     /// What the monitor did with the processor (`Lease`), its generation
     /// moving at every change of owner, so a word one owner held it with
     /// never matches under the next.
@@ -420,7 +423,13 @@ pub const Processor = struct {
     // or thread-local reads at every task switch.
     fn scheduleMode(p: *Processor, comptime watched: bool, own: *Seat) void {
         while (true) {
-            if (watched and p.index == 0 and p.remote.home_wants.load(.seq_cst) and !p.on_home_thread) return p.giveBack();
+            if (watched and p.index == 0 and p.remote.home_wants.load(.seq_cst) and !p.on_home_thread) {
+                if (p.root_aside) {
+                    p.root_aside = false;
+                    p.pushLocal(p.scheduler.root, .completed);
+                }
+                return p.giveBack();
+            }
             if (p.next()) |t| {
                 p.runTask(watched, t, own);
                 // The processor was handed on: this thread lets go of it.
@@ -518,6 +527,14 @@ pub const Processor = struct {
             // The root runs on the home thread alone: another thread holding
             // the home processor gives it back instead.
             if (t.kind == .root and !p.on_home_thread) {
+                p.current = null;
+                // Kept aside until the home thread asks for its processor:
+                // given back now, it would sit with no thread to run it
+                // while the home thread still runs a task of its own.
+                if (!p.remote.home_wants.load(.seq_cst)) {
+                    p.root_aside = true;
+                    return;
+                }
                 p.pushLocal(t, .completed);
                 return p.giveBack();
             }
@@ -693,8 +710,14 @@ pub const Processor = struct {
     /// On a thread holding the home processor for the home thread: back it
     /// goes, and this thread lets go.
     fn giveBack(p: *Processor) void {
+        const word = seatNow().lease;
+        // A look of the monitor's may be under way: it ends with the word
+        // as it found it.
+        while (p.lease.cmpxchgWeak(word, Lease.with(word, Lease.home_back), .release, .monotonic)) |seen| {
+            assert(seen == word or seen == Lease.with(word, Lease.claimed));
+            std.atomic.spinLoopHint();
+        }
         leave();
-        p.lease.store(Lease.with(p.lease.load(.monotonic), Lease.home_back), .release);
         system().futexWake(u32, &p.lease.raw, 1);
     }
 
@@ -714,8 +737,10 @@ pub const Processor = struct {
         const word = Lease.next(p.lease.load(.monotonic)) | Lease.held;
         holder.lease = word;
         holder.stage.store(Stage.move(holder.stage.raw, Stage.inside), .monotonic);
-        p.lease.store(word, .release);
+        // The owner before the word: a monitor that reads the new word reads
+        // the new owner after it.
         p.owner.store(holder, .release);
+        p.lease.store(word, .release);
     }
 };
 
@@ -837,6 +862,15 @@ pub fn leave() void {
 /// The processor the calling thread holds, if any.
 pub fn processor() ?*Processor {
     return heldNow();
+}
+
+/// The task the calling thread runs, read without touching a processor the
+/// thread has lent, which may be another's by now: for a crash report.
+pub fn runningTask() ?*Task {
+    const own = seatNow();
+    const p = own.held orelse return null;
+    if (own.stage.raw & Stage.mode != Stage.inside) return own.task;
+    return p.current;
 }
 
 /// The task running on the calling thread, if it is one of this
@@ -1178,8 +1212,6 @@ pub inline fn callOut(t: *Task, function: anytype, args: anytype) void {
 fn rejoin(own: *Seat, t: *Task) void {
     const p = own.held.?;
     if (t.kind == .root) {
-        p.remote.home_wants.store(true, .seq_cst);
-        p.loop.wake();
         reclaim(p);
         p.current = t;
         return;
@@ -1218,9 +1250,11 @@ pub fn leaveBlocking(b: *Blocking) void {
     if (!comeBack(own)) rejoin(own, b.task);
 }
 
-/// On the home thread: waits until the home processor is given back
-/// (`giveBack`), then holds it again.
+/// On the home thread: asks for the home processor, waits until it is
+/// given back (`giveBack`), then holds it again.
 pub fn reclaim(p: *Processor) void {
+    p.remote.home_wants.store(true, .seq_cst);
+    p.loop.wake();
     while (true) {
         const word = p.lease.load(.acquire);
         if (word & Lease.state == Lease.home_back) break;
@@ -1239,18 +1273,19 @@ fn relocated(s: *Scheduler, t: *Task) void {
     s.ready(t, .completed);
 }
 
-/// From the monitor: hands `p`, which its owner (`owner`, at `stage`) has
-/// lent too long, to a spare thread, when it has something only its owner
-/// can do: tasks queued there, or operations and timers in its loop. The
-/// global queue is any processor's, and an idle one is woken for it. False
-/// when it has nothing, there is no thread to hand it to, or the owner came
-/// back into the runtime.
-pub fn handOff(s: *Scheduler, p: *Processor, owner: *Seat, stage: u32) bool {
+/// From the monitor: hands `p`, held by `owner` under `word` and lent by it
+/// at `stage` too long, to a spare thread, when it has something only its
+/// owner can do: tasks queued there, operations and timers in its loop, the
+/// home thread asking for it. The global queue is any processor's, and an
+/// idle one is woken for it. False when it has nothing, there is no thread
+/// to hand it to, or the owner came back into the runtime or changed.
+pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: u32) bool {
+    if (word & Lease.state != Lease.held) return false;
     // A thread first, outside the claim: starting one is slow, and the owner
     // waits on a claim.
     if (!s.spares.reserve(serveThread, s)) return false;
-    const word = p.lease.load(.monotonic);
-    if (word & Lease.state != Lease.held) return false;
+    // `word` is the generation `owner` and `stage` were read under: a
+    // processor another thread took over since has another.
     if (p.lease.cmpxchgStrong(word, Lease.with(word, Lease.claimed), .seq_cst, .monotonic) != null) return false;
     // The owner came back meanwhile: it may be touching the processor.
     if (owner.stage.load(.seq_cst) != stage) {
@@ -1259,7 +1294,7 @@ pub fn handOff(s: *Scheduler, p: *Processor, owner: *Seat, stage: u32) bool {
     }
     // Claimed while lent: the owner waits at its next way in, so the
     // processor's queues and loop are still.
-    if (!p.hasOwnWork() and !p.loop.waiting()) {
+    if (!p.hasOwnWork() and !p.loop.waiting() and !p.remote.home_wants.load(.seq_cst)) {
         p.lease.store(word, .release);
         return false;
     }

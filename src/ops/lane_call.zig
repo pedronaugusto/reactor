@@ -183,7 +183,7 @@ fn direct(lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) ReturnO
 /// should it block, the monitor hands the worker's processor to a spare
 /// thread and the task goes on wherever it lands. For calls that may block
 /// on a disk but never call back into their own `Io`. Null when no bracket
-/// can be had here (no handoff, the home processor): nothing ran.
+/// can be had here (no handoff, or not on a task): nothing ran.
 pub fn onWorker(func: anytype, args: anytype) ?ReturnOf(@TypeOf(func)) {
     const R = ReturnOf(@TypeOf(func));
     // Once the bracket is published, a spare may own the processor. Read
