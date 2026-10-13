@@ -18,7 +18,7 @@ backend. The fake backend and virtual clock are test support.
 | State | Owner | Lifetime and thread rule |
 | --- | --- | --- |
 | Backend, descriptor registrations, wheel and heaps | Loop | One submitting processor; teardown drains kernel ownership. |
-| Run queues, LIFO slot and current task | Processor | Exactly one thread owns it; handoff uses release/acquire. |
+| Run queues, LIFO slot and current task | Processor | Exactly one thread owns it; lending and handoff order owner and monitor (below). |
 | Inboxes and wake flags | Processor, written by any thread | On cache lines of their own, away from what the owner switches tasks with. |
 | Task stack, saved context and cancel hook | Task | Stack remains until its result and asynchronous owners are gone. |
 | Free stacks and size classes | Scheduler stack pools | Reserved at init; tagged atomic free lists prevent ABA. |
@@ -33,6 +33,32 @@ The root task stays on the home thread. io_uring's submitter remains its loop
 owner. Handoff is available only on readiness/IOCP processors whose kernel
 queues can be driven by another thread. Foreign runtime tasks cannot enter a
 local queue; ring messages are confined to the processors of one runtime.
+
+## Lending and handoff
+
+There a worker lends its processor whenever its task leaves the runtime: for
+the task's own code, from each return out of a call to the next call in, and
+for a blocking call. A thread says where it is in its seat's stage, written
+by it alone; the monitor says what it did with the processor in the
+processor's lease. On the way in a thread stores its stage and then reads
+the lease; the monitor claims the lease and then reads the stage; all four
+sequentially consistent, so of the two at least one sees the other: the
+monitor backs off, or the thread waits until the monitor's look is over.
+The way in and out costs two stores and a load, no read-modify-write, and
+the slots are bracketed only in the table a lending runtime hands out
+(about 4 ns a call on an M3 under kqueue, where a thread-local read is a
+call; nothing under io_uring, which does not lend).
+
+A lending that lasts `handoff_after`, seen in two samples, hands the
+processor to a spare thread when it has work only its owner can do: tasks
+queued there, or operations and timers in its loop. A thread that lost its
+processor keeps running its task's own code, the processor's record of it
+another thread's by then, so a task finds its way back through its thread's
+seat: at its next call it leaves the thread, which waits as a spare, and
+goes where a woken task goes (its own processor under `per_core` or when
+pinned, else the global queue); the root waits for the home processor to be
+given back. Cancellation of a long loop stays cooperative: a task that never
+calls in is never stopped.
 
 ## Scheduling
 

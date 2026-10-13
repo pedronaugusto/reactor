@@ -99,6 +99,8 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
         else => {},
     };
     const core = native.runtimeOf(io) orelse return sliced(io, set, timeout.toDeadline(io));
+    const entered = native.enter();
+    defer native.leave(entered);
     if (!native.taskRuntime(core)) return sliced(io, set, timeout.toDeadline(io));
     var members: [max]Loop.Waitable = undefined;
     if (descriptors(set, &members, core.backendKind())) {

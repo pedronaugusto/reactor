@@ -17,6 +17,7 @@ const Loop = @import("Loop.zig");
 const Core = @import("runtime/Core.zig");
 const options = @import("runtime/options.zig");
 const slots = @import("runtime/slots.zig");
+const Scheduler = @import("Scheduler.zig");
 
 pub const Backend = options.Backend;
 pub const Scheduling = options.Scheduling;
@@ -34,7 +35,7 @@ core: Core,
 /// no thread. The calling thread becomes the home thread. `r` must not
 /// move after this.
 pub fn init(r: *Runtime, gpa: Allocator, o: Options) InitError!void {
-    return r.core.init(gpa, o, .native, &slots.vtable);
+    return r.core.init(gpa, o, .native, slots.tables);
 }
 
 /// Creates scheduler workers and prepares lane execution/control capacity.
@@ -49,6 +50,8 @@ pub fn start(r: *Runtime) StartError!void {
 /// allows. A host loop calls it per frame or when `backendHandle` is
 /// readable; with `workers = 0` it is how tasks run.
 pub fn run(r: *Runtime, mode: Loop.RunMode) void {
+    const entered = Scheduler.fromUser();
+    defer if (entered) |t| Scheduler.toUser(t);
     r.core.run(mode);
 }
 
@@ -60,6 +63,8 @@ pub fn backendHandle(r: *Runtime) error{ Unsupported, SystemResources, Unexpecte
 /// The longest the host may wait before calling `run(.nowait)`: zero
 /// while the home processor has a task ready or a message to serve.
 pub fn nextTimeout(r: *const Runtime) ?Io.Duration {
+    const entered = Scheduler.fromUser();
+    defer if (entered) |t| Scheduler.toUser(t);
     const home = &r.core.processors[0];
     if (home.hasWork()) return .zero;
     return home.loop.nextTimeout();
@@ -87,7 +92,7 @@ pub fn backendKind(r: *const Runtime) ?backend.Kind {
 /// The runtime an `Io` is, unless it is another `Io` (or one wrapping a
 /// runtime, which takes the other `Io`s' path).
 pub fn recognize(any: Io) ?*Runtime {
-    if (any.vtable != &slots.vtable) return null;
+    if (!slots.isRuntime(any.vtable)) return null;
     const c = Core.of(any.userdata);
     return @fieldParentPtr("core", c);
 }
@@ -99,8 +104,8 @@ pub const Stats = struct {
     steals: u64,
     forced_yields: u64,
     lanes: [Lanes.count]Lanes.Stats,
-    /// Processors the monitor handed from a worker stuck in a blocking call
-    /// to a spare thread.
+    /// Processors the monitor handed to a spare thread from a worker whose
+    /// task ran its own code, or sat in a blocking call, past `handoff_after`.
     handoffs: u64,
     /// Tasks that held their processor past `report_after`.
     stalls: u64,

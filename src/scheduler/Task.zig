@@ -42,6 +42,10 @@ policy: Policy = .{},
 execution: Execution = .{},
 /// The processor it runs or last ran on (an opaque `*Processor`).
 processor: ?*anyopaque = null,
+/// The seat of the thread it runs or last ran on (an opaque
+/// `*Scheduler.Seat`), set at every switch to it: where it lends its
+/// processor from without reading the thread's own storage again.
+seat: ?*anyopaque = null,
 /// Held on `processor` for now: a timer of its own armed there, or a
 /// batch with operations in that processor's kernel queue.
 pins: u16 = 0,

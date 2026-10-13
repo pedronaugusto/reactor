@@ -15,6 +15,8 @@ pub const Error = error{ Unsupported, Timeout, SystemResources } || Io.Cancelabl
 pub fn submit(io: Io, comptime prepare: anytype, context: anytype, timeout: Io.Timeout) Error!i32 {
     if (builtin.os.tag != .linux) return error.Unsupported;
     const core = native.runtimeOf(io) orelse return error.Unsupported;
+    const entered = native.enter();
+    defer native.leave(entered);
     if (!native.taskRuntime(core) or core.backendKind() != .io_uring) return error.Unsupported;
     var prepared = std.mem.zeroInit(std.os.linux.io_uring_sqe, .{});
     prepare(context, &prepared);
@@ -50,6 +52,8 @@ fn singleCompletion(sqe: std.os.linux.io_uring_sqe) bool {
 pub fn overlapped(io: Io, comptime start: anytype, handle: std.os.windows.HANDLE, context: anytype, timeout: Io.Timeout) Error!std.os.windows.IO_STATUS_BLOCK {
     if (builtin.os.tag != .windows) return error.Unsupported;
     const core = native.runtimeOf(io) orelse return error.Unsupported;
+    const entered = native.enter();
+    defer native.leave(entered);
     if (!native.taskRuntime(core) or core.backendKind() != .iocp) return error.Unsupported;
     const Thunk = struct {
         fn begin(raw: *anyopaque, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: *anyopaque) std.os.windows.NTSTATUS {

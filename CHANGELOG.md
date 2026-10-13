@@ -6,8 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A task that runs its own code past `handoff_after` (a computing loop) loses its processor to a spare thread, as a blocking call does, when tasks wait there or its loop has operations in flight, so they go on; the task rejoins a processor at its next call into the runtime, and the root takes the home processor back. Under `stealing` and `per_core` alike, on epoll, kqueue and IOCP with workers. No signals: the task itself is never interrupted. `Stats.handoffs` counts both kinds.
+
 ### Changed
 
+- Where the monitor hands processors on, every `std.Io` slot and extension call lends the calling thread's processor between calls: about 4 ns a call on an M3 under kqueue (a wake between two tasks 32 → 40 ns, a `concurrent` and `await` of an empty task 72 → 85 ns), 3 to 6 ns on Linux under epoll; nothing under io_uring.
+- Handoff applies under `per_core` too: a task whose processor went to a spare comes back to that processor. A processor is handed on only when it has work only its owner can do.
+- `spares` defaults to one per processor, so every processor can go to a spare while the thread that lent it still runs its task (was workers / 2).
 - The release tier runs the hardened profile: the suite with safety on, a bounded fuzz campaign over the scheduler's properties, and the suite under ThreadSanitizer, through a new `unit` step that runs the suite alone.
 
 ### Fixed

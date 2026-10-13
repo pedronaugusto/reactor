@@ -104,9 +104,13 @@ Benchmarks are code in `bench/`; measurements are maintained separately.
   worker.
 - **epoll and kqueue** make a socket's call at once and wait for readiness
   only when it would block, with each descriptor registered once for its
-  life. File calls run on the worker; should one block, a monitor thread
-  hands the worker's processor to a spare thread, so the tasks queued there
-  go on. A listening socket reactor accepts on is put in non-blocking mode.
+  life. File calls run on the worker. A worker lends its processor while
+  its task runs its own code or sits in a blocking call; should either last
+  past `handoff_after` with tasks queued there or operations in its loop, a
+  monitor thread hands the processor to a spare thread, so they go on, under
+  `stealing` and `per_core` alike, and the task rejoins a processor at its
+  next call into the runtime. No signals: a task is never preempted. A
+  listening socket reactor accepts on is put in non-blocking mode.
 - **std's cancellation exactly.** A cancel lands at the next cancelation point;
   an operation the kernel finished first keeps its result. `operateTimeout` and
   `Batch.awaitConcurrent` never return while the kernel still holds a buffer.

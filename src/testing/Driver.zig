@@ -10,10 +10,10 @@ const Allocator = std.mem.Allocator;
 
 const Source = @import("shakedown").Source;
 const Runtime = @import("../Runtime.zig");
+const slots = @import("../runtime/slots.zig");
 const backend = @import("../backend.zig");
 const clock = @import("../clock.zig");
 const Fake = @import("Fake.zig");
-const slots = @import("../runtime/slots.zig");
 
 runtime: Runtime,
 fake: Fake,
@@ -46,7 +46,7 @@ fn build(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Ru
         .context = d,
         .backendFor = backendFor,
         .clock = .{ .virtual = &d.virtual },
-    } }, &slots.vtable);
+    } }, slots.tables);
 }
 
 fn backendFor(context: *anyopaque, processor: u16) backend.Custom {

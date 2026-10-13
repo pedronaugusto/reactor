@@ -144,6 +144,84 @@ pub const vtable: Io.VTable = .{
     .netLookup = io_ops.netLookup,
 };
 
+/// `vtable` with each slot taking the calling thread's processor back from
+/// lending on the way in and lending it again on the way out
+/// (`Scheduler.fromUser`, `toUser`): what a runtime hands out where its
+/// processors are lent, so a task that computes between calls costs its
+/// thread the processor, never the processor its queue. The slots that never
+/// touch the calling thread's processor stay `vtable`'s own: the crash
+/// handler, which must not move a crashing task, and the clocks.
+pub const lending: Io.VTable = table: {
+    var table = vtable;
+    const info = @typeInfo(Io.VTable).@"struct";
+    for (info.field_names) |name| {
+        if (std.mem.eql(u8, name, "crashHandler") or std.mem.eql(u8, name, "now") or std.mem.eql(u8, name, "clockResolution")) continue;
+        @field(table, name) = lent(name);
+    }
+    break :table table;
+};
+
+pub const tables: Core.Tables = .{ .plain = &vtable, .lending = &lending };
+
+/// Whether `table` is a runtime's.
+pub fn isRuntime(table: *const Io.VTable) bool {
+    return table == &vtable or table == &lending;
+}
+
+fn SlotFn(comptime name: []const u8) type {
+    return @typeInfo(@FieldType(Io.VTable, name)).pointer.child;
+}
+
+/// `vtable`'s slot `name`, bracketed by `fromUser` and `toUser`.
+fn lent(comptime name: []const u8) *const SlotFn(name) {
+    const info = @typeInfo(SlotFn(name)).@"fn";
+    const P = info.param_types;
+    const R = info.return_type.?;
+    const inner = @field(vtable, name);
+    const Bracket = struct {
+        inline fn call(args: anytype) R {
+            const entered = Scheduler.fromUser();
+            defer if (entered) |t| Scheduler.toUser(t);
+            // Inlined, so a slot that records its caller (`concurrent`, the
+            // group calls) sees the task's call site, not this one.
+            return @call(.always_inline, inner, args);
+        }
+    };
+    return switch (P.len) {
+        1 => &struct {
+            fn f(u: P[0].?) R {
+                return Bracket.call(.{u});
+            }
+        }.f,
+        2 => &struct {
+            fn f(u: P[0].?, a: P[1].?) R {
+                return Bracket.call(.{ u, a });
+            }
+        }.f,
+        3 => &struct {
+            fn f(u: P[0].?, a: P[1].?, b: P[2].?) R {
+                return Bracket.call(.{ u, a, b });
+            }
+        }.f,
+        4 => &struct {
+            fn f(u: P[0].?, a: P[1].?, b: P[2].?, c: P[3].?) R {
+                return Bracket.call(.{ u, a, b, c });
+            }
+        }.f,
+        5 => &struct {
+            fn f(u: P[0].?, a: P[1].?, b: P[2].?, c: P[3].?, d: P[4].?) R {
+                return Bracket.call(.{ u, a, b, c, d });
+            }
+        }.f,
+        6 => &struct {
+            fn f(u: P[0].?, a: P[1].?, b: P[2].?, c: P[3].?, d: P[4].?, e: P[5].?) R {
+                return Bracket.call(.{ u, a, b, c, d, e });
+            }
+        }.f,
+        else => @compileError("a slot with more arguments than expected: " ++ name),
+    };
+}
+
 // Tasks.
 
 fn crashHandler(userdata: ?*anyopaque) void {
@@ -169,7 +247,7 @@ fn crashHandler(userdata: ?*anyopaque) void {
 fn async(userdata: ?*anyopaque, result: []u8, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void) ?*Io.AnyFuture {
     const r = Core.running(userdata);
     const t = tasks.concurrent(&r.scheduler, result.len, result_alignment, context, context_alignment, start, @returnAddress()) catch {
-        start(context.ptr, result.ptr);
+        if (Scheduler.current()) |t| Scheduler.callOut(t, start, .{ context.ptr, result.ptr }) else start(context.ptr, result.ptr);
         return null;
     };
     return @ptrCast(t); // safe: a future is its task
@@ -196,7 +274,7 @@ fn cancel(userdata: ?*anyopaque, future: *Io.AnyFuture, result: []u8, result_ali
 
 fn groupAsync(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque) void) void {
     const r = Core.running(userdata);
-    tasks.groupConcurrent(&r.scheduler, group, context, context_alignment, start, @returnAddress()) catch start(context.ptr);
+    tasks.groupConcurrent(&r.scheduler, group, context, context_alignment, start, @returnAddress()) catch if (Scheduler.current()) |t| Scheduler.callOut(t, start, .{context.ptr}) else start(context.ptr);
 }
 
 fn groupConcurrent(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {

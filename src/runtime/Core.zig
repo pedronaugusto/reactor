@@ -34,8 +34,12 @@ pub const StartError = error{ SystemResources, Unexpected };
 
 gpa: Allocator,
 options: Options,
-/// The `Io` this core is handed out as.
+/// The `Io` this core is handed out as: `Tables.lending` where processors
+/// are lent (`Processor.lends`), else `Tables.plain`.
 vtable: *const Io.VTable,
+tables: Tables,
+/// The home processor's scheduler's stack, where it runs on the home thread.
+home_stack: shuttle.Stack = undefined,
 scheduler: Scheduler,
 processors: []Processor,
 root: Task,
@@ -69,6 +73,10 @@ pub const Stderr = struct {
 
 /// How a runtime's loops are built: the system's backend, or one given
 /// per processor (reactor's tests: the seeded fake and a virtual clock).
+/// The runtime's slots: as they are, and lending the calling thread's
+/// processor between calls (`Scheduler.fromUser`).
+pub const Tables = struct { plain: *const Io.VTable, lending: *const Io.VTable };
+
 pub const Construction = union(enum) {
     native,
     custom: struct {
@@ -80,7 +88,7 @@ pub const Construction = union(enum) {
 
 /// Builds everything: stacks reserved, tables, loops, lanes; starts no
 /// thread. The calling thread becomes the home thread. `c` must not move.
-pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtable: *const Io.VTable) InitError!void {
+pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, tables: Tables) InitError!void {
     if (comptime !Scheduler.supported) return error.BackendUnavailable;
     const workers: u16 = options.workers orelse options_.defaultWorkers(builtin.os.tag, std.Thread.getCpuCount() catch 1);
     // The home processor and one for each worker: the count is the caller's, to its top.
@@ -88,7 +96,8 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     c.* = .{
         .gpa = gpa,
         .options = options,
-        .vtable = vtable,
+        .vtable = tables.plain,
+        .tables = tables,
         .scheduler = undefined,
         .processors = try gpa.alloc(Processor, count),
         .root = .{ .kind = .root, .policy = .{ .home = true } },
@@ -155,30 +164,42 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     errdefer c.lookup.deinit(gpa, &c.lanes);
 
     const home = &c.processors[0];
-    var home_stack = shuttle.Stack.init(.{ .size = .fromRaw(home_stack_size) }) catch return error.SystemResources;
-    errdefer home_stack.deinit();
-    home.sched_context = shuttle.Context.init(home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
+    c.home_stack = shuttle.Stack.init(.{ .size = .fromRaw(home_stack_size) }) catch return error.SystemResources;
+    errdefer c.home_stack.deinit();
+    // The home thread's scheduler is the home processor's, on a stack of
+    // its own: the root, on the thread's own, switches to it to wait.
+    const own = Scheduler.seatNow();
+    own.context = shuttle.Context.init(c.home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
+    own.task = &c.root;
+    c.root.seat = own;
     c.root.processor = home;
     home.current = &c.root;
     Scheduler.enter(home);
+    home.holdFrom(own);
 }
 
 /// The monitor, as the options ask, and the spare pool handoff draws on.
-/// Handoff needs a poller any thread may wait on (epoll, kqueue, IOCP), workers
-/// to hand from, and tasks free to move (`stealing`).
+/// Handoff needs a poller any thread may wait on (epoll, kqueue, IOCP) and
+/// workers to hand from; then the processors are lent while tasks run their
+/// own code, and the slots lend them between calls.
 fn initMonitor(c: *Core, workers: u16) InitError!void {
     const kind = c.backendKind();
     const handable = kind == .epoll or kind == .kqueue or kind == .iocp;
     const on = c.options.monitor orelse (workers > 0 and handable);
     if (!on) return;
-    const handoff = handable and workers > 0 and c.scheduler.scheduling == .stealing;
-    const cap: u16 = if (handoff) c.options.spares orelse @max(workers / 2, 1) else 0;
+    const handoff = handable and workers > 0;
+    // Enough for every processor to go to a spare once while the thread
+    // that lent it still runs its task.
+    const cap: u16 = if (handoff) c.options.spares orelse @intCast(c.processors.len) else 0;
     c.scheduler.spares = try .init(c.gpa, c.processors.len, cap);
     errdefer c.scheduler.spares.deinit();
     const monitor = try c.gpa.create(Scheduler.Monitor);
     errdefer c.gpa.destroy(monitor);
     monitor.* = try .init(c.gpa, c.processors.len, handoff, c.options.handoff_after, c.options.report_after);
     c.scheduler.monitor = monitor;
+    if (!handoff) return;
+    for (c.processors) |*p| p.lends = true;
+    c.vtable = c.tables.lending;
 }
 
 fn deinitMonitor(c: *Core) void {
@@ -232,6 +253,8 @@ pub fn start(c: *Core) StartError!void {
     if (c.scheduler.monitor) |m| {
         m.thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 256 << 10 }, Scheduler.watch, .{&c.scheduler}) catch return error.SystemResources;
     }
+    // Back to the host: the root runs its own code.
+    if (c.processors[0].lends) Scheduler.toUser(&c.root);
 }
 
 pub fn run(c: *Core, mode: Loop.RunMode) void {
@@ -256,6 +279,9 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 
 pub fn stop(c: *Core) void {
     if (!c.started.load(.acquire)) return;
+    // The home processor back first, should it have gone to a spare while
+    // the host ran its own code; it stays held from here.
+    _ = Scheduler.fromUser();
     assert(c.scheduler.stacks.inUse() == 0);
     c.scheduler.stopping.store(true, .release);
     c.scheduler.wakeAll();
@@ -275,10 +301,12 @@ pub fn deinit(c: *Core) void {
     c.deinitMonitor();
     c.lookup.deinit(c.gpa, &c.lanes);
     c.lanes.deinit(c.gpa);
-    var home_stack = c.processors[0].sched_context.deinit();
+    const own = Scheduler.seatNow();
+    _ = own.context.deinit();
+    own.* = .{};
     c.scheduler.trims.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit(c.gpa);
-    home_stack.deinit();
+    c.home_stack.deinit();
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);

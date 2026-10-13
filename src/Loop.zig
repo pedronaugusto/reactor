@@ -419,6 +419,11 @@ pub fn backendHandle(l: *Loop) error{ Unsupported, SystemResources, Unexpected }
 
 /// The longest a host may wait before calling `run(.nowait)`; null when
 /// no timer is armed and nothing is ready.
+/// Whether operations or timers are in the loop: completions will come.
+pub fn waiting(l: *const Loop) bool {
+    return l.in_flight != 0 or l.wheel.count != 0;
+}
+
 pub fn nextTimeout(l: *const Loop) ?Io.Duration {
     if (l.ready.head != null or l.backend.hasCompletions()) return .zero;
     const next = l.wheel.next() orelse return null;

@@ -7,14 +7,28 @@ const Io = std.Io;
 const Core = @import("../runtime/Core.zig");
 const slots = @import("../runtime/slots.zig");
 const Scheduler = @import("../Scheduler.zig");
+const Task = @import("../scheduler/Task.zig");
 
 var taken: std.atomic.Value(u64) = .init(0);
 
 /// The runtime `io` is; null for any other `Io`, which is counted.
 pub fn runtimeOf(io: Io) ?*Core {
-    if (io.vtable == &slots.vtable) return Core.of(io.userdata);
+    if (slots.isRuntime(io.vtable)) return Core.of(io.userdata);
     _ = taken.fetchAdd(1, .monotonic);
     return null;
+}
+
+/// From a task's own code into the runtime, as the slots come in: the
+/// calling thread takes back the processor it lent, or the task rejoins one
+/// (`Scheduler.fromUser`). Before anything that reads the processor;
+/// `leave` with what it returned on the way out.
+pub fn enter() ?*Task {
+    return Scheduler.fromUser();
+}
+
+/// Back to the task's own code, after `enter`.
+pub fn leave(entered: ?*Task) void {
+    if (entered) |t| Scheduler.toUser(t);
 }
 
 /// The runtime `io` is when the calling thread is running one of its

@@ -8,9 +8,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const Runtime = @import("../Runtime.zig");
+const slots = @import("../runtime/slots.zig");
 const backend = @import("../backend.zig");
 const Fake = @import("Fake.zig");
-const slots = @import("../runtime/slots.zig");
 
 runtime: Runtime,
 fakes: []Fake,
@@ -29,7 +29,7 @@ pub fn init(t: *Threads, gpa: Allocator, options: Runtime.Options) !void {
         .context = t,
         .backendFor = backendFor,
         .clock = .system,
-    } }, &slots.vtable);
+    } }, slots.tables);
     errdefer t.runtime.deinit();
     try t.runtime.start();
 }

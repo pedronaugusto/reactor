@@ -15,7 +15,7 @@ pub const Files = enum {
     /// io_uring: ring operations, calls with no ring operation on a lane.
     /// epoll, kqueue, IOCP: std's own calls on the worker, which the monitor
     /// rescues by handing its processor on should one block; on a lane
-    /// where there is no handoff (no monitor or `per_core`).
+    /// where there is no handoff (no monitor, or io_uring).
     auto,
     /// Every file call on a lane: no worker ever waits on a disk.
     pool,
@@ -79,15 +79,18 @@ pub const Options = struct {
     registered_pools: u16 = 64,
     /// Linux: worker n on CPU n.
     pin_workers: bool = false,
-    /// The monitor thread: stall reports, and on epoll, kqueue and IOCP under
-    /// `stealing`, handoff of a worker stuck in a blocking call. null: on
-    /// when there are workers and the backend is epoll, kqueue or IOCP.
+    /// The monitor thread: stall reports, and on epoll, kqueue and IOCP,
+    /// handoff of a processor whose task runs its own code or sits in a
+    /// blocking call past `handoff_after`. null: on when there are workers
+    /// and the backend is epoll, kqueue or IOCP.
     monitor: ?bool = null,
-    /// Spare threads handoff may start, on demand. null: workers / 2, at
-    /// least one.
+    /// Spare threads handoff may start, on demand. null: one per processor
+    /// (workers + 1), so every processor can go to a spare while the thread
+    /// that lent it still runs its task.
     spares: ?u16 = null,
-    /// How long a worker sits in a blocking call before its processor is
-    /// handed to a spare thread.
+    /// How long a worker lends its processor, while its task runs its own
+    /// code or sits in a blocking call, before the processor is handed to a
+    /// spare thread, if it has tasks queued or operations in its loop.
     handoff_after: Io.Duration = .fromMicroseconds(200),
     /// A task holding its processor this long without switching out is
     /// recorded as a stall; null: never.

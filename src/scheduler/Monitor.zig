@@ -1,17 +1,18 @@
 //! The monitor: one thread that samples the processors. A worker that has
-//! sat in a blocking call (`Scheduler.enterBlocking`) for `handoff_after`
-//! loses its processor to a spare thread, so the tasks queued there and the
-//! loop's completions go on. A task that has held its processor for
-//! `report_after` without switching
+//! lent its processor for `handoff_after` (its task running its own code,
+//! or sitting in a blocking call: its seat's `stage`) loses it to a spare
+//! thread when it has work, so the tasks queued there and the loop's
+//! completions go on. A
+//! task that has held its processor for `report_after` without switching
 //! out is recorded as a stall: where it was started, and for how long.
 //!
 //! The samples cost the processors two stores per task switch (`passes`,
 //! `site`) and nothing else: the monitor reads its own clock. It samples
-//! every 20 µs while a worker sits in a blocking call or one task holds a
-//! processor across samples, backing off to 10 ms while tasks come and go,
-//! and parks when every processor waits in its kernel. A blocking call
-//! that begins while it sleeps long
-//! wakes it.
+//! every 20 µs while a processor stays lent or one task holds it across
+//! samples, backing off to 10 ms while tasks come and go, and parks when
+//! every processor waits in its kernel. A blocking call that begins while
+//! it sleeps long wakes it; a task computing is found within the sample
+//! after its lending began, so 10 ms at most after the monitor last looked.
 const Monitor = @This();
 
 const builtin = @import("builtin");
@@ -23,8 +24,10 @@ const clocks = @import("../clock.zig");
 
 /// What the monitor remembers of one processor between samples.
 const Sample = struct {
-    blocking: u32 = 0,
-    blocking_since: clocks.Awake = .fromRaw(0),
+    /// The owner's seat (an opaque `*Scheduler.Seat`) and its stage.
+    owner: ?*const anyopaque = null,
+    stage: u32 = 0,
+    stage_since: clocks.Awake = .fromRaw(0),
     passes: u32 = 0,
     passes_since: clocks.Awake = .fromRaw(0),
     reported: bool = false,
@@ -105,7 +108,8 @@ pub fn stop(m: *Monitor) void {
 }
 
 /// The monitor's body. `S` is the scheduler: its processors carry
-/// `blocking`, `passes` and `site`; it answers `handOff` and `allIdle`.
+/// `owner` (a seat with its `stage`), `passes` and `site`; it answers
+/// `isLent`, `isBlocked`, `handOff` and `allIdle`.
 pub fn run(m: *Monitor, s: anytype) void {
     var delay = shortest;
     while (!s.stopping.load(.acquire)) {
@@ -132,18 +136,26 @@ pub fn run(m: *Monitor, s: anytype) void {
     }
 }
 
-/// One processor's sample; true when it needs watching closely: a blocking
-/// call under way, or one task holding it since the last sample.
+/// One processor's sample; true when it needs watching closely: one
+/// lending, or one task holding it, since the last sample.
 fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) bool {
     var watching = false;
-    const blocking = p.blocking.load(.acquire);
-    if (blocking & 3 == 1) {
-        watching = true;
-        if (sample.blocking != blocking) {
-            sample.blocking = blocking;
-            sample.blocking_since = t;
-        } else if (m.handoff and clocks.since(sample.blocking_since, t).compare(m.handoff_after) != .lt) {
-            if (s.handOff(p, blocking)) _ = m.handoffs.fetchAdd(1, .monotonic);
+    if (p.owner.load(.acquire)) |owner| {
+        const stage = owner.stage.load(.acquire);
+        if (s.isLent(stage)) {
+            // A blocking call is watched from its start, a task's own code
+            // once it outlasts a sample: most are over long before.
+            if (s.isBlocked(stage)) watching = true;
+            if (sample.stage != stage or sample.owner != @as(*const anyopaque, owner)) {
+                sample.stage = stage;
+                sample.owner = owner;
+                sample.stage_since = t;
+            } else {
+                watching = true;
+                if (m.handoff and clocks.since(sample.stage_since, t).compare(m.handoff_after) != .lt) {
+                    if (s.handOff(p, owner, stage)) _ = m.handoffs.fetchAdd(1, .monotonic);
+                }
+            }
         }
     }
     const passes = p.passes.load(.acquire);

@@ -137,6 +137,97 @@ test "the root stuck in a blocking file call lends the home processor to a spare
     try testing.expect(r.stats().handoffs >= 6);
 }
 
+/// A task that computes without calling into the runtime until a task it
+/// started has run. The started task waits behind it on its processor (the
+/// LIFO slot, which no other processor takes from; under `per_core`, any
+/// queue): only a handoff of the processor lets it run.
+const Computing = struct {
+    done: std.atomic.Value(bool) = .init(false),
+    /// The processor the computing task began and ended on.
+    began_on: u16 = 0,
+    ended_on: u16 = 0,
+
+    fn mark(c: *Computing) void {
+        c.done.store(true, .release);
+    }
+
+    fn run(c: *Computing, io: Io) !void {
+        c.began_on = Scheduler.processor().?.index;
+        var marker = try io.concurrent(mark, .{c});
+        while (!c.done.load(.acquire)) std.atomic.spinLoopHint();
+        // Back in the runtime: on a processor again.
+        marker.await(io);
+        c.ended_on = Scheduler.processor().?.index;
+    }
+
+    fn outside(c: *Computing, io: Io, out: *anyerror!void) void {
+        var task = io.concurrent(run, .{ c, io }) catch |err| {
+            out.* = err;
+            return;
+        };
+        out.* = task.await(io);
+    }
+};
+
+fn computingRuntime(r: *Runtime, scheduling: Scheduler.Scheduling) !void {
+    const backend = readiness orelse return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
+    r.init(testing.allocator, .{ .backend = backend, .workers = 2, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .scheduling = scheduling }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    errdefer r.deinit();
+    try r.start();
+}
+
+test "a task computing past handoff_after loses its processor to a spare, and the task queued behind it runs" {
+    var r: Runtime = undefined;
+    try computingRuntime(&r, .stealing);
+    defer r.deinit();
+    for (0..3) |_| {
+        var c: Computing = .{};
+        var outcome: anyerror!void = error.NotRun;
+        // From a thread outside the runtime, so a worker runs it.
+        const thread = try std.Thread.spawn(.{}, Computing.outside, .{ &c, r.io(), &outcome });
+        thread.join();
+        try outcome;
+    }
+    try testing.expect(r.stats().handoffs >= 3);
+}
+
+test "under per_core a computing task's queue goes on on a spare, and the task comes back to its processor" {
+    var r: Runtime = undefined;
+    try computingRuntime(&r, .per_core);
+    defer r.deinit();
+    for (0..3) |_| {
+        var c: Computing = .{};
+        var outcome: anyerror!void = error.NotRun;
+        const thread = try std.Thread.spawn(.{}, Computing.outside, .{ &c, r.io(), &outcome });
+        thread.join();
+        try outcome;
+        try testing.expectEqual(c.began_on, c.ended_on);
+    }
+    try testing.expect(r.stats().handoffs >= 3);
+}
+
+test "the root computing in its host lends the home processor, and the task it started runs meanwhile" {
+    var r: Runtime = undefined;
+    try computingRuntime(&r, .stealing);
+    defer r.deinit();
+    const io = r.io();
+    const home = std.Thread.getCurrentId();
+    for (0..3) |_| {
+        var c: Computing = .{};
+        // The root's own: the marker waits in the home processor's LIFO
+        // slot while the host computes.
+        try c.run(io);
+        try testing.expectEqual(@as(u16, 0), c.began_on);
+        try testing.expectEqual(@as(u16, 0), c.ended_on);
+        try testing.expectEqual(home, std.Thread.getCurrentId());
+    }
+    try testing.expect(r.stats().handoffs >= 3);
+}
+
 fn spinUntilStall(r: *Runtime) !void {
     const clock_io = Io.Threaded.global_single_threaded.io();
     const start = Io.Clock.awake.now(clock_io);
@@ -150,7 +241,8 @@ test "a task that holds its processor past report_after without switching out is
     const backend = readiness orelse return error.SkipZigTest;
     if (!supported) return error.SkipZigTest;
     var r: Runtime = undefined;
-    r.init(testing.allocator, .{ .backend = backend, .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .report_after = .fromMilliseconds(5) }) catch |err| switch (err) {
+    // Its processor is handed on only long after the report.
+    r.init(testing.allocator, .{ .backend = backend, .workers = 1, .max_tasks = 64, .stack_size = .fromRaw(256 << 10), .report_after = .fromMilliseconds(5), .handoff_after = .fromSeconds(60) }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };

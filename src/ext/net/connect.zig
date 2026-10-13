@@ -91,7 +91,10 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
     };
     errdefer socket.close(io);
     try dial.interface(io, socket.handle, address.*, options.interface);
-    if (native.runtimeOf(io)) |core| if (native.taskRuntime(core) and core.backendKind() != null) {
+    if (native.runtimeOf(io)) |core| native: {
+        const entered = native.enter();
+        defer native.leave(entered);
+        if (!native.taskRuntime(core) or core.backendKind() == null) break :native;
         const p = Scheduler.processor().?;
         var op: Loop.Op = .{ .kind = .{ .connect = .{ .socket = socket.handle, .address = .{ .ip = address.* } } } };
         perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
@@ -106,7 +109,7 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
             },
         };
         return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } };
-    };
+    }
     if (builtin.os.tag == .windows) {
         const Race = union(enum) { connected: Error!void, expired: Io.Cancelable!void };
         var buffer: [2]Race = undefined;

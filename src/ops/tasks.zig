@@ -63,7 +63,7 @@ const Layout = struct {
 };
 
 fn futureEntry(t: *Task) noreturn {
-    t.start.future(t.context_bytes, t.result_bytes);
+    Scheduler.callOut(t, t.start.future, .{ t.context_bytes, t.result_bytes });
     Scheduler.exit(.{ .func = futureDone, .context = t });
 }
 
@@ -112,9 +112,12 @@ pub fn cancel(s: *Scheduler, t: *Task, result: []u8) void {
     await(s, t, result);
 }
 
+fn processorOf(t: *Task) *Processor {
+    return @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+}
+
 fn schedulerOf(t: *Task) *Scheduler {
-    const p: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
-    return p.scheduler;
+    return processorOf(t).scheduler;
 }
 
 // Groups.
@@ -204,7 +207,7 @@ pub fn groupConcurrent(s: *Scheduler, g: *Io.Group, context: []const u8, context
 }
 
 fn memberEntry(t: *Task) noreturn {
-    t.start.member(t.context_bytes);
+    Scheduler.callOut(t, t.start.member, .{t.context_bytes});
     Scheduler.exit(.{ .func = memberDone, .context = t });
 }
 
@@ -212,7 +215,7 @@ fn memberEntry(t: *Task) noreturn {
 /// awaiter told if it was the last.
 fn memberDone(context: *anyopaque, t: *Task) void {
     _ = context;
-    const p: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+    const p = processorOf(t);
     const s = p.scheduler;
     const g = t.group.?;
     // Counted from before it leaves the group until its stack is back, so an

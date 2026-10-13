@@ -104,6 +104,8 @@ pub fn next(j: *Job, io: Io, timeout: Io.Timeout) NextError!Message {
         }
     }
     const core = native.runtimeOf(io) orelse return take(io, j.port, deadline);
+    const entered = native.enter();
+    defer native.leave(entered);
     if (!native.taskRuntime(core)) return take(io, j.port, deadline);
     return lane_call.call(&core.scheduler, &core.lanes, .wait, &take, .{ core.lanes.executor(.wait), j.port, deadline });
 }

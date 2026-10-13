@@ -109,9 +109,11 @@ pub const Processor = struct {
     index: u16,
     /// Whether the current owner is the thread on which the root runs.
     on_home_thread: bool = false,
+    /// Whether the owner lends the processor while a task runs its own code
+    /// or sits in a blocking call, so the monitor can hand it to a spare
+    /// thread (`lease`); fixed at init.
+    lends: bool = false,
     loop: Loop,
-    /// Where the scheduler waits while a task runs.
-    sched_context: shuttle.Context = .{},
     /// The task running, if any.
     current: ?*Task = null,
     lifo: ?*Task = null,
@@ -142,10 +144,13 @@ pub const Processor = struct {
     passes: std.atomic.Value(u32) = .init(0),
     /// Where the running task was started.
     site: std.atomic.Value(usize) = .init(0),
-    /// A blocking call's state, generation << 2 | 0 (none), 1 (in one), 2
-    /// (the processor was handed to another thread meanwhile) or 3 (the
-    /// home processor, given back to the home thread).
-    blocking: std.atomic.Value(u32) = .init(0),
+    /// What the monitor did with the processor (`Lease`), its generation
+    /// moving at every change of owner, so a word one owner held it with
+    /// never matches under the next.
+    lease: std.atomic.Value(u32) = .init(0),
+    /// The seat of the thread holding the processor, which the monitor
+    /// reads to see whether it is lent.
+    owner: std.atomic.Value(?*Seat) = .init(null),
 
     /// The inboxes and flags other threads touch. Every wake reads the flags
     /// and every remote push writes an inbox, so the owner's own state must
@@ -343,8 +348,14 @@ pub const Processor = struct {
     /// Whether this processor has a task to run or a message to serve: a
     /// host driving the home processor calls `run` again at once.
     pub fn hasWork(p: *const Processor) bool {
+        return p.hasOwnWork() or p.scheduler.injectedLen() > 0;
+    }
+
+    /// Whether this processor has a task to run or a message to serve of its
+    /// own, the global queue aside: what only its owner can do.
+    pub fn hasOwnWork(p: *const Processor) bool {
         return p.lifo != null or !p.local.isEmpty() or !p.pinned.isEmpty() or !p.latency.isEmpty() or !p.latency_pinned.isEmpty() or
-            !p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty() or p.scheduler.injectedLen() > 0;
+            !p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty();
     }
 
     /// The owner's: this processor's kernel queue now holds one more
@@ -398,19 +409,22 @@ pub const Processor = struct {
     /// The scheduler, on this processor's thread, until the runtime stops
     /// (workers) or forever (the home processor, which the root leaves).
     pub fn schedule(p: *Processor) void {
-        if (p.scheduler.monitor != null) return p.scheduleMode(true);
-        return p.scheduleMode(false);
+        // The thread's own seat, read once: a task switches back to the
+        // context this loop saves there.
+        const own = seatNow();
+        if (p.scheduler.monitor != null) return p.scheduleMode(true, own);
+        return p.scheduleMode(false, own);
     }
 
     // Monitoring is fixed at init. The normal loop needs no handoff checks
     // or thread-local reads at every task switch.
-    fn scheduleMode(p: *Processor, comptime watched: bool) void {
+    fn scheduleMode(p: *Processor, comptime watched: bool, own: *Seat) void {
         while (true) {
             if (watched and p.index == 0 and p.remote.home_wants.load(.seq_cst) and !p.on_home_thread) return p.giveBack();
             if (p.next()) |t| {
-                p.runTask(watched, t);
+                p.runTask(watched, t, own);
                 // The processor was handed on: this thread lets go of it.
-                if (watched and held != p) return;
+                if (watched and own.held != p) return;
                 continue;
             }
             if (p.drainInboxes()) continue;
@@ -494,7 +508,7 @@ pub const Processor = struct {
     }
 
     /// Runs `t` until it switches back, then does what it asked.
-    fn runTask(p: *Processor, comptime watched: bool, t: *Task) void {
+    fn runTask(p: *Processor, comptime watched: bool, t: *Task, own: *Seat) void {
         p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
         t.processor = p;
@@ -511,8 +525,10 @@ pub const Processor = struct {
             p.site.store(t.spawned_at, .monotonic);
             p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
+        own.task = t;
+        t.seat = own;
         // The task's switch back runs `afterSwitch` here, once its stack is still.
-        shuttle.handoff.switchTo(&p.sched_context, &t.context, null);
+        shuttle.handoff.switchTo(&own.context, &t.context, null);
     }
 
     /// What the scheduler does once a task has switched back to it, run
@@ -678,8 +694,8 @@ pub const Processor = struct {
     /// goes, and this thread lets go.
     fn giveBack(p: *Processor) void {
         leave();
-        p.blocking.store((p.blocking.load(.monotonic) & ~@as(u32, 3)) | 3, .release);
-        system().futexWake(u32, &p.blocking.raw, 1);
+        p.lease.store(Lease.with(p.lease.load(.monotonic), Lease.home_back), .release);
+        system().futexWake(u32, &p.lease.raw, 1);
     }
 
     /// The calling thread takes this processor over.
@@ -689,7 +705,17 @@ pub const Processor = struct {
         p.current = null;
         const passes = p.passes.load(.monotonic);
         if (passes & 1 == 1) p.passes.store(passes +% 1, .release);
-        p.blocking.store(p.blocking.load(.monotonic) & ~@as(u32, 3), .release);
+        p.holdFrom(seatNow());
+    }
+
+    /// The thread at `holder` holds `p` from here, in the runtime, in a new
+    /// generation: no word the last owner held it with matches again.
+    pub fn holdFrom(p: *Processor, holder: *Seat) void {
+        const word = Lease.next(p.lease.load(.monotonic)) | Lease.held;
+        holder.lease = word;
+        holder.stage.store(Stage.move(holder.stage.raw, Stage.inside), .monotonic);
+        p.lease.store(word, .release);
+        p.owner.store(holder, .release);
     }
 };
 
@@ -759,28 +785,53 @@ pub fn system() Io {
     return Io.Threaded.global_single_threaded.io();
 }
 
-threadlocal var held: ?*Processor = null;
+/// What a thread keeps of its own: the processor it holds, its
+/// scheduler's context, which the tasks it runs switch back to, and the
+/// task it runs. A processor moves between threads; a task that loses its
+/// processor while it runs its own code finds its way back through the
+/// thread's seat, never through the processor, which is another's by then.
+pub const Seat = struct {
+    held: ?*Processor = null,
+    context: shuttle.Context = .{},
+    /// The task this thread last switched to.
+    task: ?*Task = null,
+    /// Where the thread is (`Stage`): in the runtime, or lending its
+    /// processor while its task runs its own code or sits in a blocking
+    /// call. Written by the thread alone, read by the monitor.
+    stage: std.atomic.Value(u32) = .init(Stage.inside),
+    /// The processor's `lease` word while this thread holds it, its
+    /// generation this thread's: any other word says the monitor claimed
+    /// it or handed it on.
+    lease: u32 = 0,
+};
 
-/// The processor the calling thread holds, read afresh at every call.
+threadlocal var seat: Seat = .{};
+
+/// The calling thread's seat, read afresh at every call.
 ///
 /// A task moves between threads at a switch, which the compiler cannot
 /// see: within one function it computes a thread-local's address once and
 /// reuses it, so after a park inlined into the same function a task would
 /// read the thread it left. Never inlined, so each call computes the
 /// address on the thread that makes it.
+pub noinline fn seatNow() *Seat {
+    return &seat;
+}
+
+/// The processor the calling thread holds, read afresh at every call.
 noinline fn heldNow() ?*Processor {
-    return held;
+    return seat.held;
 }
 
 /// The calling thread now holds `p`.
 pub fn enter(p: *Processor) void {
     assert(heldNow() == null);
-    held = p;
+    seatNow().held = p;
     p.on_home_thread = std.Thread.getCurrentId() == p.scheduler.home_thread;
 }
 
 pub fn leave() void {
-    held = null;
+    seatNow().held = null;
 }
 
 /// The processor the calling thread holds, if any.
@@ -816,7 +867,8 @@ pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Pro
 /// task's stack is still: there it publishes the task to whoever will
 /// wake it (a futex bucket, a lane, an awaited future).
 pub fn park(after: ?Processor.After) void {
-    const p = heldNow().?;
+    const own = seatNow();
+    const p = own.held.?;
     const t = p.current.?;
     var message: Processor.Message = .{ .processor = p, .action = .{ .park = after } };
     if (t.stack != null) {
@@ -824,23 +876,25 @@ pub fn park(after: ?Processor.After) void {
         const deepest = p.scheduler.records.parked(t, p.index, bytes);
         message.inspect = deepest > bytes + trim_gap;
     }
-    toScheduler(t, &p.sched_context, &message);
+    toScheduler(t, &own.context, &message);
 }
 
 /// To the back of the queue.
 pub fn yield() void {
-    const p = heldNow().?;
+    const own = seatNow();
+    const p = own.held.?;
     const t = p.current.?;
     var message: Processor.Message = .{ .processor = p, .action = .yield };
-    toScheduler(t, &p.sched_context, &message);
+    toScheduler(t, &own.context, &message);
 }
 
 /// Ends the running task: `after` runs once it is off its stack.
 pub fn exit(after: Processor.After) noreturn {
-    const p = heldNow().?;
+    const own = seatNow();
+    const p = own.held.?;
     const t = p.current.?;
     var message: Processor.Message = .{ .processor = p, .action = .{ .exit = after } };
-    toScheduler(t, &p.sched_context, &message);
+    toScheduler(t, &own.context, &message);
     unreachable; // unreachable: nothing switches back to an ended task
 }
 
@@ -980,84 +1034,236 @@ pub fn allIdle(s: *const Scheduler) bool {
     return s.shared.idle_count.load(.seq_cst) == s.processors.len;
 }
 
-// Blocking calls and handoff.
+// Lending and handoff.
+//
+// A worker lends its processor whenever the task it runs leaves the
+// runtime: for its own code, between one call into the runtime and the
+// next, and for a blocking call. The thread says where it is in its seat's
+// `stage`, the monitor says what it did with the processor in the
+// processor's `lease`, and each writes its word and then reads the other's,
+// both sequentially consistent, so of a thread coming back into the runtime
+// and the monitor claiming its processor at least one sees the other: the
+// monitor backs off, or the thread waits for its look to end. No
+// read-modify-write on a task's way in or out. A lending that lasts
+// `handoff_after` (a task computing, a call blocked) costs the thread its
+// processor when the processor has work, never the processor its queue. A
+// task that lost its processor goes on running its own code on its thread
+// and rejoins a processor at its next call into the runtime; the root takes
+// the home processor back. Only where the monitor hands processors on
+// (`Processor.lends`): epoll, kqueue and IOCP, with workers.
+
+/// The states of `Processor.lease`, in its low bits below the generation,
+/// which moves at every change of owner.
+pub const Lease = struct {
+    /// Its owner's: whether it is lent is the owner's `stage`.
+    pub const held: u32 = 0;
+    /// The monitor gave it to a spare thread while its owner had lent it.
+    pub const handed: u32 = 1;
+    /// The home processor, given back to the home thread.
+    pub const home_back: u32 = 2;
+    /// The monitor looks at it while its owner has lent it, to decide
+    /// whether to hand it on; the owner waits for the look to end.
+    pub const claimed: u32 = 3;
+    pub const state: u32 = 3;
+
+    /// The generation after `word`'s, with no state.
+    pub fn next(word: u32) u32 {
+        return (word & ~state) +% (state + 1);
+    }
+
+    /// `word` with `new` as its state, its generation kept.
+    pub fn with(word: u32, new: u32) u32 {
+        return (word & ~state) | new;
+    }
+};
+
+/// Where a thread is, in its seat's `stage`: a count of its moves in the
+/// bits above, so the monitor tells one long lending from many short ones.
+pub const Stage = struct {
+    /// In the runtime: its processor is its own to touch.
+    pub const inside: u32 = 0;
+    /// Its task runs its own code: the processor is lent.
+    pub const user: u32 = 1;
+    /// Its task sits in a blocking call: the processor is lent, and watched
+    /// from the start of the call.
+    pub const blocked: u32 = 2;
+    pub const mode: u32 = 3;
+
+    fn move(stage: u32, to: u32) u32 {
+        return ((stage & ~mode) +% (mode + 1)) | to;
+    }
+};
+
+/// Whether `stage` lends its thread's processor.
+pub fn isLent(s: *const Scheduler, stage: u32) bool {
+    _ = s;
+    return stage & Stage.mode != Stage.inside;
+}
+
+/// Whether `stage` lends its thread's processor for a blocking call.
+pub fn isBlocked(s: *const Scheduler, stage: u32) bool {
+    _ = s;
+    return stage & Stage.mode == Stage.blocked;
+}
+
+/// The thread at `own` leaves the runtime for `to`, lending its processor.
+inline fn lendFrom(own: *Seat, to: u32) void {
+    own.stage.store(Stage.move(own.stage.raw, to), .release);
+}
+
+/// The thread at `own` comes back into the runtime: true when it still
+/// holds its processor, having waited out a look of the monitor's; false
+/// when the monitor handed it on meanwhile.
+fn comeBack(own: *Seat) bool {
+    own.stage.store(Stage.move(own.stage.raw, Stage.inside), .seq_cst);
+    const p = own.held.?;
+    while (true) {
+        const word = p.lease.load(.seq_cst);
+        if (word == own.lease) return true;
+        if (word != Lease.with(own.lease, Lease.claimed)) return false;
+        std.atomic.spinLoopHint();
+    }
+}
+
+/// From a task's own code into the runtime: the calling thread takes its
+/// processor back from lending, or, when the monitor handed it on, the
+/// task first rejoins a processor (the root, the home one). The task when
+/// its processor was lent here, for `toUser` at the way out; null inside
+/// the runtime already, off any processor, or where processors are not
+/// lent. Nothing before it may touch the processor.
+pub noinline fn fromUser() ?*Task {
+    // Never inlined: the seat is read on the thread making the call.
+    return fromSeat(&seat);
+}
+
+/// `fromUser` for the running task `t`, through its seat.
+fn fromTask(t: *Task) void {
+    _ = fromSeat(seatOf(t));
+}
+
+inline fn fromSeat(own: *Seat) ?*Task {
+    if (own.stage.raw & Stage.mode != Stage.user) return null;
+    const t = own.task.?;
+    if (!comeBack(own)) rejoin(own, t);
+    return t;
+}
+
+/// Back to `t`'s own code, `t` the task `fromUser` returned: its processor
+/// is lent until it calls into the runtime again. Through the task's seat,
+/// which is the thread's it runs on now, wherever the call took it.
+pub fn toUser(t: *Task) void {
+    lendFrom(seatOf(t), Stage.user);
+}
+
+fn seatOf(t: *Task) *Seat {
+    return @ptrCast(@alignCast(t.seat.?)); // safe: only seats are stored there
+}
+
+/// Calls the running task `t`'s own code from inside the runtime (an
+/// `async` run inline, its first function): its processor is lent
+/// meanwhile, and the task may come back on another.
+pub inline fn callOut(t: *Task, function: anytype, args: anytype) void {
+    const p: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+    if (!p.lends) return @call(.auto, function, args);
+    toUser(t);
+    @call(.auto, function, args);
+    fromTask(t);
+}
+
+/// The processor the thread at `own` lent went to another thread: the
+/// running task `t` leaves this thread and goes on wherever a processor
+/// takes it; the root, which never leaves its thread, waits for the home
+/// processor to come back. The processor's own record of the task is
+/// another thread's now: the task is the seat's.
+fn rejoin(own: *Seat, t: *Task) void {
+    const p = own.held.?;
+    if (t.kind == .root) {
+        p.remote.home_wants.store(true, .seq_cst);
+        p.loop.wake();
+        reclaim(p);
+        p.current = t;
+        return;
+    }
+    var message: Processor.Message = .{ .processor = p, .action = .relocate };
+    toScheduler(t, &own.context, &message);
+}
 
 /// A blocking call under way on a worker, which the monitor may hand the
 /// worker's processor away from meanwhile.
 pub const Blocking = struct {
-    processor: *Processor,
     task: *Task,
-    word: u32,
-    /// The scheduler of the thread making the call: where the task leaves
-    /// that thread if the processor goes elsewhere meanwhile.
-    home: shuttle.Context,
 };
 
 /// Before a call that may block its thread (std's file code, borrowed on a
-/// worker): while it lasts, the processor is no longer this thread's to
-/// touch, and the monitor hands it to a spare thread if the call goes on
-/// past `handoff_after`. Null where that cannot be: no monitor or no
-/// handoff (io_uring, `per_core`), a task pinned (the root never
-/// leaves its thread, so the home processor comes back to it), a task held
-/// on its processor. Nothing between this and `leaveBlocking` may touch
-/// the scheduler.
+/// worker): the processor is lent while it lasts, and the monitor hands it
+/// to a spare thread if the call goes on past `handoff_after` and it has
+/// work. Null where processors are not lent. Nothing between this and
+/// `leaveBlocking` may touch the scheduler.
 pub fn enterBlocking() ?Blocking {
-    const p = held orelse return null;
-    const m = if (p.scheduler.monitor) |m| m else return null;
-    if (!m.handoff) return null;
+    const own = seatNow();
+    const p = own.held orelse return null;
+    if (!p.lends) return null;
     const t = p.current orelse return null;
-    if (t.pins > 0 or (t.policy.home and t.kind != .root)) return null;
-    const word = ((p.blocking.load(.monotonic) >> 2) +% 1) << 2 | 1;
-    const b: Blocking = .{ .processor = p, .task = t, .word = word, .home = p.sched_context };
-    p.blocking.store(word, .release);
-    m.poke();
-    return b;
+    lendFrom(own, Stage.blocked);
+    // The monitor sleeps long while nothing is lent for long: a blocking
+    // call is worth watching from its start.
+    p.scheduler.monitor.?.poke();
+    return .{ .task = t };
 }
 
 /// After the call: the task goes on on this thread if it still holds the
-/// processor, else leaves the thread (which waits as a spare) and goes on
-/// wherever a processor takes it next.
+/// processor, else rejoins one as at a call from its own code.
 pub fn leaveBlocking(b: *Blocking) void {
-    if (b.processor.blocking.cmpxchgStrong(b.word, b.word & ~@as(u32, 3), .acquire, .monotonic) == null) return;
-    if (b.task.kind == .root) {
-        // The root never leaves its thread: the processor comes back.
-        b.processor.remote.home_wants.store(true, .seq_cst);
-        wakeProcessor(b.processor);
-        reclaim(b.processor);
-        b.processor.sched_context = b.home;
-        b.processor.current = b.task;
-        return;
-    }
-    var message: Processor.Message = .{ .processor = b.processor, .action = .relocate };
-    toScheduler(b.task, &b.home, &message);
+    const own = seatOf(b.task);
+    if (!comeBack(own)) rejoin(own, b.task);
 }
 
 /// On the home thread: waits until the home processor is given back
 /// (`giveBack`), then holds it again.
 pub fn reclaim(p: *Processor) void {
     while (true) {
-        const word = p.blocking.load(.acquire);
-        if (word & 3 == 3) break;
-        system().futexWaitUncancelable(u32, &p.blocking.raw, word);
+        const word = p.lease.load(.acquire);
+        if (word & Lease.state == Lease.home_back) break;
+        system().futexWaitUncancelable(u32, &p.lease.raw, word);
     }
     p.remote.home_wants.store(false, .monotonic);
-    if (held == null) enter(p);
+    if (heldNow() == null) enter(p);
     p.adopt();
 }
 
 /// On the thread that lost its processor, `t` off its stack now: the
-/// thread lets go, and `t` goes to the global queue.
+/// thread lets go, and `t` goes where it may run, as a woken task does: to
+/// the processor it belongs to (`per_core`, pinned) or the global queue.
 fn relocated(s: *Scheduler, t: *Task) void {
     leave();
-    s.inject(t);
+    s.ready(t, .completed);
 }
 
-/// From the monitor: hands `p`, whose thread has sat in a blocking call
-/// (`word`) too long, to a spare thread. False when there is none to hand
-/// it to, or the call has ended.
-pub fn handOff(s: *Scheduler, p: *Processor, word: u32) bool {
+/// From the monitor: hands `p`, which its owner (`owner`, at `stage`) has
+/// lent too long, to a spare thread, when it has something only its owner
+/// can do: tasks queued there, or operations and timers in its loop. The
+/// global queue is any processor's, and an idle one is woken for it. False
+/// when it has nothing, there is no thread to hand it to, or the owner came
+/// back into the runtime.
+pub fn handOff(s: *Scheduler, p: *Processor, owner: *Seat, stage: u32) bool {
+    // A thread first, outside the claim: starting one is slow, and the owner
+    // waits on a claim.
     if (!s.spares.reserve(serveThread, s)) return false;
-    if (p.blocking.cmpxchgStrong(word, (word & ~@as(u32, 3)) | 2, .acq_rel, .monotonic) != null) return false;
+    const word = p.lease.load(.monotonic);
+    if (word & Lease.state != Lease.held) return false;
+    if (p.lease.cmpxchgStrong(word, Lease.with(word, Lease.claimed), .seq_cst, .monotonic) != null) return false;
+    // The owner came back meanwhile: it may be touching the processor.
+    if (owner.stage.load(.seq_cst) != stage) {
+        p.lease.store(word, .release);
+        return false;
+    }
+    // Claimed while lent: the owner waits at its next way in, so the
+    // processor's queues and loop are still.
+    if (!p.hasOwnWork() and !p.loop.waiting()) {
+        p.lease.store(word, .release);
+        return false;
+    }
+    p.lease.store(Lease.with(word, Lease.handed), .release);
     s.spares.post(p);
     return true;
 }
@@ -1081,7 +1287,7 @@ pub fn serveThread(s: *Scheduler, first: ?*Processor) void {
         p.adopt();
         p.schedule();
         // Still held: the runtime stops.
-        if (held == p) {
+        if (heldNow() == p) {
             if (comptime builtin.os.tag == .linux) if (p.loop.backend == .io_uring) p.loop.backend.io_uring.drainListeners();
             leave();
             return;

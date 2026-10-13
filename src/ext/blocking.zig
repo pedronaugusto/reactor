@@ -24,6 +24,8 @@ fn Return(comptime F: type) type {
 /// Refusal never invokes the function or falls back to the caller.
 pub fn blocking(io: Io, lane: Lanes.Lane, function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) Return(@TypeOf(function)) {
     const core = native.runtimeOf(io) orelse return @call(.auto, function, args);
+    const entered = native.enter();
+    defer native.leave(entered);
     return lane_call.fallible(&core.scheduler, &core.lanes, lane, &function, args);
 }
 
@@ -42,5 +44,7 @@ pub fn blockingHook(io: Io) Hook {
 
 fn invoke(context: ?*anyopaque, function: *const fn (*anyopaque) void, args: *anyopaque) Error!void {
     const core = if (context) |c| @as(*Core, @ptrCast(@alignCast(c))) else return function(args); // safe: blockingHook retained the recognized core
+    const entered = native.enter();
+    defer native.leave(entered);
     return lane_call.fallible(&core.scheduler, &core.lanes, .sync, function, .{args});
 }
