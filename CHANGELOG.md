@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-14
+
+### Fixed
+
+- On Windows a task's file call (an open, a stat, a rename, anything but reading or writing an open file) runs on the `general` lane's thread, where it ran std's code on the task's stack: std makes each path an NT path in buffers of 32 Ki UTF-16 units, and its frames outgrow a task's 1 MiB stack (an open by path takes 1.3 MiB in a Debug build, a rename 512 KiB in ReleaseSafe). uplink's file server overflowed its handler's stack on Windows.
+
 ## [0.4.2] - 2026-10-14
 
 ### Changed
