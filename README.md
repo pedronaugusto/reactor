@@ -55,6 +55,13 @@ stacks and offload lanes. Extensions take a plain `std.Io`, leaving protocol
 and application policy with the caller. The checked production layers and
 state owners are documented in [the design](docs/design.md).
 
+A task may move to another thread at any `Io` call: with workers, the idle one
+takes what waits behind a busy one. A thread-local's address is the thread's,
+so a task does not keep one across such a call, and an optimizing compiler
+may keep one for it (on aarch64 the address is a register read, which LLVM
+merges across the call): read a thread-local through a call that is not
+inlined, as std's `Thread.getCurrentId` is read in reactor's own tests.
+
 ### Task and kernel options
 
 Reserve stack classes in `Runtime.Options.stack_classes`, whose counts come

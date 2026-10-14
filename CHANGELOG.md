@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A task that moved to another thread at a switch kept the seat of the thread it left in optimized builds on aarch64: LLVM put the thread-local's address, computed in the caller, where `seatNow`'s result was used and merged it across the switch, so lane calls crashed in the switch and a task queued behind the root was never offered to an idle processor. The address passes through an assembly statement the compiler cannot see through. x86_64 reads it through %fs, a load the switch's memory clobber orders, and was not affected.
+
+### Changed
+
+- A task's code must not keep a thread-local's address across an `Io` call, which may move it to another thread (README): std's `Thread.getCurrentId` read before and after such a call is one such address, and the offer test now reads it through a call of its own.
+
 ## [0.4.3] - 2026-10-14
 
 ### Fixed
