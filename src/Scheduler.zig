@@ -843,13 +843,26 @@ pub var lending: std.atomic.Value(u32) = .init(0);
 /// reuses it, so after a park inlined into the same function a task would
 /// read the thread it left. Never inlined, so each call computes the
 /// address on the thread that makes it.
+///
+/// Not inlining is not enough: LLVM sees the function always returns the
+/// thread-local's address and puts that address, computed in the caller,
+/// where the call's result was used, and then merges it with the caller's
+/// earlier one across a switch. On x86_64 the address is a load through
+/// %fs, which a switch's memory clobber orders; on aarch64 it is a register
+/// read, merged freely, so a task that moved kept the seat of the thread it
+/// left (optimized builds only: lane calls crashed in the switch, a queued
+/// task was never offered to an idle processor). The address passes through
+/// an assembly statement, which the compiler cannot see through.
 pub noinline fn seatNow() *Seat {
-    return &seat;
+    return asm volatile (""
+        : [address] "=r" (-> *Seat),
+        : [seat] "0" (&seat),
+    );
 }
 
 /// The processor the calling thread holds, read afresh at every call.
 noinline fn heldNow() ?*Processor {
-    return seat.held;
+    return seatNow().held;
 }
 
 /// The calling thread now holds `p`.
