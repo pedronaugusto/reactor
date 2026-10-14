@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-14
+
 ### Fixed
 
 - A task that moved to another thread at a switch kept the seat of the thread it left in optimized builds on aarch64: LLVM put the thread-local's address, computed in the caller, where `seatNow`'s result was used and merged it across the switch, so lane calls crashed in the switch and a task queued behind the root was never offered to an idle processor. The address passes through an assembly statement the compiler cannot see through. x86_64 reads it through %fs, a load the switch's memory clobber orders, and was not affected.
