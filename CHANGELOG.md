@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-14
+
+### Changed
+
+- Pins aegis 0.1.6, shuttle 0.2.1.
+
 ## [0.4.1] - 2026-10-14
 
 ### Changed

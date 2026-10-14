@@ -1,24 +1,24 @@
 .{
     .name = .reactor,
-    .version = "0.4.1",
+    .version = "0.4.2",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x3cf52171583e3432,
     .paths = .{ "build.zig", "build.zig.zon", "src", "docs", "README.md", "CHANGELOG.md", "LICENSE" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.5#ced62c02cfa3be28b834e14e34533aff84b489fd",
-            .hash = "aegis-0.1.5-rsxoujOxBwA9ptJaF5wEA2P5rIM0Xj1S1qps_rgA2txC",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.6#2b97b877a07690ea3ac447f82f9efe660743a84a",
+            .hash = "aegis-0.1.6-rsxouvHOBwC2_K3U8Vewo9LnTYL48c57ztMYdlW72Z3r",
         },
 
         .shuttle = .{
-            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.0#92e5fc8d2f481a1717f8a3566019e4874852e3f7",
-            .hash = "shuttle-0.2.0-0xOo5hj8AgD7ads9zradzPFjPzanebRrdxXDtDQJd5Pb",
+            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.1#7fef33e66fb02821fc01641521152d42da1f0945",
+            .hash = "shuttle-0.2.1-0xOo5lP8AgAh4iN_8hkfVro8zr7wPfXgw1GmvFrY07Da",
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.3#91c42412fed03aa24dfafb5061aee53875f47e02",
-            .hash = "preflight-0.4.3-LX1ZwtOTDgBp4LvGwzUJcRAhouDcVk6XkNMuN3cR4qxr",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.4.5#22e928fba1b897fd5888cc7ef92037b29e1d8e06",
+            .hash = "preflight-0.4.5-LX1ZwgeZDgD4Mmm3Cxjy04JQkPBUlcYKDQa9BPv4_GWW",
         },
 
         .shakedown = .{
@@ -26,8 +26,8 @@
             .hash = "shakedown-0.4.1-BR8U4z_qFQBovSS7wrfzvzZO0Vb8tTGeXEXcEUBXzxQE",
         },
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.1#071738b5f733cb0b9ef83532bba6bd831a5dd540",
-            .hash = "airlock-0.3.1-rfvu6Bz1BQA9KJ2iSefdcu14GkFIAdFUjR1_DKQWMpNE",
+            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.3.3#280cc4dcbec26c23693c654b57a7ea5ff5dec446",
+            .hash = "airlock-0.3.3-rfvu6CH2BQDWTME6f1H9XSu-WvQv1ny1678JE6v6EODU",
         },
     },
 }
