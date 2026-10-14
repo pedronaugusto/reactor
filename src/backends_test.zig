@@ -466,8 +466,10 @@ test "a task behind the root on the home processor is offered to an idle process
         // The root stays on the home processor; the task it starts queues
         // behind it there, and the idle worker takes it.
         var task = try io.concurrent(yieldAway, .{ io, write_end, std.Thread.getCurrentId(), &stop, &away });
-        var spins: u32 = 0;
-        while (away.load(.monotonic) == 0 and spins < 1_000_000) : (spins += 1) {
+        // Bounded by time, not by a count of writes: an optimized build makes a
+        // million of them in less than an idle worker takes to wake.
+        const until = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+        while (away.load(.monotonic) == 0 and std.Io.Clock.awake.now(io).nanoseconds < until.nanoseconds) {
             // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
             _ = (try io.operate(.{ .file_write_streaming = .{ .file = write_end, .data = &.{""} } })).file_write_streaming catch {};
         }
