@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A group counts its members with one atomic add each way instead of linking each into a list under the group's lock, so a spawning task and members finishing on other processors no longer contend: a 10,000-member group with workers costs 18% less per task on macOS (536 → 440 ns, interleaved medians on a loaded M3 Max; 0.2.3 451) and 14% less on Linux io_uring (620 → 534 ns; epoll 646 → 501), level with no workers. A member is listed for the group's cancel only once it enters a cancelable wait; one that has not takes the cancel at its next cancelation point.
+
 ## [0.4.0] - 2026-10-13
 
 ### Breaking

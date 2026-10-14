@@ -49,6 +49,9 @@ seat: ?*anyopaque = null,
 /// Held on `processor` for now: a timer of its own armed there, or a
 /// batch with operations in that processor's kernel queue.
 pins: u16 = 0,
+/// A group member in its group's list, from its first cancelable wait on.
+/// The task's own.
+listed: bool = false,
 /// Operations left before an exhausted budget turns a cancelation point
 /// into a yield.
 budget: u16 = 0,
@@ -61,7 +64,8 @@ wait: ?*Hook = null,
 /// Futures: 0 while running, `finished` once done, else the `*Awaiter`
 /// waiting for it.
 awaiter: std.atomic.Value(usize) = .init(0),
-/// Group members: the group and their links in it.
+/// Group members: the group, and their links among its listed members
+/// (`listGroupMember`), guarded by the group's lock.
 group: ?*Io.Group = null,
 group_prev: ?*Task = null,
 group_next: ?*Task = null,
@@ -114,11 +118,15 @@ pub const Hook = struct {
     cancel: *const fn (hook: *Hook, task: *Task) void,
 };
 
-/// Someone waiting for a future: a task, or a thread outside the runtime.
+/// Someone waiting for a future or a group: a task, or a thread outside the
+/// runtime.
 pub const Awaiter = struct {
     task: ?*Task,
     /// The future awaited, for registering after the switch.
     target: ?*Task = null,
+    /// While it waits for a group: the group's listed members, whose first
+    /// the group's `state` gives up to the awaiter.
+    members: ?*Task = null,
     /// Set to 1 when the future finishes, for a waiting thread.
     done: std.atomic.Value(u32) = .init(0),
 };
@@ -145,8 +153,15 @@ pub fn unlock(t: *Task) void {
     _ = t.cancel.fetchAnd(~locked_bit, .release);
 }
 
-pub fn cancelRequested(t: *const Task) bool {
-    return t.cancel.load(.acquire) & requested_bit != 0;
+/// Whether a cancel is due: requested of the task, or of its group. A
+/// group's cancel reaches only the members it lists, so one not listed yet
+/// takes it here, as its own.
+pub fn cancelRequested(t: *Task) bool {
+    if (t.cancel.load(.acquire) & requested_bit != 0) return true;
+    const g = t.group orelse return false;
+    if (@atomicLoad(usize, tokenOf(g), .monotonic) & group_canceled == 0) return false;
+    _ = t.cancel.fetchOr(requested_bit, .acq_rel);
+    return true;
 }
 
 /// Marks the cancel requested and runs the hook of the wait the task is
@@ -173,6 +188,9 @@ pub fn takeCancel(t: *Task) bool {
 /// `null` hook: the wait is not cancelable (protection blocks it).
 pub fn enterWait(t: *Task, hook: *Hook) error{Canceled}!void {
     if (!t.execution.protection.open()) return;
+    // A member is listed before its hook is published, so a cancel of its
+    // group from here on reaches the hook.
+    if (t.group) |g| if (!t.listed) t.listGroupMember(g);
     t.lock();
     defer t.unlock();
     if (t.cancelRequested()) {
@@ -206,4 +224,146 @@ pub fn acknowledged(t: *Task) void {
 pub fn recancel(t: *Task) void {
     assert(t.execution.protection.acknowledged);
     t.execution.protection.acknowledged = false;
+}
+
+// Groups.
+//
+// A group's `token` holds its member count, in the bits above three flags:
+// its lock, its cancel, and `held`. std reads the token without the
+// runtime: null means the group holds nothing, and `Group.await` and
+// `cancel` return at once, after which its owner may reuse or free it. So
+// `held` is set from the first member on, and only the runtime's own await
+// or cancel clears the token, once every member has left and given its
+// stack back. A member is counted in and out with one atomic add each,
+// without the lock and without touching another member: a group of short
+// tasks costs its spawner and its members no more. The lock guards `state`
+// alone: the list of members a cancel must reach, those that have entered a
+// cancelable wait (a member that has not takes the group's cancel at its
+// next cancelation point, `cancelRequested`), or, while the group is
+// awaited, the awaiter, which holds that list for it.
+
+const group_locked: usize = 0b001;
+const group_canceled: usize = 0b010;
+const group_held: usize = 0b100;
+const group_member: usize = 0b1000;
+/// `state` holds an awaiter, not the first listed member.
+const group_awaited: usize = 0b1;
+
+comptime {
+    assert(@alignOf(Awaiter) > group_awaited);
+    assert(@alignOf(Task) > group_awaited);
+}
+
+fn tokenOf(g: *Io.Group) *usize {
+    return @ptrCast(&g.token.raw); // safe: an optional pointer is one word, null as zero
+}
+
+/// How many members a group's token counts.
+pub fn groupMembers(token: usize) usize {
+    return token / group_member;
+}
+
+/// Locks `g`; returns its token as it was.
+pub fn lockGroup(g: *Io.Group) usize {
+    while (true) {
+        const old = @atomicRmw(usize, tokenOf(g), .Or, group_locked, .acquire);
+        if (old & group_locked == 0) return old;
+        while (@atomicLoad(usize, tokenOf(g), .monotonic) & group_locked != 0) std.atomic.spinLoopHint();
+    }
+}
+
+/// Members come and go while the group is locked: only the lock bit moves.
+pub fn unlockGroup(g: *Io.Group) void {
+    _ = @atomicRmw(usize, tokenOf(g), .And, ~group_locked, .release);
+}
+
+/// The listed members' first, in `state` or, while the group is awaited,
+/// in its awaiter. Under the lock.
+fn listedOf(g: *Io.Group) *?*Task {
+    if (awaiterOf(g)) |a| return &a.members;
+    return @ptrCast(&g.state); // safe: `state` is the runtime's, a `?*Task` while not awaited
+}
+
+/// The group's awaiter, if it is awaited. Under the lock.
+fn awaiterOf(g: *Io.Group) ?*Awaiter {
+    if (g.state & group_awaited == 0) return null;
+    return @ptrFromInt(g.state & ~group_awaited); // safe: only `awaitGroup` stores an awaiter there
+}
+
+/// `t` counted into `g`, before it is published: born canceled when the
+/// group's cancel came first.
+pub fn joinGroup(t: *Task, g: *Io.Group) void {
+    t.group = g;
+    const old = @atomicRmw(usize, tokenOf(g), .Add, group_member, .monotonic);
+    if (old & group_held == 0) _ = @atomicRmw(usize, tokenOf(g), .Or, group_held, .monotonic);
+    if (old & group_canceled != 0) t.cancel.raw |= requested_bit;
+}
+
+/// `t` lists itself in its group, at its first cancelable wait, so the
+/// group's cancel reaches the wait's hook.
+fn listGroupMember(t: *Task, g: *Io.Group) void {
+    const token = lockGroup(g);
+    const first = listedOf(g);
+    t.group_prev = null;
+    t.group_next = first.*;
+    if (first.*) |member| member.group_prev = t;
+    first.* = t;
+    t.listed = true;
+    if (token & group_canceled != 0) _ = t.cancel.fetchOr(requested_bit, .acq_rel);
+    unlockGroup(g);
+}
+
+/// Off `t`'s stack: `t` leaves its group. Its awaiter, to wake, when it was
+/// the last member.
+pub fn leaveGroup(t: *Task) ?*Awaiter {
+    const g = t.group.?;
+    if (t.listed) {
+        _ = lockGroup(g);
+        if (t.group_prev) |prev| prev.group_next = t.group_next else listedOf(g).* = t.group_next;
+        if (t.group_next) |next| next.group_prev = t.group_prev;
+    }
+    // Counted out after the unlink: an empty group lists no one.
+    const old = @atomicRmw(usize, tokenOf(g), .Sub, group_member, .acq_rel);
+    if (groupMembers(old) != 1) {
+        if (t.listed) unlockGroup(g);
+        return null;
+    }
+    // The last: an awaiter registers under the lock once it has seen a
+    // member counted, so it is there by now or will see none.
+    if (!t.listed) _ = lockGroup(g);
+    const awaiter = awaiterOf(g);
+    // No member is listed now: the group's list goes back to its `state`, empty.
+    if (awaiter) |a| {
+        assert(a.members == null);
+        g.state = 0;
+    }
+    unlockGroup(g);
+    return awaiter;
+}
+
+/// Under the lock, with members counted: `a` waits for them.
+pub fn awaitGroup(g: *Io.Group, a: *Awaiter) void {
+    assert(awaiterOf(g) == null);
+    a.members = listedOf(g).*;
+    g.state = @intFromPtr(a) | group_awaited; // safe: an address with a flag in its low bit, read back by `awaiterOf`
+}
+
+/// Requests the cancel of every listed member and marks the group, so the
+/// others and those started until it settles take it at their next
+/// cancelation point.
+pub fn cancelGroup(g: *Io.Group) void {
+    _ = lockGroup(g);
+    _ = @atomicRmw(usize, tokenOf(g), .Or, group_canceled, .monotonic);
+    var it = listedOf(g).*;
+    while (it) |member| : (it = member.group_next) member.requestCancel();
+    unlockGroup(g);
+}
+
+/// Every member has left `g` and given its stack back: the group is its
+/// owner's again.
+pub fn settleGroup(g: *Io.Group) void {
+    const token = lockGroup(g);
+    assert(groupMembers(token) == 0);
+    assert(g.state == 0);
+    @atomicStore(usize, tokenOf(g), 0, .release);
 }

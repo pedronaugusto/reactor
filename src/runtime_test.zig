@@ -84,6 +84,86 @@ fn sleepLong(io: Io) Io.Cancelable!void {
     try io.sleep(.fromSeconds(3600), .awake);
 }
 
+const Spinner = struct {
+    io: Io,
+    group: *Io.Group,
+    started: std.atomic.Value(u32) = .init(0),
+    ended: std.atomic.Value(u32) = .init(0),
+
+    /// Computes through cancelation points without waiting: a member its
+    /// group's cancel reaches only there. Once canceled it starts another
+    /// member, which is born canceled.
+    fn spin(sp: *Spinner) Io.Cancelable!void {
+        _ = sp.started.fetchAdd(1, .release);
+        defer _ = sp.ended.fetchAdd(1, .release);
+        while (true) sp.io.checkCancel() catch {
+            sp.group.async(sp.io, sleepLong, .{sp.io});
+            return error.Canceled;
+        };
+    }
+};
+
+/// `computing`: the cancel comes once every spinner is computing, in real
+/// time; on the driver, whose time stands still while tasks compute, it
+/// comes before they start.
+fn groupCancelReachesEveryMember(io: Io, computing: bool) !void {
+    var group: Io.Group = .init;
+    var sp: Spinner = .{ .io = io, .group = &group };
+    for (0..4) |_| group.async(io, sleepLong, .{io});
+    for (0..3) |_| try group.concurrent(io, Spinner.spin, .{&sp});
+    // Every spinner computing: none of them has waited.
+    if (computing) while (sp.started.load(.acquire) < 3) try io.sleep(.fromMilliseconds(1), .awake);
+    group.cancel(io);
+    try testing.expectEqual(@as(u32, 3), sp.ended.load(.acquire));
+    try testing.expect(group.token.load(.acquire) == null);
+    // The group is its owner's again, its cancel gone with its members.
+    var count: u32 = 0;
+    group.async(io, sleeper, .{ io, 1, &count });
+    try group.await(io);
+    try testing.expectEqual(@as(u32, 1), count);
+}
+
+test "a group's cancel reaches members that wait, that never waited, and that start after it" {
+    try skipWithoutFibers();
+    {
+        var d: Driver = undefined;
+        try d.init(testing.allocator, 5, small);
+        defer d.deinit();
+        try groupCancelReachesEveryMember(d.io(), false);
+        try testing.expect(d.elapsed() < std.time.ns_per_s);
+    }
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 256, .stack_size = .fromRaw(256 << 10) });
+    defer t.deinit();
+    for (0..20) |_| try groupCancelReachesEveryMember(t.io(), true);
+}
+
+fn awaitThenCancelled(io: Io, group: *Io.Group, out: *?Io.Cancelable!void) void {
+    out.* = group.await(io);
+}
+
+test "a group awaited by a task that is canceled cancels its members, waited or not" {
+    try skipWithoutFibers();
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 3, .max_tasks = 256, .stack_size = .fromRaw(256 << 10) });
+    defer t.deinit();
+    const io = t.io();
+    for (0..20) |_| {
+        var group: Io.Group = .init;
+        var sp: Spinner = .{ .io = io, .group = &group };
+        for (0..4) |_| group.async(io, sleepLong, .{io});
+        for (0..2) |_| try group.concurrent(io, Spinner.spin, .{&sp});
+        while (sp.started.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+        var result: ?Io.Cancelable!void = null;
+        var awaiting = try io.concurrent(awaitThenCancelled, .{ io, &group, &result });
+        try io.sleep(.fromMilliseconds(1), .awake);
+        awaiting.cancel(io);
+        try testing.expectError(error.Canceled, result.?);
+        try testing.expectEqual(@as(u32, 2), sp.ended.load(.acquire));
+        try testing.expect(group.token.load(.acquire) == null);
+    }
+}
+
 test "cancel ends a task's sleep at once" {
     try skipWithoutFibers();
     var d: Driver = undefined;

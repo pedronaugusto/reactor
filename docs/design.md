@@ -113,13 +113,21 @@ kind before a descriptor number is reused.
 
 A group's `await` returns only once every member has given its stack back.
 Members count themselves in before they leave the group and out after the
-release, so the group's lock is held for the unlink alone and the awaiter
-waits outside it. std reads the group's `token` without the runtime, and
-`Group.await` and `cancel` return at once when it is null, after which the
-owner may reuse or free the group. So only the runtime's own await or cancel
-leaves it null, after that wait: the last member to leave marks it ended, its
-last touch of the group. The token carries the group's lock too, in a low bit
-beside the first member.
+release, so the awaiter waits for the stacks outside the group's lock. std
+reads the group's `token` without the runtime, and `Group.await` and `cancel`
+return at once when it is null, after which the owner may reuse or free the
+group. So the token holds a `held` bit from the first member on, beside the
+member count, the lock bit and the cancel bit, and only the runtime's own
+await or cancel clears it, after that wait. A member is counted in and out
+with one atomic add each, without the lock and without touching another
+member's record: a spawner and the members finishing on other processors
+share no critical section (a 10k-member group with workers took 25% longer
+when every member linked itself into a list under the lock). The lock guards
+the group's `state` alone: the list of members a cancel must reach, those
+that have entered a cancelable wait, each listed at its first; a member not
+listed takes the group's cancel at its next cancelation point, and one
+started after it is born canceled. While the group is awaited, `state` holds
+the awaiter, which holds the list for it.
 
 Initialization unwinds each acquisition with `errdefer`. Tables, stacks and
 lane closure/scratch slots are reserved there. The caller must finish or
@@ -258,7 +266,7 @@ which beside the code (`glint-ignore: A004 -- <reason>: docs/design.md#safety-ty
 - **measured-boundary**: the wheel's placement, validated where a tick enters.
 - **safe-type-internals**: an atomic cell that holds an `Awake`'s integer.
 - **design**, no type fits:
-  - A bit lock inside a word: a task's `cancel` word and a group's `state`,
+  - A bit lock inside a word: a task's `cancel` word and a group's `token`,
     which std's `Io.Group` lays out.
   - Lock-free structures: the run queues, the inboxes, and the tagged free
     lists of lane closures and receive buffers (shuttle's pool keeps the
