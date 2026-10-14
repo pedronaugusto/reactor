@@ -1,6 +1,7 @@
 //! Slots that run std's own `Threaded` code: on a lane, per `files`, or
 //! borrowed on the worker. Each generator makes a function with the slot's
 //! exact signature from the slot's name.
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 
@@ -33,16 +34,24 @@ pub fn onLane(comptime lane: Lanes.Lane, comptime name: []const u8) *const SlotF
     return generate(Impl, name);
 }
 
+/// Whether std's file calls may run on the calling task's stack. Not on
+/// Windows: std makes each path an NT path in buffers of 32 Ki UTF-16 units,
+/// and the frames it takes outgrow a task's stack (an open by path 1.3 MiB
+/// in a Debug build, `wToPrefixedFileW` alone 1 MiB; a rename 512 KiB in
+/// ReleaseSafe), so there they run on a lane's thread.
+const files_on_task = builtin.os.tag != .windows;
+
 /// A file call per `Options.files`: std's code on the worker inside a
 /// blocking bracket, where the monitor can hand the worker's processor on
-/// should it block (epoll, kqueue, IOCP); on the `general` lane otherwise. For
-/// calls that never call back into their own `Io`.
+/// should it block (epoll, kqueue); on the `general` lane otherwise, and
+/// always on Windows, where std's file calls need more stack than a task
+/// has. For calls that never call back into their own `Io`.
 pub fn files(comptime name: []const u8) *const SlotFn(name) {
     const Impl = struct {
         fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
             const r = Core.running(userdata);
             if (native_files.call(name, r, rest)) |result| return result;
-            if (r.options.files == .auto) {
+            if (files_on_task and r.options.files == .auto) {
                 const b = r.lanes.borrowedIo();
                 if (lane_call.onWorker(@field(b.vtable, name), .{b.userdata} ++ rest)) |result| return result;
             }

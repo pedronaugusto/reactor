@@ -15,7 +15,9 @@ pub const Files = enum {
     /// io_uring: ring operations, calls with no ring operation on a lane.
     /// epoll, kqueue, IOCP: std's own calls on the worker, which the monitor
     /// rescues by handing its processor on should one block; on a lane
-    /// where there is no handoff (no monitor, or io_uring).
+    /// where there is no handoff (no monitor, or io_uring). On Windows all
+    /// but a read or write of an open file run on a lane: std's frames for a
+    /// path outgrow a task's stack.
     auto,
     /// Every file call on a lane: no worker ever waits on a disk.
     pool,

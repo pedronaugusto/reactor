@@ -584,3 +584,32 @@ test "r6: repeated native measured runtime lifetimes reclaim every task" {
         try testing.expect(r.stats().stack_high_water.? > 0);
     }
 }
+
+test "a task's file calls by path fit its stack: stat, open and rename" {
+    try skipWithoutFibers();
+    // The native backend with a worker, so the monitor is on and a file
+    // call may run on the worker; the stack the default one.
+    var r: Runtime = undefined;
+    r.init(testing.allocator, .{ .workers = 1, .max_tasks = 16 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer r.deinit();
+    try r.start();
+    const io = r.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a", .data = "abc" });
+    var task = try io.concurrent(struct {
+        fn run(task_io: Io, dir: Io.Dir) !u64 {
+            const before = try dir.statFile(task_io, "a", .{});
+            const file = try dir.openFile(task_io, "a", .{});
+            file.close(task_io);
+            try dir.rename("a", dir, "b", task_io);
+            const after = try dir.statFile(task_io, "b", .{});
+            try testing.expectEqual(before.size, after.size);
+            return after.size;
+        }
+    }.run, .{ io, tmp.dir });
+    try testing.expectEqual(@as(u64, 3), try task.await(io));
+}
