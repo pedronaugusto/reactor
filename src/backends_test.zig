@@ -439,6 +439,13 @@ test "a write larger than the socket's buffers waits for the reader instead of h
     }
 }
 
+/// The calling thread's id, read on the thread that calls: std keeps it in a
+/// thread-local, whose address an optimized caller on aarch64 would otherwise
+/// compute once and keep across the writes that move the task between threads.
+noinline fn threadNow() std.Thread.Id {
+    return std.Thread.getCurrentId();
+}
+
 /// Writes nothing to `file` over and over: each completes at once, so the
 /// task spends its budget and yields, without ever waiting. Records the
 /// threads it ran on other than `home`.
@@ -446,7 +453,7 @@ fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value
     while (!stop.load(.acquire)) {
         // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
         _ = (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming catch {};
-        if (std.Thread.getCurrentId() != home) _ = away.fetchAdd(1, .monotonic);
+        if (threadNow() != home) _ = away.fetchAdd(1, .monotonic);
     }
 }
 
