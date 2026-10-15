@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-15
+
 ### Changed
 
 - `kernel.overlapped` keeps no copy of `context`: the NT call's start reads the parameter itself, through its address, for as long as the call runs.
