@@ -759,7 +759,7 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
     switch (@as(Tag, @fromBackingInt(@as(u3, @truncate(e.context))))) {
         .op => {
             const o: *OpOf(@TypeOf(sink)) = @ptrFromInt(address);
-            const s = &o.state.storage.scratch.iocp;
+            const s: *Scratch = &o.state.storage.scratch.iocp;
             if (s.owner != b) return s.owner.forward(e);
             if (b.advance(o, e.iosb.u.Status, e.iosb.Information)) sink.complete(o);
         },

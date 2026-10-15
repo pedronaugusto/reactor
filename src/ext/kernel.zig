@@ -57,13 +57,13 @@ pub fn overlapped(io: Io, comptime start: anytype, handle: std.os.windows.HANDLE
     if (!native.taskRuntime(core) or core.backendKind() != .iocp) return error.Unsupported;
     const Thunk = struct {
         fn begin(raw: *anyopaque, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: *anyopaque) std.os.windows.NTSTATUS {
-            const c: *@TypeOf(context) = @ptrCast(@alignCast(raw)); // safe: overlapped passed the context's address
+            const c: *const @TypeOf(context) = @ptrCast(@alignCast(raw)); // safe: overlapped passed the context's address
             return start(c.*, iosb, completion);
         }
     };
-    // The context value (including a pointer value) stays pinned in this frame.
-    var c = context;
-    var op: Loop.Op = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(&c), .start = Thunk.begin } } } }; // safe: Thunk.begin reads this pinned context value back with its original type
+    // The context parameter (a pointer value included) stays in this frame until the call ends;
+    // the kernel's start reads it through its address, never writes it.
+    var op: Loop.Op = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
     try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
     return (try op.result.raw).windows;
 }
