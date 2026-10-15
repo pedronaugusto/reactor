@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `kernel.overlapped` keeps no copy of `context`: the NT call's start reads the parameter itself, through its address, for as long as the call runs.
+- The aegis rules A001 (access without a live capability) and A002 (a duplicated owner) gate in reactor's lint, on preflight 0.6.2's glint, which decides the receivers inside reactor's generics. A003 stays reported: the futex wait hands its bucket guard to the park, which releases it once the task is parked, a transfer through an erased context that glint does not follow.
+
 ## [0.4.4] - 2026-10-14
 
 ### Fixed
