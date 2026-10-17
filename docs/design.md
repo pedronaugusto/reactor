@@ -185,11 +185,14 @@ half a KiB a task.
 An owned lane grows before a call starts on it to two threads for each call
 it runs (the call's own, and one a cancel of it runs on) and three more (two
 for child termination, one for a thread still leaving), never past its cap's
-`2 × cap + 3`, and never shrinks: the threads stay idle in its executor for
-the next calls, so sequential calls reuse warm threads. A cancel and a control
-call therefore never wait on a thread being made, and submission waits only
-for a leaving thread's bookkeeping. Growth makes threads by starting jobs that
-hold the executor's threads until it has made enough, then letting them go.
+`2 × cap + 3`, and never shrinks. A cancel and a control call therefore never
+wait on a thread being made, and submission waits only for a leaving thread's
+bookkeeping. Growth starts reserve jobs on the lane's executor until it has
+made enough threads (std's makes one only when none is idle; a reserve job
+that finds its thread new counts it); they hold their threads apart from the
+executor's ready pool, and one is let go into it only when every thread there
+is busy, so sequential calls reuse one warm thread, as they did when every
+worker was started at `start`.
 When a lane cannot grow (the system refuses a thread), the call queues behind
 the calls the lane runs, which hold their threads; a lane running none refuses
 it: a raw call returns `ConcurrencyUnavailable`, and a fixed signature, which
