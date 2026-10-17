@@ -149,17 +149,29 @@ counted by `reactor.fallbacks()`.
 
 - **`wait`, `waitAny`**: readiness of descriptors (readable, writable, or a
   `priority` condition such as urgent data or a `cgroup.events` change), a
-  `Process` ending, a `Wake`, a Windows object. On a runtime each member is an
+  `Process` ending, a `Wake`, a Windows object, a held `kernel.Overlapped`
+  call ending. On a runtime each member is an
   operation of the task's own loop, so the wait is a cancelation point and
   holds no thread; elsewhere the calling thread waits through that `Io`'s
   concurrent batch (on `Io.Threaded`, one `poll` a cancel interrupts), or in
   5 ms slices between cancel checks for members that are not descriptors and
   an `Io` without concurrent batches. A descriptor that is not open is ready: the call that follows
-  reports it. `priority` is `Unsupported` on Darwin and Windows.
-- **`Wake`**: a wake-up any thread (or a signal handler) can send.
-- **`Process`**: a child that a wait reports once it has ended, without
-  reaping it; `ended` asks without waiting. On Linux a runtime's `childWait` waits on the pidfd the same way.
+  reports it. `priority` is `Unsupported` on Darwin and Windows; a process,
+  a `Wake` and a Windows object are waited on everywhere, and a loop with no
+  room waits on the `wait` lane instead.
+- **`Wake`**: a wake-up any thread (or a signal handler) can send;
+  `Wake.wait` waits for it alone, ending only at the signal, the timeout or a
+  cancel.
+- **`Process`**: a child that a wait reports once `waitpid` can reap it,
+  without reaping it; `ended` asks without waiting. With no descriptor to
+  spare it asks `waitid` between slices. On Linux a runtime's `childWait` waits on the pidfd the same way.
 - **`Job`** (Windows): a job object's messages.
+- **`kernel.overlapped`** (Windows): one NT overlapped call, waited for; on a
+  runtime its port hears of the end, elsewhere an event does. A call the
+  timeout or a cancel ends that completed first is handed back completed.
+  **`kernel.Overlapped`** holds one call across waits, as a `wait` member
+  beside others or signaling a `Wake` that many calls share, so nothing is
+  canceled at a timeout.
 - **`blocking(io, lane, f, args)`**: a raw call that can take milliseconds,
   run on one of the runtime's lanes (`sync`, `lookup`, `wait`, `general`).
   Use `try`: even a void function returns `Canceled` or

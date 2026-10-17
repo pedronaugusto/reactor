@@ -3,8 +3,11 @@
 //! collects the status. Open it while the child is unreaped, so its id
 //! cannot belong to another process yet. A pidfd on Linux, a kqueue with
 //! one `EVFILT_PROC` registration on Darwin and the BSDs, the process
-//! handle on Windows; where there is no such descriptor, a wait asks
-//! `waitid` with `WNOWAIT` between slices.
+//! handle on Windows. Where there is no such descriptor (none on this
+//! system, or none to spare), a wait on a child asks `waitid` with
+//! `WNOWAIT` between slices. A wait reports a child once `waitpid` will:
+//! a kqueue posts `NOTE_EXIT` a moment before that, and the wait then
+//! waits for the `SIGCHLD` that follows.
 const Process = @This();
 
 const builtin = @import("builtin");
@@ -24,8 +27,11 @@ id: std.process.Child.Id,
 
 pub const OpenError = error{ ProcessNotFound, SystemResources, Unexpected };
 
-/// POSIX: `id` is a child of this process, not yet reaped. Windows: a
-/// process handle, duplicated here with the right to wait on it.
+/// POSIX: `id` is a child of this process, not yet reaped; with no
+/// descriptor to spare the watch asks about it, so `SystemResources` is
+/// the answer only for a process that is not a child, which a descriptor
+/// alone can watch. Windows: a process handle, duplicated here with the
+/// right to wait on it.
 pub fn open(io: Io, id: std.process.Child.Id) OpenError!Process {
     _ = io;
     if (is_windows) {
@@ -48,7 +54,8 @@ pub fn ended(p: *const Process) bool {
     if (is_windows) return win32.WaitForSingleObject(p.watch, 0) != win32.wait_timeout;
     return switch (p.watch) {
         .ended => true,
-        .descriptor => |h| (poll.descriptors(&.{.{ .handle = h, .interest = .readable }}, poll.look) catch return true) != null,
+        .descriptor => |h| (poll.descriptors(&.{.{ .handle = h, .interest = .readable }}, poll.look) catch return true) != null and
+            (!process.is_bsd or process.endedUnreaped(p.id) != .running),
         .exiting, .asking => process.endedUnreaped(p.id) != .running,
     };
 }

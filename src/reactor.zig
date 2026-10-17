@@ -21,6 +21,8 @@ pub const Waitable = ext.wait.Waitable;
 pub const WaitError = ext.wait.WaitError;
 pub const wait = ext.wait.wait;
 pub const waitAny = ext.wait.waitAny;
+/// The most members one `waitAny` takes.
+pub const wait_max = ext.wait.max;
 /// A wake-up any thread can send to a task waiting on it.
 pub const Wake = ext.Wake;
 /// A process a wait reports once it has ended; it never reaps.

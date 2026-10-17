@@ -672,3 +672,61 @@ test "r6: canceling a queued void offload drains without invoking it" {
     try first.await(io);
     try testing.expectEqual(@as(u32, 0), t.runtime.stats().lanes[@backingInt(reactor.Runtime.Lane.general)].running);
 }
+
+/// Children that end at once, each waited on and then reaped without
+/// waiting: the wait reports a child only once `waitpid` can take it.
+fn reapableAfterWait(io: Io) !void {
+    for (0..40) |_| {
+        const child = try std.process.spawn(io, .{ .argv = &.{ "sh", "-c", "exit 3" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        var p = try reactor.Process.open(io, child.id.?);
+        defer p.close(io);
+        try reactor.wait(io, .{ .process = &p }, ms(10_000));
+        try testing.expect(p.ended());
+        try testing.expect(reapNow(child.id.?));
+    }
+}
+
+/// `waitpid` with `WNOHANG`: whether it took `pid`.
+fn reapNow(pid: posix.pid_t) bool {
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var status: i32 = 0;
+        const rc = linux.waitpid(pid, &status, linux.W.NOHANG);
+        return linux.errno(rc) == .SUCCESS and rc == pid;
+    }
+    var status: c_int = 0;
+    return std.c.waitpid(pid, &status, std.c.W.NOHANG) == pid;
+}
+
+test "a process wait reports a child once waitpid can reap it, on Threaded and on a runtime" {
+    if (is_windows) return error.SkipZigTest;
+    try reapableAfterWait(testing.io);
+    try skipWithoutFibers();
+    var r: reactor.Runtime = undefined;
+    try r.init(testing.allocator, small);
+    defer r.deinit();
+    try r.start();
+    var task = try r.io().concurrent(reapableAfterWait, .{r.io()});
+    try task.await(r.io());
+}
+
+fn wakeWaits(io: Io) !void {
+    var wake = try reactor.Wake.init(io);
+    defer wake.deinit(io);
+    try testing.expectError(error.Timeout, wake.wait(io, ms(5)));
+    wake.signal();
+    try wake.wait(io, ms(10_000));
+    // The wait cleared it.
+    try testing.expectError(error.Timeout, wake.wait(io, ms(0)));
+}
+
+test "Wake.wait ends at a signal, which it clears, or at its timeout, on Threaded and on a runtime" {
+    try wakeWaits(testing.io);
+    try skipWithoutFibers();
+    var r: reactor.Runtime = undefined;
+    try r.init(testing.allocator, small);
+    defer r.deinit();
+    try r.start();
+    var task = try r.io().concurrent(wakeWaits, .{r.io()});
+    try task.await(r.io());
+}

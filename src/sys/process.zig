@@ -31,7 +31,8 @@ pub const Watch = union(enum) {
 
 pub const OpenError = error{ ProcessNotFound, SystemResources, Unexpected };
 
-const is_bsd = switch (os) {
+/// The systems whose watch is a kqueue `EVFILT_PROC` registration.
+pub const is_bsd = switch (os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .dragonfly, .freebsd, .netbsd, .openbsd => true,
     else => false,
 };
@@ -50,7 +51,8 @@ pub fn open(pid: posix.pid_t) OpenError!Watch {
         return switch (linux.errno(rc)) {
             .SUCCESS => .{ .descriptor = @intCast(rc) },
             .SRCH => error.ProcessNotFound,
-            .MFILE, .NFILE, .NOMEM, .NODEV => error.SystemResources,
+            // No descriptor to spare.
+            .MFILE, .NFILE, .NOMEM, .NODEV => spare(pid),
             // Before 5.3.
             .NOSYS => asked(pid),
             else => |e| posix.unexpectedErrno(e),
@@ -58,7 +60,7 @@ pub fn open(pid: posix.pid_t) OpenError!Watch {
     }
     if (is_bsd) {
         const queue = c.kqueue();
-        if (queue < 0) return error.SystemResources;
+        if (queue < 0) return spare(pid);
         var change = [_]c.Kevent{.{
             .ident = @intCast(pid),
             .filter = c.EVFILT.PROC,
@@ -74,7 +76,11 @@ pub fn open(pid: posix.pid_t) OpenError!Watch {
             _ = c.close(queue);
             // A zombie, or a process on its way to being one, is refused
             // with ESRCH.
-            return if (refused == .SRCH) exiting(pid) else asked(pid);
+            return switch (refused) {
+                .SRCH => exiting(pid),
+                .NOMEM => spare(pid),
+                else => asked(pid),
+            };
         }
         return .{ .descriptor = queue };
     }
@@ -124,6 +130,16 @@ pub fn drain(queue: Io.File.Handle) void {
         const got = c.kevent(queue, &none, 0, &events, events.len, &zero);
         if (got < events.len) return;
     }
+}
+
+/// A watch on `pid` when no descriptor can be had: a child is asked about
+/// between slices; any other process has no watch.
+fn spare(pid: posix.pid_t) OpenError!Watch {
+    return switch (endedUnreaped(pid)) {
+        .ended => .ended,
+        .running => .asking,
+        .unknown => error.SystemResources,
+    };
 }
 
 fn asked(pid: posix.pid_t) OpenError!Watch {

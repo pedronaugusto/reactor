@@ -24,9 +24,69 @@ const process = @import("../sys/process.zig");
 const win32 = @import("../sys/win32.zig");
 const native = @import("native.zig");
 const Process = @import("Process.zig");
-const Wake = @import("Wake.zig");
+const Notify = @import("../sys/Notify.zig");
+const Overlapped = @import("Overlapped.zig");
 
 const is_windows = builtin.os.tag == .windows;
+
+/// A wake-up any thread can send to a task waiting on it: a member of a
+/// `waitAny` set beside descriptors, a process, a job. It stays set until
+/// the wait that reports it, which clears it; a signal while nobody waits
+/// is kept for the next wait. Any `Io`.
+pub const Wake = struct {
+    /// The kernel object waits include; not to be touched.
+    notify: Notify,
+
+    pub const InitError = Notify.OpenError;
+
+    pub fn init(io: Io) InitError!Wake {
+        _ = io;
+        return .{ .notify = try .open() };
+    }
+
+    /// Once nothing waits on it.
+    pub fn deinit(w: *Wake, io: Io) void {
+        w.notify.close(io);
+        w.* = undefined;
+    }
+
+    pub const WaitError = error{Timeout} || Io.Cancelable;
+
+    /// Waits until it is signaled, clearing the signal, or `timeout` passes.
+    /// Any `Io`: on a runtime's task an operation of its loop, elsewhere a
+    /// wait on the calling thread that a cancel ends. A wake is a member every
+    /// wait takes, so nothing about it is unsupported; a failure of the system
+    /// that no wait expects ends the wait as a signal would, which a caller
+    /// that waits in a loop takes as a spurious wake, as with a futex.
+    pub fn wait(w: *Wake, io: Io, timeout: Io.Timeout) Wake.WaitError!void {
+        waitOne(io, .{ .wake = w }, timeout) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.Canceled => return error.Canceled,
+            error.Unsupported => unreachable, // unreachable: a wake is a descriptor or an object, which every wait takes
+            error.Unexpected => {},
+        };
+    }
+
+    /// From any thread: the next wait that includes it returns it.
+    pub fn signal(w: *Wake) void {
+        w.notify.set();
+    }
+
+    /// The kernel object a signal sets, for a program with a wait loop of its own
+    /// (`poll` for readability on POSIX, a wait on the handle on Windows). A wait
+    /// of reactor's clears the signal it reports; a program that waits on this
+    /// itself calls `clear`.
+    pub fn handle(w: *const Wake) Io.File.Handle {
+        return w.notify.handle;
+    }
+
+    /// Clears a signal that a wait outside reactor saw.
+    pub fn clear(w: *Wake) void {
+        w.notify.clear();
+    }
+};
+
+const waitOne = wait;
 
 /// The most members one wait takes.
 pub const max = 64;
@@ -58,10 +118,18 @@ pub const Waitable = union(enum) {
     process: *const Process,
     /// Windows: any waitable object (event, process, thread, timer).
     object: if (is_windows) windows.HANDLE else noreturn,
+    /// Windows: an `Overlapped` call has ended; `take` what it
+    /// ended with.
+    overlapped: if (is_windows) *const Overlapped else noreturn,
     /// Set by `Wake.signal`; the wait that reports it clears it.
     wake: *Wake,
 
-    /// Readiness asked of a Windows handle that is not a socket.
+    /// `Unsupported`: readiness asked of a Windows handle that is not a
+    /// socket, a priority event where `has_priority` is false, or a
+    /// descriptor the loop cannot watch and `poll` does not report ready.
+    /// A process, a Windows object and a `Wake` are waited on everywhere,
+    /// and a wait with no room in its loop waits on the `wait` lane, so
+    /// `Unexpected` is a failure no wait expects.
     pub const Error = error{ Unsupported, Unexpected };
 };
 
@@ -86,6 +154,26 @@ pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usi
 }
 
 fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
+    const deadline = timeout.toDeadline(io);
+    const index = try readyFirst(io, set, deadline);
+    if (!process.is_bsd) return index;
+    const p = switch (set[index]) {
+        .process => |p| p,
+        else => return index,
+    };
+    if (p.watch != .descriptor or process.endedUnreaped(p.id) != .running) return index;
+    // A kqueue posts `NOTE_EXIT` as the process leaves, a moment before
+    // `waitid` reports it: the wait goes on, for the `SIGCHLD` that follows.
+    var going: Process = .{ .watch = process.exiting(p.id) catch return index, .id = p.id };
+    defer going.close(io);
+    var members: [max]Waitable = undefined;
+    @memcpy(members[0..set.len], set);
+    members[index] = .{ .process = &going };
+    return readyFirst(io, members[0..set.len], deadline);
+}
+
+/// The lowest index of a member that is ready, as its watch says.
+fn readyFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
     if (!has_priority) for (set) |m| if (m == .priority) return error.Unsupported;
     if (timeout.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) {
         return try once(io, set, poll.look) orelse error.Timeout;
@@ -109,7 +197,9 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
             error.Canceled => error.Canceled,
             error.Timeout => error.Timeout,
             error.Unsupported => error.Unsupported,
-            error.Unexpected, error.SystemResources => error.Unexpected,
+            error.Unexpected => error.Unexpected,
+            // No room in the loop: the `wait` lane waits instead.
+            error.SystemResources => return lane_call.call(&core.lanes, .wait, &sliced, .{ core.lanes.executor(.wait), set, timeout.toDeadline(io) }),
         };
         if (index > 0) if (try once(io, set[0..index], poll.look)) |earlier| return earlier;
         return index;
@@ -132,6 +222,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable, kind: ?backend.K
             .process => |p| .{ .object = p.watch },
             .wake => |w| .{ .object = w.notify.handle },
             .object => |h| .{ .object = h },
+            .overlapped => |o| .{ .object = o.event },
         };
         return true;
     }
@@ -144,7 +235,7 @@ fn descriptors(set: []const Waitable, out: *[max]Loop.Waitable, kind: ?backend.K
             .ended, .asking, .exiting => return false,
         },
         .wake => |w| .{ .readable = w.notify.handle },
-        .object => return false,
+        .object, .overlapped => return false,
     };
     return true;
 }
@@ -190,7 +281,7 @@ fn batched(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!?usize
                 .descriptor => |h| .{ h, false },
                 else => return null,
             },
-            .priority, .object => return null,
+            .priority, .object, .overlapped => return null,
         };
         const file: Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
         batch.addAt(@intCast(i), if (write)
@@ -272,7 +363,7 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
                 } else .{ .handle = h, .interest = .readable },
             },
             .wake => |w| .{ .handle = w.notify.handle, .interest = .readable },
-            .object => unreachable, // unreachable: Windows' alone, which waits in `onceWindows`
+            .object, .overlapped => unreachable, // unreachable: Windows' alone, which waits in `onceWindows`
         };
         entries[n] = entry;
         map[n] = i;
@@ -284,7 +375,7 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
         try io.sleep(limit.toIoDuration(), .awake);
         return null;
     }
-    var ready = poll.descriptors(entries[0..n], if (ended != null) poll.look else limit) catch return error.Unexpected;
+    var ready = poll.descriptors(entries[0..n], if (ended != null) poll.look else limit) catch |err| return if (ended) |i| i else short(io, err, limit);
     // A `SIGCHLD` is some child's: when it is not this one's, take it and
     // look again for the others.
     while (ready) |r| {
@@ -296,7 +387,7 @@ fn once(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usize {
             else => break,
         };
         process.drain(queue);
-        ready = poll.descriptors(entries[0..n], poll.look) catch return error.Unexpected;
+        ready = poll.descriptors(entries[0..n], poll.look) catch |err| return if (ended) |i| i else short(io, err, poll.look);
     }
     return if (ready) |r| map[r] else ended;
 }
@@ -311,6 +402,11 @@ fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usi
         .priority => unreachable, // unreachable: `waitFirst` refused it, as Windows has no priority events
         .process => |p| {
             handles[n] = p.watch;
+            map[n] = i;
+            n += 1;
+        },
+        .overlapped => |o| {
+            handles[n] = o.event;
             map[n] = i;
             n += 1;
         },
@@ -331,6 +427,7 @@ fn onceWindows(io: Io, set: []const Waitable, limit: poll.Millis) WaitError!?usi
         .priority => unreachable, // unreachable: `waitFirst` refused it, as Windows has no priority events
         .process => |p| if (win32.WaitForSingleObject(p.watch, 0) == win32.wait_object_0) return i,
         .object => |h| if (win32.WaitForSingleObject(h, 0) == win32.wait_object_0) return i,
+        .overlapped => |o| if (win32.WaitForSingleObject(o.event, 0) == win32.wait_object_0) return i,
         .wake => |w| if (win32.WaitForSingleObject(w.notify.handle, 0) == win32.wait_object_0) return i,
     };
     if (n == 0) {
@@ -362,4 +459,16 @@ fn socketReady(io: Io, socket: windows.HANDLE, interest: enum { readable, writab
     if (status == .INVALID_HANDLE) return error.Unsupported;
     if (status != .SUCCESS) return error.Unexpected;
     return info.NumberOfHandles > 0 and info.Handles[0].Events != 0;
+}
+
+/// A look the system had no memory for this time: nothing is ready yet,
+/// and the slice passes as a wait would have, so the wait goes on.
+fn short(io: Io, err: poll.Error, limit: poll.Millis) WaitError!?usize {
+    switch (err) {
+        error.SystemResources => {
+            try io.sleep(limit.toIoDuration(), .awake);
+            return null;
+        },
+        error.Unexpected => return error.Unexpected,
+    }
 }

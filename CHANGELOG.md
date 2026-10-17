@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `kernel.overlapped`'s `start` takes a `kernel.Completion` (the `Event` and the APC context to pass the NT call) where it took the APC context alone, so the call can signal an event off a runtime.
+
+### Added
+
+- `kernel.overlapped` works on any `Io`: off a runtime the call signals an event of its own, waited on the calling thread, and a call that the timeout or a cancel ends but that completed first is handed back completed, with what it read.
+- `kernel.Overlapped`: one NT overlapped call held across waits, on any `Io`: with an event of its own, a `wait` member (`.overlapped`) beside descriptors, objects and a `Wake`; or `signaling` a `Wake`'s event, so that any number of calls are one member, the `Wake`, and `ended` says which ended. Nothing is canceled at a wait's timeout; `cancel` asks the call to end, and `take` hands back what it ended with, the bytes of one that completed first included.
+- `wait_max`, the most members one `waitAny` takes.
+- `Wake.wait`: a wait on one `Wake`, which ends at its signal, the timeout or a cancel and has nothing to be unsupported.
+
+### Changed
+
+- A wait reports a `Process` once `waitpid` can reap it: on Darwin and the BSDs a kqueue posts `NOTE_EXIT` a moment before that, and the wait goes on for the `SIGCHLD` that follows (`ended` says the same).
+- `Process.open` on a child with no descriptor to spare (`EMFILE`, `ENFILE`, `ENOMEM`) makes a watch that asks `waitid` between slices, as on a system with no descriptor for it; `SystemResources` is now only for a process that is not a child.
+- A wait whose loop has no room for it waits on the `wait` lane, and a `poll` with no memory for one slice counts as a slice with nothing ready, where both answered `Unexpected`.
+
 ## [0.5.0] - 2026-10-17
 
 ### Breaking

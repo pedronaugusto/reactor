@@ -4,7 +4,7 @@
 //! the best path its slots allow, counted by `native.fallbacks`.
 pub const native = @import("ext/native.zig");
 pub const wait = @import("ext/wait.zig");
-pub const Wake = @import("ext/Wake.zig");
+pub const Wake = wait.Wake;
 pub const Process = @import("ext/Process.zig");
 pub const Job = @import("ext/Job.zig");
 pub const blocking = @import("ext/blocking.zig");

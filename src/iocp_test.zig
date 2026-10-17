@@ -732,20 +732,8 @@ test "native Job messages arrive through IOCP and a detached record can be reuse
 }
 
 fn rawRead(io: Io, socket: net.Socket.Handle, buffer: []u8) reactor.kernel.Error!std.os.windows.IO_STATUS_BLOCK {
-    const Request = struct {
-        handle: net.Socket.Handle,
-        buffer: []u8,
-        buffers: [1]std.os.windows.AFD.WSABUF(.@"var") = undefined,
-        info: std.os.windows.AFD.RECV_INFO = undefined,
-        const Self = @This();
-        fn start(q: *Self, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: *anyopaque) std.os.windows.NTSTATUS {
-            q.buffers[0] = .{ .len = @intCast(q.buffer.len), .buf = q.buffer.ptr };
-            q.info = .{ .BufferArray = &q.buffers, .BufferCount = 1, .AfdFlags = .{ .OVERLAPPED = true }, .TdiFlags = .{ .NORMAL = true } };
-            return std.os.windows.ntdll.NtDeviceIoControlFile(q.handle, null, null, completion, iosb, std.os.windows.IOCTL.AFD.RECEIVE, &q.info, @sizeOf(std.os.windows.AFD.RECV_INFO), null, 0);
-        }
-    };
-    var request: Request = .{ .handle = socket, .buffer = buffer };
-    return reactor.kernel.overlapped(io, Request.start, socket, &request, timeoutMs(10));
+    var request: Receive = .{ .handle = socket, .buffer = buffer };
+    return reactor.kernel.overlapped(io, Receive.start, socket, &request, timeoutMs(10));
 }
 
 test "a timed out native overlapped request drains before its frame is overwritten" {
@@ -782,4 +770,114 @@ test "waitAny consumes one auto-reset object on a native runtime" {
     try testing.expectEqual(@as(usize, 0), try reactor.waitAny(io, &.{ .{ .object = first }, .{ .object = second } }, timeoutMs(100)));
     try testing.expectEqual(win32.wait_object_0, win32.WaitForSingleObject(second, 0));
     try testing.expect(win32.WaitForSingleObject(first, 0) != win32.wait_object_0);
+}
+
+/// An AFD receive into `buffer`, as a `kernel` call starts it.
+const Receive = struct {
+    handle: net.Socket.Handle,
+    buffer: []u8,
+    buffers: [1]std.os.windows.AFD.WSABUF(.@"var") = undefined,
+    info: std.os.windows.AFD.RECV_INFO = undefined,
+
+    fn start(q: *Receive, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: reactor.kernel.Completion) std.os.windows.NTSTATUS {
+        q.buffers[0] = .{ .len = @intCast(q.buffer.len), .buf = q.buffer.ptr };
+        q.info = .{ .BufferArray = &q.buffers, .BufferCount = 1, .AfdFlags = .{ .OVERLAPPED = true }, .TdiFlags = .{ .NORMAL = true } };
+        return std.os.windows.ntdll.NtDeviceIoControlFile(q.handle, completion.event, null, completion.context, iosb, std.os.windows.IOCTL.AFD.RECEIVE, &q.info, @sizeOf(std.os.windows.AFD.RECV_INFO), null, 0);
+    }
+};
+
+test "off a runtime an overlapped call completes, times out, and hands back what came as it was canceled" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = testing.io;
+    const pair = try tcpPair(io);
+    defer pair[0].close(io);
+    defer pair[1].close(io);
+    var buffer: [16]u8 = undefined;
+    var receive: Receive = .{ .handle = pair[0].socket.handle, .buffer = &buffer };
+    try testing.expectError(error.Timeout, reactor.kernel.overlapped(io, Receive.start, receive.handle, &receive, timeoutMs(10)));
+    try writeAll(io, pair[1].socket.handle, "sent");
+    const got = try reactor.kernel.overlapped(io, Receive.start, receive.handle, &receive, timeoutMs(5000));
+    try testing.expectEqual(std.os.windows.NTSTATUS.SUCCESS, got.u.Status);
+    try testing.expectEqualStrings("sent", buffer[0..got.Information]);
+
+    // A call that completed before its cancel keeps what it read.
+    var held = try reactor.kernel.Overlapped.init();
+    defer held.deinit();
+    try testing.expect(held.start(Receive.start, receive.handle, &receive) == null);
+    try writeAll(io, pair[1].socket.handle, "late");
+    try reactor.wait(io, .{ .overlapped = &held }, timeoutMs(5000));
+    held.cancel();
+    const ended = held.take();
+    try testing.expectEqual(std.os.windows.NTSTATUS.SUCCESS, ended.u.Status);
+    try testing.expectEqualStrings("late", buffer[0..ended.Information]);
+}
+
+test "held overlapped calls and a Wake wait together, on a runtime and off one" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 0);
+    defer r.deinit();
+    for ([_]Io{ testing.io, r.io() }) |io| {
+        const first = try tcpPair(io);
+        defer first[0].close(io);
+        defer first[1].close(io);
+        const second = try tcpPair(io);
+        defer second[0].close(io);
+        defer second[1].close(io);
+        var wake = try reactor.Wake.init(io);
+        defer wake.deinit(io);
+        var buffers: [2][8]u8 = undefined;
+        var receives: [2]Receive = .{
+            .{ .handle = first[0].socket.handle, .buffer = &buffers[0] },
+            .{ .handle = second[0].socket.handle, .buffer = &buffers[1] },
+        };
+        var held: [2]reactor.kernel.Overlapped = .{ try .init(), try .init() };
+        defer for (&held) |*h| h.deinit();
+        for (&held, &receives) |*h, *q| try testing.expect(h.start(Receive.start, q.handle, q) == null);
+        const set: [3]reactor.Waitable = .{ .{ .overlapped = &held[0] }, .{ .overlapped = &held[1] }, .{ .wake = &wake } };
+        // Nothing yet: the wait times out, and both calls stay outstanding.
+        try testing.expectError(error.Timeout, reactor.waitAny(io, &set, timeoutMs(20)));
+        try testing.expect(!held[0].ended() and !held[1].ended());
+        wake.signal();
+        try testing.expectEqual(@as(usize, 2), try reactor.waitAny(io, &set, timeoutMs(5000)));
+        try writeAll(io, second[1].socket.handle, "two");
+        try testing.expectEqual(@as(usize, 1), try reactor.waitAny(io, &set, timeoutMs(5000)));
+        const ended = held[1].take();
+        try testing.expectEqualStrings("two", buffers[1][0..ended.Information]);
+        held[0].cancel();
+        try reactor.wait(io, .{ .overlapped = &held[0] }, timeoutMs(5000));
+        try testing.expectEqual(std.os.windows.NTSTATUS.CANCELLED, held[0].take().u.Status);
+    }
+}
+
+test "calls that signal one Wake are waited on as that Wake, and ended says which" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const io = testing.io;
+    var changes = try reactor.Wake.init(io);
+    defer changes.deinit(io);
+    var pairs: [3][2]net.Stream = undefined;
+    for (&pairs) |*p| p.* = try tcpPair(io);
+    defer for (&pairs) |p| {
+        p[0].close(io);
+        p[1].close(io);
+    };
+    var buffers: [3][8]u8 = undefined;
+    var receives: [3]Receive = undefined;
+    var held: [3]reactor.kernel.Overlapped = undefined;
+    for (&held, &receives, &pairs, &buffers) |*h, *q, p, *b| {
+        q.* = .{ .handle = p[0].socket.handle, .buffer = b };
+        h.* = .signaling(changes.handle());
+        try testing.expect(h.start(Receive.start, q.handle, q) == null);
+    }
+    try testing.expectError(error.Timeout, changes.wait(io, timeoutMs(20)));
+    try writeAll(io, pairs[2][1].socket.handle, "three");
+    try changes.wait(io, timeoutMs(5000));
+    try testing.expect(!held[0].ended() and !held[1].ended() and held[2].ended());
+    try testing.expectEqualStrings("three", buffers[2][0..held[2].take().Information]);
+    for (held[0..2]) |*h| {
+        h.cancel();
+        while (!h.ended()) try changes.wait(io, timeoutMs(5000));
+        try testing.expectEqual(std.os.windows.NTSTATUS.CANCELLED, h.take().u.Status);
+    }
+    for (&held) |*h| h.deinit();
 }

@@ -21,7 +21,7 @@ const windows = std.os.windows;
 const Notify = @import("../sys/Notify.zig");
 const win32 = @import("../sys/win32.zig");
 const wait = @import("wait.zig");
-const Wake = @import("Wake.zig");
+const Wake = wait.Wake;
 
 const is_windows = builtin.os.tag == .windows;
 

@@ -7,6 +7,12 @@ const Loop = @import("../Loop.zig");
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("../ops/perform.zig");
 const native = @import("native.zig");
+const wait = @import("wait.zig");
+const win32 = @import("../sys/win32.zig");
+const assert = std.debug.assert;
+const windows = std.os.windows;
+
+const is_windows = builtin.os.tag == .windows;
 
 pub const Error = error{ Unsupported, Timeout, SystemResources } || Io.Cancelable;
 
@@ -46,24 +52,54 @@ fn singleCompletion(sqe: std.os.linux.io_uring_sqe) bool {
     };
 }
 
-/// Issue an NT overlapped call on handle. Pass completion_context as the
-/// NT call's APC context and iosb as its status block. Reactor binds the
-/// handle to its port and retains both through cancellation and completion.
-pub fn overlapped(io: Io, comptime start: anytype, handle: std.os.windows.HANDLE, context: anytype, timeout: Io.Timeout) Error!std.os.windows.IO_STATUS_BLOCK {
-    if (builtin.os.tag != .windows) return error.Unsupported;
-    const core = native.runtimeOf(io) orelse return error.Unsupported;
-    const entered = native.enter();
-    defer native.leave(entered);
-    if (!native.taskRuntime(core) or core.backendKind() != .iocp) return error.Unsupported;
-    const Thunk = struct {
-        fn begin(raw: *anyopaque, iosb: *std.os.windows.IO_STATUS_BLOCK, completion: *anyopaque) std.os.windows.NTSTATUS {
-            const c: *const @TypeOf(context) = @ptrCast(@alignCast(raw)); // safe: overlapped passed the context's address
-            return start(c.*, iosb, completion);
+pub const Completion = Overlapped.Completion;
+pub const Overlapped = @import("Overlapped.zig");
+
+/// Issue an NT overlapped call on `handle`, `start(context, iosb,
+/// completion)`, and wait for it to end or `timeout` to pass. Any `Io`:
+/// on a runtime's task reactor binds the handle to its port and retains
+/// the status block through cancelation and completion; elsewhere the call
+/// is an `Overlapped`'s, waited on the calling thread. A call that the
+/// timeout or a cancel ends but that completed first is handed back as
+/// completed, so a read's bytes are never lost to its cancel.
+pub fn overlapped(io: Io, comptime start: anytype, handle: windows.HANDLE, context: anytype, timeout: Io.Timeout) Error!windows.IO_STATUS_BLOCK {
+    if (!is_windows) return error.Unsupported;
+    if (native.runtimeOf(io)) |core| {
+        const entered = native.enter();
+        defer native.leave(entered);
+        if (native.taskRuntime(core) and core.backendKind() == .iocp) {
+            const Thunk = struct {
+                fn begin(raw: *anyopaque, iosb: *windows.IO_STATUS_BLOCK, completion: *anyopaque) windows.NTSTATUS {
+                    const c: *const @TypeOf(context) = @ptrCast(@alignCast(raw)); // safe: overlapped passed the context's address
+                    return start(c.*, iosb, Completion{ .event = null, .context = completion });
+                }
+            };
+            // The context parameter (a pointer value included) stays in this frame until the call ends;
+            // the kernel's start reads it through its address, never writes it.
+            var op: Loop.Op = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
+            try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
+            return (try op.result.raw).windows;
         }
+    }
+    var request = try Overlapped.init();
+    defer request.deinit();
+    if (request.start(start, handle, context)) |ended| return ended;
+    wait.wait(io, .{ .overlapped = &request }, timeout) catch |err| {
+        request.cancel();
+        // Its end is at once; the frame holds what the kernel writes until it.
+        assert(win32.WaitForSingleObject(request.event, win32.infinite) == win32.wait_object_0);
+        const ended = request.take();
+        if (ended.u.Status != .CANCELLED) {
+            // It completed as it was canceled: the cancel is still asked.
+            if (err == error.Canceled) io.recancel();
+            return ended;
+        }
+        return switch (err) {
+            error.Timeout => error.Timeout,
+            error.Canceled => error.Canceled,
+            error.Unsupported => unreachable, // unreachable: an `Overlapped` is an event, which every wait takes
+            error.Unexpected => error.SystemResources,
+        };
     };
-    // The context parameter (a pointer value included) stays in this frame until the call ends;
-    // the kernel's start reads it through its address, never writes it.
-    var op: Loop.Op = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
-    try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
-    return (try op.result.raw).windows;
+    return request.take();
 }
