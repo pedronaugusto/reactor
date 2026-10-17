@@ -176,11 +176,26 @@ fn serveTcp(io: Io, server: *Io.net.Server) !void {
     try writer.interface.flush();
 }
 
+/// A TCP listener and a UDP socket on one loopback port, as a name server
+/// answers on. The system picks the TCP port; the same UDP port may be
+/// someone else's, and then another is tried.
+fn bothOnOnePort(io: Io) !struct { Io.net.Server, Io.net.Socket } {
+    var tries: u32 = 0;
+    while (true) : (tries += 1) {
+        var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+        const udp = server.socket.address.bind(io, .{ .mode = .dgram }) catch |err| {
+            server.deinit(io);
+            if (err == error.AddressInUse and tries < 64) continue;
+            return err;
+        };
+        return .{ server, udp };
+    }
+}
+
 test "DNS retries a truncated UDP answer over TCP" {
     const io = testing.io;
-    var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    var server, const udp = try bothOnOnePort(io);
     defer server.deinit(io);
-    const udp = try server.socket.address.bind(io, .{ .mode = .dgram });
     defer udp.close(io);
     var config: stub.Config = .{};
     config.servers[0] = udp.address;
