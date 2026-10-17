@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-10-17
+
 ### Fixed
 
 - A batch await that ends in an error (`Canceled`, `ConcurrencyUnavailable`) takes every operation the kernel still holds back to `submitted` before it returns, as a timeout already did. std's `operateTimeout` drops its batch with its frame on any error, so a canceled timed read stayed in the kernel and its completion later wrote into storage that was gone (`access of union field 'pending' while field 'unused' is active` in `ops/batch.zig`, on every canceled HTTP/2 request of uplink's client on macOS).
