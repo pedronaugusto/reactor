@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-17
+
 ### Changed
 
 - On Darwin a pipe or a socket in blocking mode is written up to the room kqueue counts for it (`EVFILT_WRITE`'s `data`), in one call, where each readiness moved at most 512 bytes (`PIPE_BUF`); a write that knows no room yet asks kqueue at once, and one that finds the room taken waits for the reader. parley's stdio `tools/list` of 100 tools went from 1.96 to 0.61 ms (M3). A terminal is still written 512 bytes at a time: its count is no room a write keeps within.
