@@ -62,6 +62,33 @@ test "concurrent runs a task whose result await returns" {
     try testing.expectEqual(@as(u32, 42), f.await(io));
 }
 
+test "a stack the system refuses to make usable refuses the spawn, and a later spawn takes it" {
+    try skipWithoutFibers();
+    // The refusal is made real by taking the stack's address space away
+    // from the pool's reservation, which its first commit then fails on.
+    // Windows releases a reservation only whole.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var d: Driver = undefined;
+    try d.init(testing.allocator, 3, .{ .max_tasks = 2, .stack_size = .fromRaw(256 << 10), .offload = .none });
+    defer d.deinit();
+    const io = d.io();
+    const stacks = &d.runtime.core.scheduler.stacks;
+    try testing.expectEqual(@as(u32, 0), stacks.reached());
+    // The first stack a task takes is the pool's first.
+    const first = stacks.stackOf(0);
+    const range: []align(std.heap.page_size_min) u8 = @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(first.base))[0 .. first.end - first.base]; // safe: the pool's first stack, never handed out
+    std.posix.munmap(range);
+    try testing.expectError(error.ConcurrencyUnavailable, io.concurrent(addOne, .{41}));
+    // `async` runs the function where it is, as std's does.
+    var inline_future = io.async(addOne, .{1});
+    try testing.expectEqual(@as(u32, 2), inline_future.await(io));
+    try testing.expectEqual(@as(u32, 0), stacks.inUse());
+    // The address space back, as the reservation had it: the stack is made.
+    _ = try std.posix.mmap(range.ptr, range.len, .{}, .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true }, -1, 0);
+    var f = try io.concurrent(addOne, .{41});
+    try testing.expectEqual(@as(u32, 42), f.await(io));
+}
+
 fn sleeper(io: Io, ms: i64, out: *u32) Io.Cancelable!void {
     try io.sleep(.fromMilliseconds(ms), .awake);
     out.* += 1;

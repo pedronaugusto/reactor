@@ -1402,7 +1402,8 @@ pub fn wakeAll(s: *Scheduler) void {
 
 /// A new task on a free stack, not yet runnable, with `extra` bytes
 /// (aligned to `extra_align`) below its record for the caller's context
-/// and result; null when every stack is in use. `entry` runs first.
+/// and result; null when no stack can be had (`stacks.take`). `entry` runs
+/// first.
 pub inline fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
     const taken = stacks_.take(&s.stacks, s.stack_size, null) orelse return null;
     return s.createAt(taken, kind, extra, extra_align, entry, .normal);

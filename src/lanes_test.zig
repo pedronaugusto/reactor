@@ -150,7 +150,7 @@ test "admission: retiring groups hold capacity and full admission never runs inl
     try testing.expect(first.ran and first.finished and first.job.held());
     var refused: Observed = .{};
     lanes.submit(&refused.job);
-    try testing.expect(refused.finished and refused.job.rejected and !refused.ran);
+    try testing.expect(refused.finished and refused.job.rejected and !refused.job.short and !refused.ran);
     lanes.retire(&refused.job);
     var termination: Observed = .{};
     termination.job.control = true;
@@ -197,13 +197,12 @@ const Prepared = struct {
         call.finished.set(testing.io);
     }
 };
-test "admission: startup prepares all owned workers and sequential calls reuse them" {
+test "admission: owned lanes start no thread until a call needs one, then keep what they made" {
     var lanes: Lanes = undefined;
     try lanes.init(testing.allocator, .{ .owned = .{ .sync = 1, .lookup = 1, .wait = 1, .general = 1 } }, .{});
     defer lanes.deinit(testing.allocator);
-    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 0), workerCount(threaded));
     try lanes.prepare();
-    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 5), workerCount(threaded));
+    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 0), workerCount(threaded));
     for (0..32) |_| {
         var call: Prepared = .{};
         lanes.submit(&call.job);
@@ -211,6 +210,88 @@ test "admission: startup prepares all owned workers and sequential calls reuse t
         while (call.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
         lanes.retire(&call.job);
     }
-    for (&lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 5), workerCount(threaded));
+    // One call at a time: its thread, one for a cancel of it, three more;
+    // made once and reused.
+    try testing.expectEqual(@as(u32, 5), lanes.stats(.general).threads);
+    try testing.expect(workerCount(&lanes.threaded[@backingInt(Lanes.Lane.general)]) <= 5);
+    for ([_]Lanes.Lane{ .sync, .lookup, .wait }) |lane| {
+        try testing.expectEqual(@as(u32, 0), lanes.stats(lane).threads);
+        try testing.expectEqual(@as(usize, 0), workerCount(&lanes.threaded[@backingInt(lane)]));
+    }
     try testing.expectEqual(@as(u32, 0), lanes.charged());
+}
+
+test "admission: an owned lane grows two threads for each call it runs at once, up to its cap" {
+    var lanes: Lanes = undefined;
+    try lanes.init(testing.allocator, .{ .owned = .{ .general = 3 } }, .{});
+    defer lanes.deinit(testing.allocator);
+    try lanes.prepare();
+    var order: [11]u8 = undefined;
+    var used: usize = 0;
+    var gate: Io.Event = .unset;
+    var begun: [4]Io.Event = @splat(.unset);
+    var jobs: [4]Ordered = undefined;
+    for (&jobs, &begun) |*job, *b| job.* = .{ .order = &order, .used = &used, .begun = b, .gate = &gate };
+    for (jobs[0..3], begun[0..3], 1..) |*job, *b, running| {
+        lanes.submit(&job.job);
+        try b.wait(testing.io);
+        try testing.expectEqual(@as(u32, @intCast(2 * running + 3)), lanes.stats(.general).threads);
+    }
+    // Past the cap the call queues, and the lane grows no further.
+    lanes.submit(&jobs[3].job);
+    try testing.expectEqual(@as(u32, 1), lanes.stats(.general).queued);
+    try testing.expectEqual(@as(u32, 9), lanes.stats(.general).threads);
+    // A cancel of a running call takes a thread the lane already holds.
+    lanes.cancel(&jobs[0].job);
+    gate.set(testing.io);
+    for (&jobs) |*job| {
+        try job.finished.wait(testing.io);
+        try job.job.group.await(lanes.executor(.general));
+        try job.job.cancellation.await(lanes.executor(.general));
+        lanes.retire(&job.job);
+    }
+    try testing.expectEqual(@as(u32, 9), lanes.stats(.general).threads);
+    try testing.expect(workerCount(&lanes.threaded[@backingInt(Lanes.Lane.general)]) <= 9);
+}
+
+test "admission: a lane that cannot make threads queues behind its running calls, and refuses when it runs none" {
+    var lanes: Lanes = undefined;
+    try lanes.init(testing.allocator, .{ .owned = .{ .general = 2 } }, .{});
+    defer lanes.deinit(testing.allocator);
+    try lanes.prepare();
+    const executor = &lanes.threaded[@backingInt(Lanes.Lane.general)];
+    // The executor refuses past six jobs: the first call's five threads
+    // can be made, a second running call's seven cannot.
+    executor.concurrent_limit = .limited(6);
+    var order: [11]u8 = undefined;
+    var used: usize = 0;
+    var gate: Io.Event = .unset;
+    var begun: Io.Event = .unset;
+    var first: Ordered = .{ .order = &order, .used = &used, .begun = &begun, .gate = &gate };
+    lanes.submit(&first.job);
+    try begun.wait(testing.io);
+    var second: Ordered = .{ .order = &order, .used = &used, .value = 2 };
+    lanes.submit(&second.job);
+    // Queued behind the first, which holds its threads, not refused.
+    try testing.expectEqual(@as(u32, 1), lanes.stats(.general).queued);
+    try testing.expect(!second.job.rejected);
+    gate.set(testing.io);
+    for ([_]*Ordered{ &first, &second }) |job| {
+        try job.finished.wait(testing.io);
+        try job.job.group.await(lanes.executor(.general));
+        lanes.retire(&job.job);
+    }
+    try testing.expect(!second.job.rejected and used == 1 and order[0] == 2);
+    // A lane running nothing that can make no thread refuses the call, which
+    // never runs: a raw call's `ConcurrencyUnavailable`.
+    var other: Lanes = undefined;
+    try other.init(testing.allocator, .{ .owned = .{ .general = 2 } }, .{});
+    defer other.deinit(testing.allocator);
+    try other.prepare();
+    other.threaded[@backingInt(Lanes.Lane.general)].concurrent_limit = .nothing;
+    var refused: Observed = .{};
+    other.submit(&refused.job);
+    try testing.expect(refused.finished and refused.job.rejected and refused.job.short and !refused.ran);
+    other.retire(&refused.job);
+    try testing.expectEqual(@as(u32, 0), other.charged());
 }

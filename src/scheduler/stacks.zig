@@ -53,9 +53,16 @@ fn add(classes: []shuttle.Pool.Class, n: *usize, class: shuttle.Pool.Class) void
 }
 
 /// A stack of the default class for a task that asks no size, or of the
-/// smallest class that fits and has one free.
+/// smallest class that fits and has one free. Null when none is free, or
+/// when the system refused to make a stack never handed out usable (its
+/// memory or its guard, mid-run): either way the spawn is refused, as std's
+/// `ConcurrencyUnavailable` names resource exhaustion, and the stack is
+/// tried again by a later spawn.
 pub inline fn take(pool: *shuttle.Pool, default: Bytes, size: ?Bytes) ?shuttle.Stack {
-    return if (size) |s| pool.take(s) else pool.takeExactly(default);
+    const taken = if (size) |s| pool.take(s) else pool.takeExactly(default);
+    return taken catch |err| switch (err) {
+        error.SystemResources => null,
+    };
 }
 
 const paint_byte = 0xa5;

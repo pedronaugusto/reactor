@@ -139,9 +139,13 @@ addition to cross compilation.
 ## Defaults and explicit costs
 
 Task stacks reserve 1 MiB by default and have individual guards. Reservation
-is address space; touching pages incurs resident cost. Additional classes are
-reserved at init and an explicit request takes the smallest fitting available
-class. `stats().parked_high_water` is the deepest park of any task, live or
+is address space; touching pages incurs resident cost. Every class is reserved
+at init, in one no-access mapping (shuttle's pool), and an explicit request
+takes the smallest fitting available class. A stack is made usable, committed
+as touched and guarded, the first time a task takes it, and kept so for reuse;
+should the system refuse that mid-run (strict overcommit, the map count, the
+Windows commit limit), the spawn returns `ConcurrencyUnavailable`, std's name
+for resource exhaustion, and `async` runs the function inline as std's does. `stats().parked_high_water` is the deepest park of any task, live or
 ended; diagnostic painting (`measure_stacks`) adds the overall touched depth
 and disables trimming. The default size changes only with suite measurements of both.
 
@@ -163,15 +167,33 @@ A runtime started without `workers` runs the logical CPUs less one, and on Darwi
 
 ## Startup and executor capacity
 
-`init` reserves storage and starts no threads. `start` creates the scheduler
-workers and prepares the owned lane workers, with control capacity for
-cancellation, before publishing the runtime as started: each lane's cap
-running calls, one cancellation for each, and three more for child
-termination and executor bookkeeping. A startup failure is returned to the
-application and that runtime must be deinitialized. Fixed `std.Io` operations
-require successful startup, checked in safe builds. With the default lanes on
-a sixteen-core machine this is 132 parked threads and about a millisecond;
-size the caps to the use.
+`init` reserves storage and starts no threads. What it guarantees is the
+reservations and the caps: every task stack's address space and the
+`max_tasks` bound, the lanes' closure and scratch pools, the loops' tables.
+What is lazy is everything a program may never use: a task stack is made
+usable when first taken, and a lane starts no thread until a call needs one.
+`start` creates the scheduler workers (and the monitor) and publishes the
+runtime as started; a startup failure is returned to the application and that
+runtime must be deinitialized. Fixed `std.Io` operations require successful
+startup, checked in safe builds. A program on the default options measured on
+an Apple M3 Max: `init` 0.7 ms, `start` 0.04 ms, `stop` and `deinit` 0.1 ms,
+11 MiB resident, where the stacks guarded at init and the warmed lane workers
+took 7, 1.8 and 5 ms and 16 MiB. The rest of that resident memory is the
+tables sized by `max_tasks` (the loops' operation tables, task records), about
+half a KiB a task.
+
+An owned lane grows before a call starts on it to two threads for each call
+it runs (the call's own, and one a cancel of it runs on) and three more (two
+for child termination, one for a thread still leaving), never past its cap's
+`2 × cap + 3`, and never shrinks: the threads stay idle in its executor for
+the next calls, so sequential calls reuse warm threads. A cancel and a control
+call therefore never wait on a thread being made, and submission waits only
+for a leaving thread's bookkeeping. Growth makes threads by starting jobs that
+hold the executor's threads until it has made enough, then letting them go.
+When a lane cannot grow (the system refuses a thread), the call queues behind
+the calls the lane runs, which hold their threads; a lane running none refuses
+it: a raw call returns `ConcurrencyUnavailable`, and a fixed signature, which
+has no error for it, waits and tries again as it waits for admission.
 
 Admission reserves execution and cancellation together. A queued call has its
 own reservation; completing a call may serve the next queue member without
@@ -179,11 +201,8 @@ releasing the completed call's reservation. The reservation survives until
 both its execution group and its individual cancellation group have retired.
 Detached resolver requests retain their reservation and storage until reuse
 or shutdown. Queue admission is bounded by the configured task and lookup
-bounds. Owned executors use fixed closure and scratch pools and warmed
-workers. Workers not yet needed park separately from the executor ready pool,
-preserving warm-thread reuse for sequential calls. Admission activates a
-prepared worker when concurrency requires it; submission waits for retiring
-worker bookkeeping rather than creating a thread after startup.
+bounds. Owned executors use fixed closure and scratch pools and the threads
+their lanes grew.
 
 An injected executor supplies an `Io` and declares capacity exclusive to the
 runtime. Its guarantee covers submitted execution and cancellation groups,

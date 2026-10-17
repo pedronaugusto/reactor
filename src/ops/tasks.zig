@@ -17,7 +17,8 @@ const Scheduler = @import("../Scheduler.zig");
 
 // Futures.
 
-/// A future's task, or `ConcurrencyUnavailable` when every stack is in use.
+/// A future's task, or `ConcurrencyUnavailable` when no stack can be had
+/// (every one in use, or the system refused to make a new one usable).
 pub fn concurrent(s: *Scheduler, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void, spawned_at: usize) Io.ConcurrentError!*Task {
     return concurrentMode(false, s, result_len, result_alignment, context, context_alignment, start, spawned_at, null, .normal);
 }
@@ -123,7 +124,7 @@ fn schedulerOf(t: *Task) *Scheduler {
 // the std calls.
 
 /// Starts `start(context)` as a member of `g`; `ConcurrencyUnavailable`
-/// when every stack is in use.
+/// when no stack can be had (`concurrent`).
 pub fn groupConcurrent(s: *Scheduler, g: *Io.Group, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque) void, spawned_at: usize) Io.ConcurrentError!void {
     const layout = Layout.of(context.len, context_alignment, 0, .@"1");
     const t, const extra = s.create(.member, layout.size, layout.alignment, memberEntry) orelse return error.ConcurrencyUnavailable;

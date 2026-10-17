@@ -77,25 +77,30 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ },
+        .job = undefined,
         .func = func,
         .args = args,
     };
-    while (!lanes.admit(&c.job)) {
+    while (true) {
+        c.job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ };
+        c.finished = .unset;
+        while (!lanes.admit(&c.job)) {
+            if (comptime raw) return error.ConcurrencyUnavailable;
+            std.Thread.yield() catch std.atomic.spinLoopHint();
+        }
+        lanes.submit(&c.job);
+        c.finished.waitUncancelable(Scheduler.system());
+        // Completion precedes the executor releasing its group token. No
+        // cancelable wait may abandon the caller's frame in this interval.
+        while (c.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
+        lanes.retire(&c.job);
+        if (!c.job.rejected) return c.result;
         if (comptime raw) return error.ConcurrencyUnavailable;
+        if (!c.job.short) @panic("reactor: admitted executor violated its capacity guarantee");
+        // No thread could be had for the call (`Lanes`): a fixed signature
+        // has no error for it, so it waits, as for admission.
         std.Thread.yield() catch std.atomic.spinLoopHint();
     }
-    lanes.submit(&c.job);
-    c.finished.waitUncancelable(Scheduler.system());
-    // Completion precedes the executor releasing its group token. No
-    // cancelable wait may abandon the caller's frame in this interval.
-    while (c.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
-    lanes.retire(&c.job);
-    if (c.job.rejected) {
-        if (comptime raw) return error.ConcurrencyUnavailable;
-        @panic("reactor: admitted executor violated its capacity guarantee");
-    }
-    return c.result;
 }
 
 fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
@@ -144,30 +149,37 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes:
         }
     };
     var c: Call = .{
-        .job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.policy.priority, .control = control_ },
+        .job = undefined,
         .func = func,
         .args = args,
         .task = t,
         .scheduler = owner,
         .lanes = lanes,
     };
-    while (!lanes.admit(&c.job)) {
+    while (true) {
+        c.job = .{ .run = Call.run, .done = Call.done, .lane = lane, .priority = t.policy.priority, .control = control_ };
+        while (!lanes.admit(&c.job)) {
+            if (comptime raw) return error.ConcurrencyUnavailable;
+            if (comptime cancelable(R)) if (t.takeCancel()) return error.Canceled;
+            Scheduler.yield();
+        }
+        if (comptime cancelable(R)) t.enterWait(&c.hook) catch {
+            c.job.pending.store(0, .release);
+            lanes.retire(&c.job);
+            return error.Canceled;
+        };
+        Scheduler.park(.{ .func = Call.submit, .context = &c });
+        t.leaveWait();
+        // The executor lets go of the job's group just after the call returns.
+        while (c.job.held()) Scheduler.yield();
+        lanes.retire(&c.job);
+        if (!c.job.rejected) break;
         if (comptime raw) return error.ConcurrencyUnavailable;
+        if (!c.job.short) @panic("reactor: admitted executor violated its capacity guarantee");
+        // No thread could be had for the call (`Lanes`): a fixed signature
+        // has no error for it, so it waits, as for admission.
         if (comptime cancelable(R)) if (t.takeCancel()) return error.Canceled;
         Scheduler.yield();
-    }
-    defer lanes.retire(&c.job);
-    if (comptime cancelable(R)) t.enterWait(&c.hook) catch {
-        c.job.pending.store(0, .release);
-        return error.Canceled;
-    };
-    Scheduler.park(.{ .func = Call.submit, .context = &c });
-    t.leaveWait();
-    // The executor lets go of the job's group just after the call returns.
-    while (c.job.held()) Scheduler.yield();
-    if (c.job.rejected) {
-        if (comptime raw) return error.ConcurrencyUnavailable;
-        @panic("reactor: admitted executor violated its capacity guarantee");
     }
     if (comptime cancelable(R)) {
         if (c.job.dropped) return t.acknowledge();

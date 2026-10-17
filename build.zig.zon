@@ -11,19 +11,19 @@
         },
 
         .shuttle = .{
-            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.1#7fef33e66fb02821fc01641521152d42da1f0945",
-            .hash = "shuttle-0.2.1-0xOo5lP8AgAh4iN_8hkfVro8zr7wPfXgw1GmvFrY07Da",
+            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.4#f5c441c43308af5b6e6493a35578c7e3bc75be99",
+            .hash = "shuttle-0.2.4-0xOo5g4EAwD_nmvRqMAW0uy27_OwkQ0zvUsEq8OI_DKg",
         },
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.8.1#b222a5e4fc1c066457c0702244e92d3ab74c0f5b",
-            .hash = "preflight-0.8.1-LX1ZwqgsEQAnlrtyLxNJa6UtxbPiE6d3HscGRjEQaMkS",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.8.2#f80587c0f2d1c5a730a47f27fddad460a7280f70",
+            .hash = "preflight-0.8.2-LX1Zwp1dEQDeEjQ-rCUXGbT-gHXPdSHuHPchLuXMpfij",
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.2#93217f8d5c29d3f72b94da9cf961df321bba8430",
-            .hash = "shakedown-0.4.2-BR8U4-oKFgD-vju9MmZmggQ2e43dhqBS6KhKONWGXV62",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.3#13d249434d23c0a744766b42217546863c41bc07",
+            .hash = "shakedown-0.4.3-BR8U40sSFgAW7sXQ4fi_WxDVNqJ9h4LfpjAwFKsEB-4N",
         },
 
         .airlock = .{
