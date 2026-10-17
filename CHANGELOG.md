@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-17
+
 ### Breaking
 
 - `kernel.overlapped`'s `start` takes a `kernel.Completion` (the `Event` and the APC context to pass the NT call) where it took the APC context alone, so the call can signal an event off a runtime.

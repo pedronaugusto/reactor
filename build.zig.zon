@@ -1,6 +1,6 @@
 .{
     .name = .reactor,
-    .version = "0.5.0",
+    .version = "0.6.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x3cf52171583e3432,
     .paths = .{ "build.zig", "build.zig.zon", "src", "docs", "README.md", "CHANGELOG.md", "LICENSE" },
