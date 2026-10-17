@@ -6,13 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
 ### Breaking
 
 - `Runtime` status's lane `threads` counts the threads the lane's executor has made; it repeated `running`, as a `u16`, and is a `u32`.
 
 ### Changed
 
-- Startup is lazy: `start` no longer warms the lane workers (`2 × cap + 3` threads a lane, about 120 on a Mac at the defaults), and the task stacks are no longer each guarded at `init` (shuttle 0.3's pool). A lane grows before a call starts on it to two threads for each call it runs and three more, up to its cap, and keeps them, those not yet needed held apart from its executor's ready pool so sequential calls still reuse one warm thread; a stack is made usable when a task first takes it, and kept. A program on the default options measured on an Apple M3 Max: `init` 0.7 ms where it was 7, `start` 0.04 ms where it was 1.8, `stop` and `deinit` 0.1 ms where they were 5, 11 MiB resident where it was 16. A cancel and a control call still never wait on a thread being made.
+- Startup is lazy: `start` no longer warms the lane workers (`2 × cap + 3` threads a lane, about 120 on a Mac at the defaults), and the task stacks are no longer each guarded at `init` (shuttle 0.3's pool). A lane grows before a call starts on it to two threads for each call it runs and three more, up to its cap, and keeps them, those not yet needed held apart from its executor's ready pool so sequential calls still reuse one warm thread; a stack is made usable when a task first takes it, and kept. A program on the default options: `init` 0.7 ms where it was 7, `start` 0.04 ms where it was 1.8, `stop` and `deinit` 0.1 ms where they were 5, 11 MiB resident where it was 16 (Apple M3 Max); `init` 0.8 ms where it was 18, `start` 0.5 where it was 11, `stop` and `deinit` 0.4 where they were 12, 6.4 MiB where it was 36 (aarch64 Linux VM). parley's stdio server starts in 3.6 ms where it took 17, and rests at 10.5 MiB where it took 16 (Mac). A cancel and a control call still never wait on a thread being made.
 - A stack the system refuses to make usable mid-run (strict overcommit, the map count, the Windows commit limit) refuses the spawn with `ConcurrencyUnavailable` and is tried again by a later one; `async` runs the function inline, as std's does. A lane that cannot make a thread queues the call behind the calls it runs, or, running none, refuses it: a raw call returns `ConcurrencyUnavailable`, and a fixed signature waits and tries again, as it waits for admission.
 - Pins shuttle 0.3.0, and preflight 0.8.2 and shakedown 0.4.11 for development.
 
