@@ -13,6 +13,7 @@ const shakedown = @import("shakedown");
 
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
+const timer_testing = @import("testing/timer.zig");
 const supported = @import("Scheduler.zig").supported;
 const reactor = @import("reactor.zig");
 const wait_ext = @import("ext/wait.zig");
@@ -554,11 +555,10 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
         try loopOf(&l, backend);
         defer l.deinit(testing.allocator);
         const sys = Io.Threaded.global_single_threaded.io();
-        const now = Io.Clock.Timestamp.now(sys, .awake);
-        var timer: Loop.Op = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) }, .user_data = 7 };
+        const due = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
+        var timer: Loop.Op = .{ .kind = .{ .timer = due }, .user_data = 7 };
         try l.submit(&timer);
-        try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
-        try testing.expectEqual(@as(u32, 1), try l.run(.once));
+        try timer_testing.expectDelivered(&l, due);
         var out: [4]*Loop.Op = undefined;
         try testing.expectEqual(@as(usize, 7), l.reap(&out)[0].user_data);
 

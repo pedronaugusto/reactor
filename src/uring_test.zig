@@ -10,6 +10,7 @@ const shakedown = @import("shakedown");
 
 const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
+const timer_testing = @import("testing/timer.zig");
 const supported = @import("Scheduler.zig").supported;
 
 fn runtime(r: *Runtime, workers: u16) !void {
@@ -188,12 +189,10 @@ test "the loop alone: a timer and a wake, completions reaped" {
         else => |e| return e,
     };
     defer l.deinit(testing.allocator);
-    const now = Io.Clock.Timestamp.now(Io.Threaded.global_single_threaded.io(), .awake);
-    var timer: Loop.Op = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) }, .user_data = 7 };
+    const due = Io.Clock.Timestamp.now(Io.Threaded.global_single_threaded.io(), .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
+    var timer: Loop.Op = .{ .kind = .{ .timer = due }, .user_data = 7 };
     try l.submit(&timer);
-    try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
-    try testing.expect(l.nextTimeout() != null);
-    try testing.expectEqual(@as(u32, 1), try l.run(.once));
+    try timer_testing.expectDelivered(&l, due);
     var out: [4]*Loop.Op = undefined;
     const done = l.reap(&out);
     try testing.expectEqual(@as(usize, 1), done.len);
