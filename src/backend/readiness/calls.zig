@@ -6,9 +6,10 @@
 //! Sockets are read and written with `MSG_DONTWAIT`, whatever their mode,
 //! except where a send ignores it (Darwin, `socket.send_honors_dontwait`):
 //! the backend puts a socket there in non-blocking mode before it writes.
-//! Other descriptors are called only once `ready` says they are, in their
-//! own mode: one read takes what is there, and one write is kept within
-//! what a pipe takes whole (a write may always be short).
+//! Other descriptors are called only once they are ready, in their own
+//! mode: one read takes what is there, and one write is kept within the
+//! room the kernel counted for it (`counts_room`), or else within what a
+//! pipe takes whole (a write may always be short).
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -32,8 +33,21 @@ fn unexpected(e: E) error{Unexpected} {
 }
 
 /// The most one write to a descriptor in blocking mode moves once it is
-/// writable: what a pipe takes whole (POSIX's `PIPE_BUF`; a page on Linux).
+/// writable, where no room is counted for it: what a pipe takes whole
+/// (POSIX's `PIPE_BUF`; a page on Linux).
 pub const atomic_write: usize = if (builtin.os.tag == .linux) 4096 else 512;
+
+/// Whether the poller counts a pipe's or a socket's room for a write
+/// (kqueue's `EVFILT_WRITE` on Darwin says it in `data`): a write in
+/// blocking mode of up to that many bytes does not wait (unless another
+/// writer takes the room first, as with any blocking write), and one call
+/// moves them all instead of `atomic_write` per readiness. A terminal's count is
+/// no such room (written as it counts, its output's expansion waits), so
+/// only pipes and sockets are taken at their count (`roomCounted`).
+/// FreeBSD's kqueue counts too, but a blocking pipe there hands a large
+/// write to the reader directly (`PIPE_MINDIRECT`) and waits for it to be
+/// read; epoll counts nothing.
+pub const counts_room = builtin.os.tag.isDarwin();
 
 const have_accept4 = !Threaded.socket_flags_unsupported;
 const have_sendmmsg = builtin.os.tag == .linux;
@@ -75,15 +89,17 @@ pub fn howOf(operation: Io.Operation) How {
 
 /// `operation` made now. Null when it would wait: only a socket's call,
 /// which passes `MSG_DONTWAIT`; a file in non-blocking mode reports
-/// `WouldBlock`, as std's own `Io` does.
-pub fn make(operation: Io.Operation) ?Io.Operation.Result {
+/// `WouldBlock`, as std's own `Io` does. `room`: the most a write to a
+/// descriptor in blocking mode moves (`atomic_write` where nothing counted
+/// its room).
+pub fn make(operation: Io.Operation, room: usize) ?Io.Operation.Result {
     return switch (operation) {
         .net_read => |r| if (netRead(r)) |result| .{ .net_read = result } else null,
         .net_write => |w| if (netWrite(w)) |result| .{ .net_write = result } else null,
         .net_receive => |r| if (netReceive(r)) |result| .{ .net_receive = result } else null,
         .net_send => |s| if (netSend(s)) |result| .{ .net_send = result } else null,
         .file_read_streaming => |r| .{ .file_read_streaming = fileRead(r) },
-        .file_write_streaming => |w| .{ .file_write_streaming = fileWrite(w) },
+        .file_write_streaming => |w| .{ .file_write_streaming = fileWrite(w, room) },
         .device_io_control => unreachable, // unreachable: device control runs borrowed, never on a loop
     };
 }
@@ -93,17 +109,20 @@ pub fn make(operation: Io.Operation) ?Io.Operation.Result {
 /// stream write that sent less than it was given filled the socket. The
 /// readiness core keeps a descriptor it knows to be drained from being
 /// called again before its next event. Datagram receives say nothing of
-/// what remains.
+/// what remains. A file write says how much it moved, which the room
+/// counted for it loses.
 pub const Progress = union(enum) {
     other,
     read: struct { got: usize, asked: usize },
     short_write,
+    wrote: usize,
 };
 
 pub fn progress(operation: Io.Operation, result: Io.Operation.Result) Progress {
     return switch (operation) {
         .net_read => |r| if (result.net_read) |got| .{ .read = .{ .got = got.data_len, .asked = total(r.data) } } else |_| .other,
         .net_write => |w| if (result.net_write) |n| (if (n < w.header.len + writeTotal(w.data, w.splat)) .short_write else .other) else |_| .other,
+        .file_write_streaming => if (result.file_write_streaming) |n| .{ .wrote = n } else |_| .other,
         else => .other,
     };
 }
@@ -128,6 +147,17 @@ pub fn isStream(fd: posix.fd_t) bool {
     var len: posix.socklen_t = @sizeOf(i32);
     const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, @ptrCast(&kind), &len); // safe: the option is an int, its length given
     return posix.errno(rc) == .SUCCESS and kind == posix.SOCK.STREAM;
+}
+
+/// Whether the room the poller counts for writes to `fd` is room a write
+/// in blocking mode takes without waiting: a pipe's or a socket's
+/// (`counts_room`).
+pub fn roomCounted(fd: posix.fd_t) bool {
+    if (comptime !counts_room) return false;
+    var st: std.c.Stat = undefined;
+    if (posix.errno(std.c.fstat(fd, &st)) != .SUCCESS) return false;
+    const mode: u32 = st.mode;
+    return std.c.S.ISFIFO(mode) or std.c.S.ISSOCK(mode);
 }
 
 /// Whether `fd` is ready `direction`'s way now (an error or a hang-up
@@ -424,10 +454,10 @@ fn fileRead(r: Io.Operation.FileReadStreaming) Io.Operation.FileReadStreaming.Er
     }
 }
 
-fn fileWrite(w: Io.Operation.FileWriteStreaming) Io.Operation.FileWriteStreaming.Error!usize {
+fn fileWrite(w: Io.Operation.FileWriteStreaming, room: usize) Io.Operation.FileWriteStreaming.Error!usize {
     var iovecs: [Threaded.max_iovecs_len]posix.iovec_const = undefined;
     var splat: [Threaded.splat_buffer_size]u8 = undefined;
-    const limit = if (w.file.flags.nonblocking) std.math.maxInt(usize) else atomic_write;
+    const limit = if (w.file.flags.nonblocking) std.math.maxInt(usize) else room;
     const count = scatter(&iovecs, &splat, w.header, w.data, w.splat, limit);
     if (count == 0) return 0;
     while (true) {

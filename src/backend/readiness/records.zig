@@ -92,6 +92,13 @@ pub fn Records(comptime Waiter: type) type {
             /// event says), less what reads have taken since; null where
             /// the poller does not say.
             available: ?u64 = null,
+            /// Room for a write the poller last counted (kqueue's event
+            /// says), less what writes have moved since; null where the
+            /// poller does not say.
+            room: ?u64 = null,
+            /// Whether that count is room a write in blocking mode takes
+            /// without waiting (a pipe's or a socket's), once asked.
+            room_counted: ?bool = null,
             /// A terminal read event remains ready through the final bytes
             /// and EOF; cleared when the descriptor is replaced.
             read_ended: bool = false,

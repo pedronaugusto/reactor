@@ -19,6 +19,7 @@ const posix = std.posix;
 const c = std.c;
 
 const readiness = @import("../readiness.zig");
+const calls = @import("calls.zig");
 const Wait = @import("../wait.zig").Wait;
 const timeline = @import("../../clock.zig");
 
@@ -242,6 +243,9 @@ pub fn decode(e: *const Event) readiness.Decoded {
             // A socket's or a pipe's read filter counts the bytes there; at
             // its end the count says nothing of what a read returns.
             .available = if (direction == .read and e.flags & c.EV.EOF == 0 and e.data > 0) @intCast(e.data) else null,
+            // A pipe's or a socket's write filter counts its room; at the
+            // reader's end there is none to count.
+            .room = if (calls.counts_room and direction == .write and e.flags & c.EV.EOF == 0 and e.data >= 0) @intCast(e.data) else null,
         },
     };
 }

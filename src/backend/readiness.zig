@@ -7,7 +7,10 @@
 //! edge-triggered and for good: no system call per wait, one per
 //! descriptor's life. Each readiness event makes the waiting calls, oldest
 //! first, until one would wait again. A descriptor in blocking mode (a pipe
-//! or a terminal std opened) is called only once `poll(2)` says it is ready.
+//! or a terminal std opened) is called only once it is ready: a read takes
+//! what is there, and a write moves the room the poller counted for a pipe
+//! or a socket (`calls.counts_room`; asked of the poller at once when none
+//! is known), else `calls.atomic_write` once `poll(2)` says it is writable.
 //!
 //! Records outlive their waits, so a record is checked against the
 //! descriptor's close epoch (closes.zig) before it is trusted, and lets go
@@ -59,6 +62,9 @@ pub const Decoded = union(enum) {
         refused: ?Direction = null,
         /// Bytes there to read, where the poller says (kqueue).
         available: ?u64 = null,
+        /// Room for a write, where the poller says (kqueue on Darwin,
+        /// `calls.counts_room`).
+        room: ?u64 = null,
         /// The read side ended: queued bytes are followed by EOF.
         read_ended: bool = false,
     },
@@ -109,7 +115,7 @@ pub const Waiter = struct {
     /// The operation's address; 0 for a batch entry.
     op: usize = 0,
     /// Acts on the operation, typed for it (operations only).
-    act: ?*const fn (w: *Waiter, fd: posix.fd_t, action: Action) Outcome = null,
+    act: ?*const fn (w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome = null,
     record: u32 = records_.none,
     place: Place = .none,
     direction: Direction = .read,
@@ -126,7 +132,7 @@ pub const Waiter = struct {
 /// The actions on an operation of type `OpPtr`'s pointee.
 fn Acts(comptime OpPtr: type) type {
     return struct {
-        fn act(w: *Waiter, fd: posix.fd_t, action: Action) Outcome {
+        fn act(w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
             const o: OpPtr = @ptrFromInt(w.op); // safe: `submit` stored this operation's address
             switch (action) {
                 .closed => o.result = closedUnder(o),
@@ -137,7 +143,7 @@ fn Acts(comptime OpPtr: type) type {
                         .raw => unreachable, // unreachable: raw requests require io_uring or IOCP
 
                         .io => |operation| {
-                            const result = calls.make(operation) orelse if (may_wait) return .wait else failure(operation);
+                            const result = calls.make(operation, room) orelse if (may_wait) return .wait else failure(operation);
                             o.result = .{ .io = result };
                             return .{ .done = calls.progress(operation, result) };
                         },
@@ -207,6 +213,10 @@ pub fn Readiness(comptime Poller: type) type {
         timers: [2]List = .{ .{}, .{} },
         /// The deadline each clock's kernel timer is armed for.
         armed: [2]?i96 = .{ null, null },
+        /// A wake event taken by a pump outside `poll` (one that made room
+        /// for a change, or asked a write's room): the next poll returns
+        /// without waiting, as the wake asked.
+        woke: bool = false,
 
         /// Tables for `max_ops` operations in flight.
         pub fn init(gpa: Allocator, max_ops: u32) InitError!Self {
@@ -252,7 +262,7 @@ pub fn Readiness(comptime Poller: type) type {
                     self.nonblockingToSend(operation, fd);
                     // Known not ready: wait for the event without a call.
                     if (how == .call and self.notReady(fd, direction)) return self.park(w, fd, direction, how);
-                    if (now(operation, fd, direction, how)) |result| {
+                    if (self.now(operation, fd, direction, how)) |result| {
                         o.result = .{ .io = result };
                         switch (calls.progress(operation, result)) {
                             .other => {},
@@ -367,6 +377,11 @@ pub fn Readiness(comptime Poller: type) type {
             const drained = switch (p) {
                 .other => false,
                 .short_write => true,
+                .wrote => |n| wrote: {
+                    const left = r.room orelse break :wrote false;
+                    r.room = left -| n;
+                    break :wrote r.room.? == 0 and (r.room_counted orelse false);
+                },
                 .read => |read| drained: {
                     if (r.available) |available| {
                         if (read.got >= available) break :drained true;
@@ -406,11 +421,44 @@ pub fn Readiness(comptime Poller: type) type {
         }
 
         /// `operation` made now if it can be without waiting.
-        fn now(operation: Io.Operation, fd: posix.fd_t, direction: Direction, how: How) ?Io.Operation.Result {
-            return switch (how) {
-                .call => calls.make(operation),
-                else => if (calls.ready(fd, direction)) calls.make(operation) else null,
+        fn now(self: *Self, operation: Io.Operation, fd: posix.fd_t, direction: Direction, how: How) ?Io.Operation.Result {
+            if (how == .call) return calls.make(operation, calls.atomic_write);
+            if (calls.counts_room and direction == .write) switch (self.askRoom(fd)) {
+                .room => |n| return calls.make(operation, n),
+                .full => return null,
+                .unknown => {},
             };
+            return if (calls.ready(fd, direction)) calls.make(operation, calls.atomic_write) else null;
+        }
+
+        const Room = union(enum) {
+            /// Nothing counted: the descriptor is asked with `poll(2)`.
+            unknown,
+            /// Counted, and taken up.
+            full,
+            room: usize,
+        };
+
+        /// The room for a write in blocking mode to `fd`, which the poller
+        /// counts for a pipe or a socket (`calls.counts_room`). When none
+        /// is known yet, the poller is asked: the write filter registered
+        /// anew and its events taken without waiting, where a writable
+        /// descriptor's comes back at once with its room (kqueue's
+        /// `kevent64` with `KEVENT_FLAG_IMMEDIATE`, cheaper than `poll`).
+        fn askRoom(self: *Self, fd: posix.fd_t) Room {
+            const index = self.recordFor(fd) catch return .unknown;
+            const r = self.records.at(index);
+            if (r.room == null) {
+                if (!counts(r)) return .unknown;
+                const generation = r.generation;
+                self.room() catch return .unknown;
+                r.registered = self.poller.register(fd, @as(u64, generation) << 32 | index, r.registered, .write) catch return .unknown;
+                _ = self.pump(.nowait) catch return .unknown;
+                // Its event (or another's) may have let the record go.
+                if (self.records.find(fd) != index or r.generation != generation) return .unknown;
+            }
+            const n = countedRoom(r) orelse return .unknown;
+            return if (n == 0) .full else .{ .room = n };
         }
 
         /// Asks for `o` to end; its completion arrives at the next poll,
@@ -439,7 +487,7 @@ pub fn Readiness(comptime Poller: type) type {
             const fd, const direction = calls.subject(operation);
             const how = calls.howOf(operation);
             self.nonblockingToSend(operation, fd);
-            if (now(operation, fd, direction, how)) |result| {
+            if (self.now(operation, fd, direction, how)) |result| {
                 e.outcome = .{ .result = result };
                 return self.finish(&e.waiter);
             }
@@ -482,8 +530,11 @@ pub fn Readiness(comptime Poller: type) type {
         pub fn poll(self: *Self, wait: Wait, sink: anytype) PollError!void {
             const Sink = @typeInfo(@TypeOf(sink)).pointer.child;
             const OpPtr = @typeInfo(@TypeOf(Sink.complete)).@"fn".param_types[1].?;
-            var timeout = if (self.done.head != null) Wait.nowait else wait;
+            var timeout = if (self.done.head != null or self.woke) Wait.nowait else wait;
             while (try self.pump(timeout) == Poller.max_events) timeout = .nowait;
+            // A wake this poll took, or one taken before it, is answered by
+            // its return.
+            self.woke = false;
             while (self.done.pop()) |w| {
                 w.place = .none;
                 if (w.op != 0) {
@@ -516,7 +567,7 @@ pub fn Readiness(comptime Poller: type) type {
                         // Always ready (a regular file): made in place.
                         // An operation's result is taken at once; a batch
                         // entry's goes out with the next poll.
-                        _ = self.act(w, fd, .attempt_unwaitable);
+                        _ = self.act(w, fd, .attempt_unwaitable, calls.atomic_write);
                         if (w.op != 0) return true;
                         self.finish(w);
                         return false;
@@ -555,16 +606,16 @@ pub fn Readiness(comptime Poller: type) type {
             return self.park(w, fd, direction, how);
         }
 
-        fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action) Outcome {
+        fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action, limit: usize) Outcome {
             _ = self;
-            if (w.act) |f| return f(w, fd, action);
+            if (w.act) |f| return f(w, fd, action, limit);
             const e = Entry.of(w);
             switch (action) {
                 .closed => e.outcome = .canceled,
                 .fired => unreachable, // unreachable: a batch has no timers here
                 .attempt, .attempt_unwaitable => {
                     const operation = pending.unpack(e.token.pending());
-                    const result = calls.make(operation) orelse if (action == .attempt) return .wait else failure(operation);
+                    const result = calls.make(operation, limit) orelse if (action == .attempt) return .wait else failure(operation);
                     e.outcome = .{ .result = result };
                     return .{ .done = calls.progress(operation, result) };
                 },
@@ -586,6 +637,8 @@ pub fn Readiness(comptime Poller: type) type {
                     r.nonblocking = false;
                     r.ready = .both;
                     r.available = null;
+                    r.room = null;
+                    r.room_counted = null;
                     r.stream = null;
                     r.read_ended = false;
                     r.generation +%= 1;
@@ -651,7 +704,7 @@ pub fn Readiness(comptime Poller: type) type {
             const r = self.records.at(index);
             var n: usize = 0;
             for (&r.waiters) |*list| while (list.pop()) |w| {
-                _ = self.act(w, r.fd, .closed);
+                _ = self.act(w, r.fd, .closed, 0);
                 self.finish(w);
                 n += 1;
             };
@@ -671,7 +724,10 @@ pub fn Readiness(comptime Poller: type) type {
         fn handleEvent(self: *Self, decoded: Decoded) void {
             switch (decoded) {
                 .ignore => {},
-                .wake => self.poller.woken(),
+                .wake => {
+                    self.poller.woken();
+                    self.woke = true;
+                },
                 .clock => |clock| self.expire(clock),
                 .record => |e| {
                     const index: u32 = @truncate(e.key);
@@ -688,7 +744,10 @@ pub fn Readiness(comptime Poller: type) type {
                         r.available = e.available;
                         r.read_ended = r.read_ended or e.read_ended;
                     }
-                    if (e.write) r.ready = r.ready.with(.{ .write = true });
+                    if (e.write) {
+                        r.ready = r.ready.with(.{ .write = true });
+                        r.room = e.room;
+                    }
                     if (e.priority) r.ready = r.ready.with(.{ .priority = true });
                     if (r.idle()) {
                         r.idle_events += 1;
@@ -716,10 +775,17 @@ pub fn Readiness(comptime Poller: type) type {
             var it = list.head;
             while (it) |w| {
                 const next = w.next;
-                // A descriptor in blocking mode is called again only while
-                // it is still ready.
-                if (w.how == .ready_then_call and !first and action == .attempt and !calls.ready(r.fd, direction)) return;
-                switch (self.act(w, r.fd, action)) {
+                // A descriptor in blocking mode is written within the room
+                // counted for it, and otherwise called again only while it
+                // is still ready.
+                const counted = if (w.how == .ready_then_call and direction == .write) countedRoom(r) else null;
+                if (w.how == .ready_then_call and action == .attempt) {
+                    if (counted) |n| {
+                        if (n == 0) return;
+                    } else if (!first and !calls.ready(r.fd, direction)) return;
+                }
+                const limit = if (counted) |n| (if (n > 0) n else calls.atomic_write) else calls.atomic_write;
+                switch (self.act(w, r.fd, action, limit)) {
                     .done => |p| {
                         list.remove(w);
                         self.finish(w);
@@ -753,7 +819,7 @@ pub fn Readiness(comptime Poller: type) type {
                 it = w.next;
                 if (w.deadline <= time) {
                     list.remove(w);
-                    _ = self.act(w, -1, .fired);
+                    _ = self.act(w, -1, .fired, 0);
                     self.finish(w);
                 } else if (earliest == null or w.deadline < earliest.?) earliest = w.deadline;
             }
@@ -764,6 +830,22 @@ pub fn Readiness(comptime Poller: type) type {
             };
         }
     };
+}
+
+/// Whether the room the poller counts for `r`'s descriptor is room a write
+/// in blocking mode takes without waiting (asked once per descriptor).
+fn counts(r: anytype) bool {
+    if (comptime !calls.counts_room) return false;
+    if (r.room_counted == null) r.room_counted = calls.roomCounted(r.fd);
+    return r.room_counted.?;
+}
+
+/// The room counted for a write in blocking mode to `r`'s descriptor, less
+/// what writes moved since; null where none is counted.
+fn countedRoom(r: anytype) ?usize {
+    const n = r.room orelse return null;
+    if (!counts(r)) return null;
+    return @intCast(@min(n, std.math.maxInt(usize)));
 }
 
 fn directions(d: Direction) Directions {

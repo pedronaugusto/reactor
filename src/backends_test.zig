@@ -19,6 +19,7 @@ const reactor = @import("reactor.zig");
 const wait_ext = @import("ext/wait.zig");
 const kqueue_poller = @import("backend/readiness/Kqueue.zig");
 const epoll_poller = @import("backend/readiness/Epoll.zig");
+const calls = @import("backend/readiness/calls.zig");
 
 /// The readiness backends this system has.
 const readiness: []const Loop.Backend = switch (builtin.os.tag) {
@@ -344,6 +345,74 @@ test "a pipe in blocking mode is read when it is ready, and written in pieces it
         write_end.close(io);
         try testing.expectEqualSlices(u8, &big, &got);
         try testing.expectError(error.EndOfStream, reader.interface.takeByte());
+    }
+}
+
+fn writeOnce(io: Io, file: Io.File, bytes: []const u8) !usize {
+    return (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{bytes} } })).file_write_streaming;
+}
+
+fn writeFile(io: Io, file: Io.File, bytes: []const u8) !void {
+    var w = file.writerStreaming(io, &.{});
+    try w.interface.writeAll(bytes);
+}
+
+/// Drains a pipe outside the runtime when the test has stalled, so a loop
+/// thread stuck in a blocking write is let go and the test can fail.
+const PipeWatchdog = struct {
+    fd: posix.fd_t,
+    finished: std.atomic.Value(bool) = .init(false),
+    stalled: std.atomic.Value(bool) = .init(false),
+
+    fn run(w: *PipeWatchdog) void {
+        const io = testing.io;
+        for (0..200) |_| {
+            if (w.finished.load(.acquire)) return;
+            io.sleep(.fromMilliseconds(10), .awake) catch return;
+        }
+        while (!w.finished.load(.acquire)) {
+            w.stalled.store(true, .release);
+            var fds = [1]posix.pollfd{.{ .fd = w.fd, .events = posix.POLL.IN, .revents = 0 }};
+            if (posix.system.poll(&fds, 1, 1) <= 0) continue;
+            var scratch: [1 << 16]u8 = undefined;
+            _ = posix.system.read(w.fd, &scratch, scratch.len);
+        }
+    }
+};
+
+test "a pipe in blocking mode takes a write as large as the room the poller counts, and a write that finds it full waits for the reader instead of holding the loop" {
+    for (readiness) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        const io = r.io();
+        const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+        const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+        const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+        defer read_end.close(io);
+        const big = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(big);
+        for (big, 0..) |*byte, i| byte.* = @truncate(i *% 31);
+        var watchdog: PipeWatchdog = .{ .fd = fds[0] };
+        const thread = try std.Thread.spawn(.{}, PipeWatchdog.run, .{&watchdog});
+        defer thread.join();
+        defer watchdog.finished.store(true, .release);
+        // Nobody reads yet: one write moves what the pipe has room for,
+        // all of it where the poller counts it.
+        const first = try writeOnce(io, write_end, big);
+        try testing.expect(first > 0);
+        if (calls.counts_room) try testing.expect(first > calls.atomic_write);
+        // The rest fills the pipe again and waits for the reader, which
+        // runs on the same loop.
+        var writing = try io.concurrent(writeFile, .{ io, write_end, big[first..] });
+        const got = try testing.allocator.alloc(u8, big.len);
+        defer testing.allocator.free(got);
+        var reader = read_end.readerStreaming(io, &.{});
+        try reader.interface.readSliceAll(got);
+        try writing.await(io);
+        write_end.close(io);
+        try testing.expect(!watchdog.stalled.load(.acquire));
+        try testing.expectEqualSlices(u8, big, got);
     }
 }
 
