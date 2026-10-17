@@ -11,8 +11,8 @@
         },
 
         .shuttle = .{
-            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.2.4#f5c441c43308af5b6e6493a35578c7e3bc75be99",
-            .hash = "shuttle-0.2.4-0xOo5g4EAwD_nmvRqMAW0uy27_OwkQ0zvUsEq8OI_DKg",
+            .url = "git+https://github.com/pedronaugusto/shuttle?ref=v0.3.0#f5606387011d1ed6e6a67b4d11ff7c62f7e9d4d9",
+            .hash = "shuttle-0.3.0-0xOo5gEwAwAjMQVRq1rg4wjfcYlT-mmXcwYr-eYHxx4L",
         },
     },
     .dev_dependencies = .{
@@ -22,8 +22,8 @@
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.3#13d249434d23c0a744766b42217546863c41bc07",
-            .hash = "shakedown-0.4.3-BR8U40sSFgAW7sXQ4fi_WxDVNqJ9h4LfpjAwFKsEB-4N",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.11#3a5df957b886311c391d7b240c5b7bc9fac35111",
+            .hash = "shakedown-0.4.11-BR8U41pvFgCDCIn03Wqi4ZKqYcPjT4ofZSbVukJiIKBZ",
         },
 
         .airlock = .{
