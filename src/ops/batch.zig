@@ -11,7 +11,10 @@
 //! the kernel holds an operation. It cancels every pending one and waits
 //! for each to come back first; one that completed meanwhile is moved to
 //! `completed` and the call succeeds; cancelled ones return to `submitted`,
-//! whole, so a second await submits them again.
+//! whole, so a second await submits them again. The same holds for every
+//! error an await returns (`Canceled`, `ConcurrencyUnavailable`): the kernel
+//! holds nothing of the batch once it returns, so a caller may drop the batch
+//! then, as std's `operateTimeout` does with its batch on its stack.
 const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
@@ -100,10 +103,10 @@ pub fn awaitAsync(s: *Scheduler, borrowed: Io, batch: *Io.Batch) Io.Cancelable!v
     _ = Scheduler.current() orelse return borrowed.vtable.batchAwaitAsync(borrowed.userdata, batch);
     drain(s, borrowed, batch, false) catch |err| switch (err) {
         error.ConcurrencyUnavailable => unreachable, // unreachable: only asked for concurrency
-        error.Canceled => |e| return e,
+        error.Canceled => |e| return takeBack(s, batch, e),
     };
     if (ready(batch)) return;
-    switch (try wait(s, batch, .any, null)) {
+    switch (wait(s, batch, .any, null) catch |err| return takeBack(s, batch, err)) {
         .completed => {},
         .timed_out => unreachable, // unreachable: no timer armed
     }
@@ -112,10 +115,10 @@ pub fn awaitAsync(s: *Scheduler, borrowed: Io, batch: *Io.Batch) Io.Cancelable!v
 pub fn awaitConcurrent(s: *Scheduler, borrowed: Io, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     _ = Scheduler.current() orelse return borrowed.vtable.batchAwaitConcurrent(borrowed.userdata, batch, timeout);
     if (try awaitSingle(s, batch, timeout)) return;
-    try drain(s, borrowed, batch, true);
+    drain(s, borrowed, batch, true) catch |err| return takeBack(s, batch, err);
     if (ready(batch)) return;
     const p = Scheduler.processor().?;
-    switch (try wait(s, batch, .any, perform.deadline(p, timeout))) {
+    switch (wait(s, batch, .any, perform.deadline(p, timeout)) catch |err| return takeBack(s, batch, err)) {
         .completed => return,
         .timed_out => {},
     }
@@ -147,6 +150,15 @@ pub fn cancel(s: *Scheduler, borrowed: Io, batch: *Io.Batch) void {
     _ = Scheduler.current() orelse return borrowed.vtable.batchCancel(borrowed.userdata, batch);
     if (batch.pending.head != .none) drainAll(s, batch, .to_unused);
     batch.userdata = null;
+}
+
+/// An await ending in `err`: every operation the kernel still holds is taken
+/// back to `submitted`, whole, before it returns, so the kernel writes into
+/// no storage the caller has let go of (the uplink client's canceled HTTP/2
+/// request, whose read went on after its frame was gone).
+fn takeBack(s: *Scheduler, batch: *Io.Batch, err: anytype) @TypeOf(err) {
+    if (batch.pending.head != .none) drainAll(s, batch, .to_submitted);
+    return err;
 }
 
 fn ready(batch: *const Io.Batch) bool {

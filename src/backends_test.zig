@@ -525,6 +525,39 @@ test "a batch's reads wait for readiness and complete as their sockets are writt
     }
 }
 
+/// Awaits a read nobody answers, until canceled; says whether the kernel still
+/// held the read when the await returned, and whether it is back to submit.
+fn canceledBatch(io: Io, socket: net.Socket.Handle, left: *[2]bool) !void {
+    var buffer: [8]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    batch.addAt(0, .{ .net_read = .{ .socket_handle = socket, .data = &data } });
+    const result = batch.awaitConcurrent(io, .none);
+    left.* = .{ batch.pending.head == .none, batch.submitted.head != .none };
+    return result;
+}
+
+test "an await canceled while the kernel holds its read takes the read back before it returns" {
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 1);
+        defer r.deinit();
+        const io = r.io();
+        const pair = try tcpPair(io);
+        defer for (pair) |s| s.close(io);
+        var left: [2]bool = .{ false, false };
+        var reading = try io.concurrent(canceledBatch, .{ io, pair[0].socket.handle, &left });
+        try io.sleep(.fromMilliseconds(2), .awake);
+        try testing.expectError(error.Canceled, reading.cancel(io));
+        try testing.expectEqualSlices(bool, &.{ true, true }, &left);
+        // What the read would have taken arrives after its frame is gone.
+        var send: [1][]const u8 = .{"abc"};
+        _ = try (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &send } })).net_write;
+        try io.sleep(.fromMilliseconds(2), .awake);
+    }
+}
+
 test "a connect to a port nobody listens on is refused" {
     for (readiness) |backend| {
         var r: Runtime = undefined;
