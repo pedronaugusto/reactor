@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The futex wait hands its bucket guard's release to the scheduler through aegis's `Guard.handOff()`, a transfer declared where it happens, and A003 (an owner's cleanup) gates in reactor's lint: glint 0.2.13 follows the lanes' launch guard and the spare threads' wait through their loops, where 0.2.12 left them undecided.
+- Pins aegis 0.1.12.
+
 ## [0.4.6] - 2026-10-17
 
 ### Fixed
