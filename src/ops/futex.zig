@@ -99,8 +99,8 @@ const Waiter = struct {
 /// The parked task's guard is released once it is off its stack, which still holds the guard.
 fn unlockAfterPark(context: *anyopaque, t: *Task) void {
     _ = t;
-    const held: *Bucket.Guard = @ptrCast(@alignCast(context)); // safe: `wait` passed its guard
-    held.deinit();
+    const handoff: *Bucket.Handoff = @ptrCast(@alignCast(context)); // safe: `wait` passed its guard's hand-off
+    handoff.release();
 }
 
 /// Waits while `ptr.*` is `expected`, until a wake, `timeout`, a cancel
@@ -128,7 +128,9 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
             return;
         }
     }
-    Scheduler.park(.{ .func = unlockAfterPark, .context = &held });
+    // Released once the task is off its stack, by the scheduler: a declared hand-off.
+    var handoff = held.handOff();
+    Scheduler.park(.{ .func = unlockAfterPark, .context = &handoff });
     // Back on the processor that armed the timer: disarm it there.
     w.deadline.disarm();
     t.leaveWait();
