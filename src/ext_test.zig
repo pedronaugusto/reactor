@@ -3,6 +3,7 @@
 //! seed), and on real worker threads.
 const builtin = @import("builtin");
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const shakedown = @import("shakedown");
 const testing = std.testing;
 const Io = std.Io;
@@ -452,12 +453,12 @@ test "syncLane runs a library's raw call on the sync lane, and on the caller und
     const Call = struct {
         fn run(context: *anyopaque) void {
             const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the test passed the thread id
-            id.* = std.Thread.getCurrentId();
+            id.* = current_thread.now();
         }
         fn fromTask(io: std.Io) !void {
-            var id: std.Thread.Id = std.Thread.getCurrentId();
+            var id: std.Thread.Id = current_thread.now();
             try reactor.syncLane(io, null, run, &id);
-            try testing.expect(id != std.Thread.getCurrentId());
+            try testing.expect(id != current_thread.now());
         }
     };
     var t: Threads = undefined;
@@ -465,11 +466,11 @@ test "syncLane runs a library's raw call on the sync lane, and on the caller und
     defer t.deinit();
     var id: std.Thread.Id = undefined;
     try reactor.syncLane(t.io(), null, Call.run, &id);
-    try testing.expect(id != std.Thread.getCurrentId());
+    try testing.expect(id != current_thread.now());
     var task = try t.io().concurrent(Call.fromTask, .{t.io()});
     try task.await(t.io());
     try reactor.syncLane(testing.io, null, Call.run, &id);
-    try testing.expectEqual(std.Thread.getCurrentId(), id);
+    try testing.expectEqual(current_thread.now(), id);
 }
 
 test "syncLane: a task canceled before its call starts gets Canceled, and the call never runs" {

@@ -2,6 +2,7 @@
 //! supplies for airlock's `Blocking`: each runs on the `sync` lane, the task
 //! parked meanwhile, and a sync that ran keeps its own result.
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const testing = std.testing;
 const Io = std.Io;
 const airlock = @import("airlock");
@@ -25,13 +26,13 @@ const Noting = struct {
 
     fn noted(context: *anyopaque) void {
         const call: *Call = @ptrCast(@alignCast(context)); // safe: `run` passed its call record
-        if (@as(u64, std.Thread.getCurrentId()) != caller.load(.monotonic)) _ = elsewhere.fetchAdd(1, .monotonic);
+        if (@as(u64, current_thread.now()) != caller.load(.monotonic)) _ = elsewhere.fetchAdd(1, .monotonic);
         call.function(call.argument);
     }
 };
 
 fn syncs(io: Io, dir: Io.Dir) !void {
-    Noting.caller.store(std.Thread.getCurrentId(), .monotonic);
+    Noting.caller.store(current_thread.now(), .monotonic);
     const blocking: airlock.Blocking = .{ .run = Noting.run };
     const file = try dir.createFile(io, "file", .{});
     defer file.close(io);

@@ -5,6 +5,7 @@
 //! closes, against the real kernel.
 const builtin = @import("builtin");
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const testing = std.testing;
 const Io = std.Io;
 const net = Io.net;
@@ -509,13 +510,6 @@ test "a write larger than the socket's buffers waits for the reader instead of h
     }
 }
 
-/// The calling thread's id, read on the thread that calls: std keeps it in a
-/// thread-local, whose address an optimized caller on aarch64 would otherwise
-/// compute once and keep across the writes that move the task between threads.
-noinline fn threadNow() std.Thread.Id {
-    return std.Thread.getCurrentId();
-}
-
 /// Writes nothing to `file` over and over: each completes at once, so the
 /// task spends its budget and yields, without ever waiting. Records the
 /// threads it ran on other than `home`.
@@ -523,7 +517,7 @@ fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value
     while (!stop.load(.acquire)) {
         // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
         _ = (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming catch {};
-        if (threadNow() != home) _ = away.fetchAdd(1, .monotonic);
+        if (current_thread.now() != home) _ = away.fetchAdd(1, .monotonic);
     }
 }
 
@@ -542,7 +536,7 @@ test "a task behind the root on the home processor is offered to an idle process
         var away: std.atomic.Value(u32) = .init(0);
         // The root stays on the home processor; the task it starts queues
         // behind it there, and the idle worker takes it.
-        var task = try io.concurrent(yieldAway, .{ io, write_end, std.Thread.getCurrentId(), &stop, &away });
+        var task = try io.concurrent(yieldAway, .{ io, write_end, current_thread.now(), &stop, &away });
         // Bounded by time, not by a count of writes: an optimized build makes a
         // million of them in less than an idle worker takes to wake.
         const until = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));

@@ -3,6 +3,7 @@
 //! idle fake (`Threads`, real time); shakedown's conformance suite on both.
 const builtin = @import("builtin");
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const getaddrinfo = @import("sys/getaddrinfo.zig");
 const testing = std.testing;
 const Io = std.Io;
@@ -252,7 +253,7 @@ fn parkMany(io: Io, n: usize, home: std.Thread.Id) !void {
     for (0..n) |_| {
         // A wait that returns at once is still a trip through the scheduler.
         try io.futexWaitTimeout(u32, &word, 0, .{ .duration = .{ .raw = .fromNanoseconds(1), .clock = .awake } });
-        if (std.Thread.getCurrentId() != home) return error.RootMigrated;
+        if (current_thread.now() != home) return error.RootMigrated;
     }
 }
 
@@ -269,7 +270,7 @@ test "the root never leaves the home thread, however often it waits" {
     var stop: std.atomic.Value(bool) = .init(false);
     var group: Io.Group = .init;
     for (0..8) |_| try group.concurrent(io, busy, .{ io, &stop });
-    try parkMany(io, 2000, std.Thread.getCurrentId());
+    try parkMany(io, 2000, current_thread.now());
     stop.store(true, .release);
     try group.await(io);
 }
@@ -465,11 +466,11 @@ test "lane calls one after another from a task and from the root keep their fram
         defer t.deinit();
         const io = t.io();
         // A value the caller keeps in a register across every switch.
-        const me = std.Thread.getCurrentId();
+        const me = current_thread.now();
         var task = try io.concurrent(manyCalls, .{ io, 5000 });
         try task.await(io);
         try manyCalls(io, 5000);
-        try testing.expectEqual(me, std.Thread.getCurrentId());
+        try testing.expectEqual(me, current_thread.now());
     }
 }
 

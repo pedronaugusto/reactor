@@ -1,5 +1,6 @@
 //! Raw offloads retain lane refusal and caller ownership across thread boundaries.
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const testing = std.testing;
 const Io = std.Io;
 const shakedown = @import("shakedown");
@@ -35,7 +36,7 @@ const Outside = struct {
         c.outcome = checkAccepted(c.io);
     }
     fn threadId() std.Thread.Id {
-        return std.Thread.getCurrentId();
+        return current_thread.now();
     }
     fn hookId(context: *anyopaque) void {
         const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the retained test result
@@ -101,11 +102,11 @@ const Cross = struct {
     }
     fn source(target_io: Io) !void {
         const owner = Scheduler.processor().?.scheduler;
-        const thread = std.Thread.getCurrentId();
+        const thread = current_thread.now();
         _ = try Outside.offloadId(target_io);
         try testing.expectEqual(owner, Scheduler.processor().?.scheduler);
         // Root-only operations remain on their original home thread too.
-        if (Scheduler.current().?.kind == .root) try testing.expectEqual(thread, std.Thread.getCurrentId());
+        if (Scheduler.current().?.kind == .root) try testing.expectEqual(thread, current_thread.now());
         var id: std.Thread.Id = thread;
         try Outside.hookedId(target_io, &id);
         try testing.expectEqual(owner, Scheduler.processor().?.scheduler);

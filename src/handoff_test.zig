@@ -4,6 +4,7 @@
 //! recorded as a stall.
 const builtin = @import("builtin");
 const std = @import("std");
+const current_thread = @import("testing/thread.zig");
 const testing = std.testing;
 const Io = std.Io;
 const posix = std.posix;
@@ -120,19 +121,19 @@ test "the root stuck in a blocking file call lends the home processor to a spare
     var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.mem.printSentinel(&path_buffer, "{s}/pipe", .{dir_buffer[0..dir_len]}, 0);
     try makeFifo(path);
-    const home = std.Thread.getCurrentId();
+    const home = current_thread.now();
     for (0..3) |_| {
         // The root's own reader: the writer waits in the home processor's
         // LIFO slot, which only a handoff lets run.
         var rendezvous: Rendezvous = .{ .path = path };
         try readSide(io, &rendezvous);
         try testing.expectEqual(@as(u16, 0), rendezvous.blocked_on);
-        try testing.expectEqual(home, std.Thread.getCurrentId());
+        try testing.expectEqual(home, current_thread.now());
         // A task on the home processor: it leaves the home thread, which
         // gets the processor back for the root.
         var task = try io.concurrent(readSide, .{ io, &rendezvous });
         try task.await(io);
-        try testing.expectEqual(home, std.Thread.getCurrentId());
+        try testing.expectEqual(home, current_thread.now());
     }
     try testing.expect(r.stats().handoffs >= 6);
 }
@@ -215,7 +216,7 @@ test "the root computing in its host lends the home processor, and the task it s
     try computingRuntime(&r, .stealing);
     defer r.deinit();
     const io = r.io();
-    const home = std.Thread.getCurrentId();
+    const home = current_thread.now();
     for (0..3) |_| {
         var c: Computing = .{};
         // The root's own: the marker waits in the home processor's LIFO
@@ -223,7 +224,7 @@ test "the root computing in its host lends the home processor, and the task it s
         try c.run(io);
         try testing.expectEqual(@as(u16, 0), c.began_on);
         try testing.expectEqual(@as(u16, 0), c.ended_on);
-        try testing.expectEqual(home, std.Thread.getCurrentId());
+        try testing.expectEqual(home, current_thread.now());
     }
     try testing.expect(r.stats().handoffs >= 3);
 }

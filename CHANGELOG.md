@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Development: the tests read the calling thread through one helper that is never inlined (`src/testing/thread.zig`). std keeps the id in a thread-local on Linux, and an optimized test that read it before and after an `Io` call that moved its task could get the thread it left on aarch64: a check that the root came back home would pass whatever happened.
+
 ## [0.7.0] - 2026-10-18
 
 ### Breaking
