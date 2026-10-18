@@ -14,6 +14,7 @@ const Loop = @import("Loop.zig");
 const Driver = @import("testing/Driver.zig");
 const Threads = @import("testing/Threads.zig");
 const Fake = @import("testing/Fake.zig");
+const op = @import("backend/op.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -319,7 +320,7 @@ test "blocking runs the call on the caller under Threaded, and on a lane under a
 
 /// A script under which readiness never comes: a wait ends only by its
 /// deadline or a cancel.
-fn neverReady(context: ?*anyopaque, o: *Loop.Op, random: *shakedown.Source) ?Loop.Op.Result {
+fn neverReady(context: ?*anyopaque, o: *op.Op, random: *shakedown.Source) ?op.Result {
     return switch (o.kind) {
         .wait => null,
         else => Fake.defaultScript(context, o, random),
@@ -544,19 +545,19 @@ test "a reaped operation can alternate kernel and timer requests without reiniti
     var loop: Loop = undefined;
     loop_internal.initWith(&loop, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 8);
     defer loop.deinit(testing.allocator);
-    var operation: Loop.Op = .{ .kind = .{ .sync = undefined } };
+    var operation: Loop.Op = .{ .backend = .{ .kind = .{ .sync = undefined } } };
     var reaped: [1]*Loop.Op = undefined;
     for (0..32) |round| {
-        operation.kind = .{ .sync = undefined };
+        operation.backend.kind = .{ .sync = undefined };
         try loop.submit(&operation);
         // Stand in for bytes a kernel backend leaves in its scratch.
-        @memset(std.mem.asBytes(&operation.state.storage.scratch), 0xa5);
+        @memset(std.mem.asBytes(&operation.backend.state.storage.scratch), 0xa5);
         var polls: usize = 0;
         while (loop.in_flight > 0 and polls < 1000) : (polls += 1) _ = try loop.run(.nowait);
         try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
         try testing.expectEqual(&operation, reaped[0]);
-        try operation.result.sync;
-        operation.kind = .{ .timer = .{ .clock = .awake, .raw = virtual.now(.awake).addDuration(.fromMilliseconds(1)) } };
+        try operation.backend.result.sync;
+        operation.backend.kind = .{ .timer = .{ .clock = .awake, .raw = virtual.now(.awake).addDuration(.fromMilliseconds(1)) } };
         try loop.submit(&operation);
         if (round % 2 == 0) {
             loop.cancel(&operation);
@@ -565,7 +566,7 @@ test "a reaped operation can alternate kernel and timer requests without reiniti
             _ = try loop.run(.nowait);
         }
         try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
-        if (round % 2 == 0) try testing.expectError(error.Canceled, operation.result.timer) else try operation.result.timer;
+        if (round % 2 == 0) try testing.expectError(error.Canceled, operation.backend.result.timer) else try operation.backend.result.timer;
     }
 }
 

@@ -37,12 +37,12 @@ pub fn childWait(userdata: ?*anyopaque, child: *Child) Child.WaitError!Child.Ter
             }
         };
         var request: Request = .{ .pid = child.id.? };
-        var op: Loop.Op = .{ .kind = .{ .raw = .{ .uring = .{ .context = &request, .prepare = Request.prepare } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &request, .prepare = Request.prepare } } } } };
         perform.run(&r.scheduler, &op, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return onLane(r, child),
         };
-        const result = op.result.raw catch return error.Canceled;
+        const result = op.backend.result.raw catch return error.Canceled;
         if (result.uring == 0) return reap(r, child);
         // Opcode support does not guarantee support for every child type.
     }

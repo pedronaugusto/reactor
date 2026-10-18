@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 
 const backend = @import("../backend.zig");
 const pending = backend.pending;
-const Loop = @import("../Loop.zig");
+const op = backend.op;
 const Source = @import("shakedown").Source;
 const clock = @import("../clock.zig");
 
@@ -30,7 +30,7 @@ pub const Mode = union(enum) {
 /// Makes the result of an operation the seed decided to complete; null
 /// leaves it in flight. The default completes reads with nothing and
 /// writes in full.
-pub const Script = *const fn (context: ?*anyopaque, o: *Loop.Op, random: *Source) ?Loop.Op.Result;
+pub const Script = *const fn (context: ?*anyopaque, o: *op.Op, random: *Source) ?op.Result;
 
 gpa: Allocator,
 mode: Mode,
@@ -39,7 +39,7 @@ source: Source,
 shared_source: ?*Source = null,
 script: Script = defaultScript,
 script_context: ?*anyopaque = null,
-ops: std.ArrayList(*Loop.Op) = .empty,
+ops: std.ArrayList(*op.Op) = .empty,
 batch: std.ArrayList(Entry) = .empty,
 woken: std.atomic.Value(u32) = .init(0),
 /// One-based failing submission, shared by ordinary and batch operations.
@@ -81,17 +81,13 @@ fn of(context: *anyopaque) *Fake {
     return @ptrCast(@alignCast(context)); // safe: the context is the fake, as `custom` made it
 }
 
-fn opOf(o: *anyopaque) *Loop.Op {
-    return @ptrCast(@alignCast(o)); // safe: the loop hands a custom backend its own `Op`s
-}
-
-fn submit(context: *anyopaque, o: *anyopaque) error{ SystemResources, Unexpected }!void {
+fn submit(context: *anyopaque, o: *op.Op) error{ SystemResources, Unexpected }!void {
     const f = of(context);
     try f.submitting();
-    f.ops.append(f.gpa, opOf(o)) catch @panic("reactor's fake: out of memory");
+    f.ops.append(f.gpa, o) catch @panic("reactor's fake: out of memory");
 }
 
-fn cancel(context: *anyopaque, o: *anyopaque) void {
+fn cancel(context: *anyopaque, o: *op.Op) void {
     _ = context;
     _ = o; // `Loop.cancel` marked it; the next poll decides.
 }
@@ -173,7 +169,7 @@ fn pollBatch(f: *Fake, sink: backend.Custom.Sink, random: *Source) usize {
             continue;
         }
         if (random.below(2) == 0) {
-            var o: Loop.Op = .{ .kind = .{ .io = e.operation } };
+            var o: op.Op = .{ .kind = .{ .io = e.operation } };
             if (f.script(f.script_context, &o, random)) |result| {
                 _ = f.batch.swapRemove(i);
                 const r = result.io catch unreachable; // unreachable: a script completes an operation, it never cancels it
@@ -223,7 +219,7 @@ fn pollIdle(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink) void {
     f.woken.store(0, .release);
 }
 
-fn canceledResult(o: *const Loop.Op) Loop.Op.Result {
+fn canceledResult(o: *const op.Op) op.Result {
     return switch (o.kind) {
         .io => .{ .io = error.Canceled },
         .accept => .{ .accept = error.Canceled },
@@ -241,7 +237,7 @@ fn canceledResult(o: *const Loop.Op) Loop.Op.Result {
 
 /// Reads complete with nothing (end of stream), writes in full, the rest
 /// with success.
-pub fn defaultScript(context: ?*anyopaque, o: *Loop.Op, random: *Source) ?Loop.Op.Result {
+pub fn defaultScript(context: ?*anyopaque, o: *op.Op, random: *Source) ?op.Result {
     _ = context;
     _ = random;
     return switch (o.kind) {

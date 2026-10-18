@@ -23,6 +23,7 @@ const posix = std.posix;
 const Threaded = Io.Threaded;
 
 const op = @import("op.zig");
+const scratch = @import("uring/scratch.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const timeline = @import("../clock.zig");
@@ -61,23 +62,7 @@ pub const Options = struct {
 pub const InitError = error{ BackendUnavailable, SystemResources, Unexpected };
 
 /// What an operation keeps while the kernel holds it.
-pub const Scratch = union {
-    message: Message,
-    address: Address,
-    timespec: linux.kernel_timespec,
-};
-
-const Message = struct {
-    header: linux.msghdr,
-    iovecs: [Threaded.max_iovecs_len]posix.iovec,
-    address: Threaded.PosixAddress,
-    splat: [Threaded.splat_buffer_size]u8,
-};
-
-const Address = struct {
-    storage: extern union { ip: Threaded.PosixAddress, unix: posix.sockaddr.un },
-    len: posix.socklen_t,
-};
+pub const Scratch = scratch.Scratch;
 
 const Tag = enum(u3) {
     /// An operation's completion: the address of its `Op`.
@@ -323,7 +308,7 @@ pub fn consumePublished(u: *Uring) void {
 
 /// Hands `o` to the ring; true when it was made at once instead, its
 /// result set (a socket write the send buffer had room for).
-pub fn submit(u: *Uring, o: anytype) error{ SystemResources, Unexpected }!bool {
+pub fn submit(u: *Uring, o: *op.Op) error{ SystemResources, Unexpected }!bool {
     if (o.kind == .io and o.kind.io == .net_write and u.sendsNow(o.kind.io.net_write)) if (results.attempt(o.kind.io)) |result| {
         o.result = .{ .io = result };
         return true;
@@ -349,7 +334,7 @@ fn sendsNow(u: *const Uring, w: Io.Operation.NetWrite) bool {
 }
 
 /// Queues `o` on the ring; its completion comes back through `poll`.
-fn queue(u: *Uring, o: anytype) void {
+fn queue(u: *Uring, o: *op.Op) void {
     // The kernel's linked timeout is two more entries and a timer in the
     // kernel for each operation, and most operations finish before their
     // deadline: a read under a deadline lost 60% of its rate on a two-thread
@@ -471,7 +456,7 @@ fn reserveEntries(u: *Uring, count: u32) void {
 }
 
 /// A kernel without multishot support uses ordinary accept requests.
-pub fn submitSingleAccept(u: *Uring, o: anytype) void {
+pub fn submitSingleAccept(u: *Uring, o: *op.Op) void {
     o.state.storage.scratch = .{ .io_uring = .{ .address = undefined } };
     const a = &o.state.storage.scratch.io_uring.address;
     a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
@@ -483,7 +468,7 @@ pub fn submitSingleAccept(u: *Uring, o: anytype) void {
 /// The most one read or write moves: Linux's own cap.
 const max_rw = 0x7ffff000;
 
-fn submitIo(u: *Uring, o: anytype, operation: *const Io.Operation, ud: u64) void {
+fn submitIo(u: *Uring, o: *op.Op, operation: *const Io.Operation, ud: u64) void {
     const sqe = u.entry();
     switch (operation.*) {
         // A read fills every buffer it is given, as `Threaded`'s does: a
@@ -564,7 +549,7 @@ fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
     sqe.user_data = ud;
 }
 
-pub fn cancel(u: *Uring, o: anytype) void {
+pub fn cancel(u: *Uring, o: *op.Op) void {
     if (o.kind == .accept and u.accepts.cancel(o)) return;
     const sqe = u.entry();
     sqe.prep_cancel(userData(@intFromPtr(o), .op), 0); // safe: the operation's own user data
@@ -709,8 +694,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     }
     switch (tag) {
         .op => {
-            const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
-            const o: *Op = @ptrFromInt(ud); // safe: submit retains this op through every completion
+            const o: *op.Op = @ptrFromInt(ud); // safe: submit retains this op through every completion
             o.state.uring.completed(cqe);
             u.settle(o, sink);
         },
@@ -720,8 +704,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
                 u.message_pending.store(false, .release);
                 return sink.notified();
             }
-            const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
-            const o: *Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
+            const o: *op.Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
             o.state.uring.timeout_pending = false;
             if (cqe.err() == .TIME) o.state.uring.timed_out = true;
             u.settle(o, sink);
@@ -764,7 +747,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     }
 }
 
-fn settle(u: *Uring, o: anytype, sink: anytype) void {
+fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
     const ownership = &o.state.uring;
     if (!ownership.ready()) return;
     const primary = ownership.primary;
@@ -788,7 +771,7 @@ fn settle(u: *Uring, o: anytype, sink: anytype) void {
 }
 
 /// What a completion leaves to do: the rest of a multi-message send.
-fn finishOp(u: *Uring, o: anytype, cqe: linux.io_uring_cqe) void {
+fn finishOp(u: *Uring, o: *op.Op, cqe: linux.io_uring_cqe) void {
     _ = u;
     _ = cqe;
     switch (o.kind) {

@@ -38,6 +38,7 @@ const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
 const Threaded = Io.Threaded;
 
+const op = @import("op.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const timeline = @import("../clock.zig");
@@ -45,6 +46,7 @@ const Notifications = @import("iocp/Notifications.zig");
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
 const afd = @import("../sys/afd.zig");
+const scratch = @import("iocp/scratch.zig");
 
 pub const Options = struct {
     /// The host's port: entries reach the loop through `complete`, and the
@@ -84,61 +86,9 @@ fn contextOf(address: usize, tag: Tag) usize {
 }
 
 /// What an operation keeps while the kernel holds it.
-pub const Scratch = struct {
-    /// Where the kernel writes the outcome.
-    iosb: windows.IO_STATUS_BLOCK = undefined,
-    /// The loop that submitted it, which finishes it.
-    owner: *Iocp,
-    /// The handle the kernel holds the call on.
-    target: Handle = undefined,
-    stage: Stage = .main,
-    /// A multi-message send: messages sent so far.
-    sent: u32 = 0,
-    request: Request = .{ .none = {} },
-};
-
-const Stage = enum(u8) {
-    /// One request, whose outcome is the result.
-    main,
-    /// An accept waiting for a connection.
-    listen,
-    /// An accept taking the connection the wait reported.
-    accept,
-    /// A send of several datagrams, one request each.
-    send,
-    /// A wait packet: an object's signal, or a timer of its own.
-    packet,
-    /// Readiness of a socket.
-    poll,
-};
-
-/// The memory a request is read from or written to after the call.
-const Request = union {
-    none: void,
-    receive: struct { info: windows.AFD.RECV_INFO, buffers: [Threaded.max_iovecs_len]windows.AFD.WSABUF(.@"var") },
-    send: struct { info: windows.AFD.SEND_INFO, buffers: [Threaded.max_iovecs_len]windows.AFD.WSABUF(.@"const"), splat: [Threaded.splat_buffer_size]u8 },
-    datagram_in: DatagramIn,
-    datagram_out: DatagramOut,
-    connect_ip: afd.ConnectInfo(Threaded.PosixAddress),
-    connect_unix: afd.ConnectInfo(ws2_32.sockaddr.un),
-    accept: struct { response: afd.ListenResponse, info: windows.AFD.ACCEPT_INFO, socket: Handle },
-    poll: afd.PollInfo,
-    offset: i64,
-    packet: struct { packet: Handle, timer: ?Handle },
-};
-
-const DatagramIn = struct {
-    info: windows.AFD.RECV_DATAGRAM_INFO,
-    buffer: [1]windows.AFD.WSABUF(.@"var"),
-    address: Threaded.PosixAddress,
-    address_len: windows.ULONG,
-};
-
-const DatagramOut = struct {
-    info: windows.AFD.SEND_DATAGRAM_INFO,
-    buffer: [1]windows.AFD.WSABUF(.@"const"),
-    address: Threaded.PosixAddress,
-};
+pub const Scratch = scratch.Scratch;
+const DatagramIn = scratch.DatagramIn;
+const DatagramOut = scratch.DatagramOut;
 
 /// A batch operation while the kernel holds it: the batch's storage has
 /// no room for a status block beside the operation it keeps.
@@ -216,12 +166,6 @@ pub fn deinit(b: *Iocp, gpa: Allocator) void {
     b.* = undefined;
 }
 
-/// The `Op` type a sink completes.
-fn OpOf(comptime SinkPtr: type) type {
-    const Sink = @typeInfo(SinkPtr).pointer.child;
-    return @typeInfo(@typeInfo(@TypeOf(Sink.complete)).@"fn".param_types[1].?).pointer.child;
-}
-
 /// Binds `handle` to `bindingPort` unless it is bound already.
 fn bindHandle(b: *Iocp, handle: Handle) bool {
     return sys.bindOnce(handle, b.bindingPort(), key());
@@ -237,8 +181,8 @@ pub fn bindingPort(b: *const Iocp) Handle {
 
 /// Hands `o` to the kernel. True when it finished at once: its result is
 /// set, and no entry follows.
-pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
-    o.state.storage.scratch = .{ .iocp = .{ .owner = b } };
+pub fn submit(b: *Iocp, o: *op.Op) error{ SystemResources, Unexpected }!bool {
+    o.state.storage.scratch = .{ .iocp = .{ .owner = &b.port } };
     const s = &o.state.storage.scratch.iocp;
     const context: ?*anyopaque = @ptrFromInt(contextOf(@intFromPtr(o), .op)); // safe: read back as the `Op` in `dispatch`
     switch (o.kind) {
@@ -353,7 +297,7 @@ pub fn submit(b: *Iocp, o: anytype) error{ SystemResources, Unexpected }!bool {
     }
 }
 
-fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
+fn submitIo(b: *Iocp, o: *op.Op, operation: *const Io.Operation, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
     const s = &o.state.storage.scratch.iocp;
     switch (operation.*) {
         .net_read => |r| {
@@ -427,7 +371,7 @@ fn submitIo(b: *Iocp, o: anytype, operation: *const Io.Operation, context: ?*any
 
 /// A `real` or `boot` timer: a waitable timer of its own, absolute for
 /// `real`, whose packet completes the operation.
-fn submitTimer(b: *Iocp, o: anytype, deadline: Io.Clock.Timestamp, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
+fn submitTimer(b: *Iocp, o: *op.Op, deadline: Io.Clock.Timestamp, context: ?*anyopaque) error{ SystemResources, Unexpected }!bool {
     const s = &o.state.storage.scratch.iocp;
     const timer, _ = try sys.createTimer();
     errdefer sys.close(timer);
@@ -453,7 +397,7 @@ fn system() Io {
 }
 
 /// A handle that cannot be bound to the port: the operation ends at once.
-fn refuse(b: *Iocp, o: anytype) bool {
+fn refuse(b: *Iocp, o: *op.Op) bool {
     _ = b;
     o.result = results.of(o, .INVALID_HANDLE, 0);
     return true;
@@ -461,7 +405,7 @@ fn refuse(b: *Iocp, o: anytype) bool {
 
 /// After a call returned `status`: true when the operation is over (its
 /// result set); false when an entry follows.
-fn settle(b: *Iocp, o: anytype, status: Status) bool {
+fn settle(b: *Iocp, o: *op.Op, status: Status) bool {
     if (results.entryFollows(status)) return false;
     // The status block is written for a call that succeeded at once, and
     // left alone for one that failed at once.
@@ -472,7 +416,7 @@ fn settle(b: *Iocp, o: anytype, status: Status) bool {
 /// The current request of `o` ended with `status`: true when the
 /// operation is over (its result set); false when its next request is
 /// under way.
-fn advance(b: *Iocp, o: anytype, first_status: Status, first_information: usize) bool {
+fn advance(b: *Iocp, o: *op.Op, first_status: Status, first_information: usize) bool {
     const s = &o.state.storage.scratch.iocp;
     const context: ?*anyopaque = @ptrFromInt(contextOf(@intFromPtr(o), .op)); // safe: read back as the `Op` in `dispatch`
     var status = first_status;
@@ -555,7 +499,7 @@ fn advance(b: *Iocp, o: anytype, first_status: Status, first_information: usize)
 /// went is kept. A cancel that ended it before any went is the
 /// cancelation point's; after some went, the send reports them and the
 /// cancel stays for the next point, as std's does.
-fn sendEnded(o: anytype, status: Status) Io.Cancelable!Io.Operation.Result {
+fn sendEnded(o: *op.Op, status: Status) Io.Cancelable!Io.Operation.Result {
     const sent = o.state.storage.scratch.iocp.sent;
     const ended = results.ended(status);
     if (ended and o.state.canceled) {
@@ -567,7 +511,7 @@ fn sendEnded(o: anytype, status: Status) Io.Cancelable!Io.Operation.Result {
 
 /// Asks the kernel to end `o`. True when it ended here: its result is set
 /// and no entry follows.
-pub fn cancel(b: *Iocp, o: anytype) bool {
+pub fn cancel(b: *Iocp, o: *op.Op) bool {
     _ = b;
     const s = &o.state.storage.scratch.iocp;
     switch (s.stage) {
@@ -758,14 +702,14 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
     const address = e.context & ~@as(usize, 7);
     switch (@as(Tag, @fromBackingInt(@as(u3, @truncate(e.context))))) {
         .op => {
-            const o: *OpOf(@TypeOf(sink)) = @ptrFromInt(address);
+            const o: *op.Op = @ptrFromInt(address); // safe: `submit` stored this operation's address
             const s: *Scratch = &o.state.storage.scratch.iocp;
-            if (s.owner != b) return s.owner.forward(e);
+            if (s.owner != &b.port) return forward(s.owner.*, e);
             if (b.advance(o, e.iosb.u.Status, e.iosb.Information)) sink.complete(o);
         },
         .slot => {
             const slot: *Slot = @ptrFromInt(address);
-            if (slot.owner != b) return slot.owner.forward(e);
+            if (slot.owner != b) return forward(slot.owner.port, e);
             const token = slot.token;
             const result = outcome(slot, pending.unpack(token.pending()), e.iosb.u.Status, e.iosb.Information);
             b.release(slot);
@@ -778,8 +722,8 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
 
 /// An entry for an operation this loop did not submit: its handle is bound
 /// to this loop's port. It goes to the loop that did.
-fn forward(owner: *Iocp, e: sys.Entry) void {
-    sys.post(owner.port, e.key, e.context, e.iosb.u.Status, e.iosb.Information) catch |err|
+fn forward(port: Handle, e: sys.Entry) void {
+    sys.post(port, e.key, e.context, e.iosb.u.Status, e.iosb.Information) catch |err|
         std.debug.panic("reactor: an entry could not be passed on to its loop: {t}", .{err});
 }
 

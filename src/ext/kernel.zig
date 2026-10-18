@@ -33,9 +33,9 @@ pub fn submit(io: Io, comptime prepare: anytype, context: anytype, timeout: Io.T
             sqe.* = c.*;
         }
     };
-    var op: Loop.Op = .{ .kind = .{ .raw = .{ .uring = .{ .context = &prepared, .prepare = Thunk.prep } } } };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &prepared, .prepare = Thunk.prep } } } } };
     try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
-    return (try op.result.raw).uring;
+    return (try op.backend.result.raw).uring;
 }
 
 /// These requests cannot fit a task-owned, one-completion lifetime.
@@ -76,9 +76,9 @@ pub fn overlapped(io: Io, comptime start: anytype, handle: windows.HANDLE, conte
             };
             // The context parameter (a pointer value included) stays in this frame until the call ends;
             // the kernel's start reads it through its address, never writes it.
-            var op: Loop.Op = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
+            var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
             try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
-            return (try op.result.raw).windows;
+            return (try op.backend.result.raw).windows;
         }
     }
     var request = try Overlapped.init();

@@ -17,17 +17,17 @@ pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Fa
     var canceled = false;
     if (request.pending) {
         if (Scheduler.processor()) |p| {
-            var op: Loop.Op = .{ .kind = .{ .wait = .{ .object = request.overlapped.event.? } } };
+            var op: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .object = request.overlapped.event.? } } } };
             perform.run(p.scheduler, &op, .{}) catch |err| {
                 request.cancel();
                 canceled = err == error.Canceled;
                 // Canceling the wait packet does not release Winsock's request.
                 // Reap its event on the port before the stack frame can leave.
-                var drain: Loop.Op = .{ .kind = .{ .wait = .{ .object = request.overlapped.event.? } } };
+                var drain: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .object = request.overlapped.event.? } } } };
                 perform.run(p.scheduler, &drain, .{ .cancelable = false }) catch return error.Unexpected;
-                drain.result.wait catch return error.Unexpected;
+                drain.backend.result.wait catch return error.Unexpected;
             };
-            if (!canceled) op.result.wait catch return error.Unexpected;
+            if (!canceled) op.backend.result.wait catch return error.Unexpected;
         } else {
             while (win32.WaitForSingleObject(request.overlapped.event.?, 0) == win32.wait_timeout) {
                 io.sleep(.fromMilliseconds(1), .awake) catch {

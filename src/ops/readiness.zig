@@ -57,13 +57,13 @@ const Waiter = struct {
         _ = l;
         const w: *Waiter = @ptrFromInt(o.user_data); // safe: `first` stored the waiter's address
         const index = (@intFromPtr(o) - @intFromPtr(w.ops.ptr)) / @sizeOf(Loop.Op); // safe: `o` is an element of `w.ops`
-        w.processor.release(handleOf(o.kind.wait));
-        if (o.result.wait) |_| {
+        w.processor.release(handleOf(o.backend.kind.wait));
+        if (o.backend.result.wait) |_| {
             w.first = if (w.first) |old| @min(old, index) else index;
         } else |err| switch (err) {
             // Ended by this wait's own cancels, or, when nobody here asked,
             // by a close of the descriptor: a read or write now reports it.
-            error.Canceled => if (!o.state.canceled and w.first == null) {
+            error.Canceled => if (!o.backend.state.canceled and w.first == null) {
                 w.first = index;
             },
             else => |e| if (w.failure == null) {
@@ -103,7 +103,7 @@ pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.
     // Every completion comes back to this processor, which resumes the task.
     t.pins += 1;
     for (members, w.ops, 0..) |m, *o, i| {
-        o.* = .{ .kind = .{ .wait = m }, .callback = Waiter.done, .user_data = @intFromPtr(&w) }; // safe: read back by the callback while this frame waits
+        o.* = .{ .backend = .{ .kind = .{ .wait = m } }, .callback = Waiter.done, .user_data = @intFromPtr(&w) }; // safe: read back by the callback while this frame waits
         p.hold(handleOf(m));
         p.loop.submit(o) catch {
             p.release(handleOf(m));

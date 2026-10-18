@@ -51,7 +51,7 @@ const Waiter = struct {
     fn done(l: *Loop, o: *Loop.Op) void {
         _ = l;
         const w: *Waiter = @ptrFromInt(o.user_data); // safe: `run` stored the waiter's address
-        if (descriptorOf(o.kind)) |fd| w.processor.release(fd);
+        if (descriptorOf(o.backend.kind)) |fd| w.processor.release(fd);
         w.scheduler.ready(w.task, .completed);
     }
 
@@ -70,7 +70,7 @@ const Waiter = struct {
 /// clocks' timers are the kernel's), since the timer lives in the task's
 /// frame.
 pub const Deadline = struct {
-    op: Loop.Op = .{ .kind = .{ .timer = undefined } },
+    op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = undefined } } },
     /// On the processor, when the deadline passes before `disarm`.
     fire: *const fn (d: *Deadline) void,
     scheduler: *Scheduler = undefined,
@@ -86,7 +86,7 @@ pub const Deadline = struct {
         d.scheduler = s;
         d.processor = p;
         d.task = p.current.?;
-        d.op.kind = .{ .timer = at };
+        d.op.backend.kind = .{ .timer = at };
         d.op.callback = callback;
         p.loop.submit(&d.op) catch return false;
         d.task.pins += 1;
@@ -101,7 +101,7 @@ pub const Deadline = struct {
             d.waiting = false;
             return d.scheduler.ready(d.task, .completed);
         }
-        if (o.result.timer) |_| d.fire(d) else |_| {}
+        if (o.backend.result.timer) |_| d.fire(d) else |_| {}
     }
 
     /// From the task that armed it: no `fire` after this, and the loop
@@ -111,11 +111,11 @@ pub const Deadline = struct {
         d.armed = false;
         const p = d.processor;
         assert(Scheduler.processor() == p);
-        if (d.op.state.phase != .idle) {
+        if (d.op.backend.state.phase != .idle) {
             p.loop.cancel(&d.op);
             // A wheel timer is delivered inside the cancel; the kernel's
             // comes back later.
-            if (d.op.state.phase != .idle) {
+            if (d.op.backend.state.phase != .idle) {
                 d.waiting = true;
                 Scheduler.park(null);
             }
@@ -131,15 +131,15 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     const p = Scheduler.processor().?;
     const t = p.current.?;
     const previous_operation = t.operation;
-    t.operation = std.meta.activeTag(o.kind);
+    t.operation = std.meta.activeTag(o.backend.kind);
     defer t.operation = previous_operation;
     var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .o = o };
     o.callback = Waiter.done;
     o.user_data = @intFromPtr(&w); // safe: read back by the callback while this frame waits
     if (options.cancelable) try t.enterWait(&w.hook);
-    const fd = descriptorOf(o.kind);
+    const fd = descriptorOf(o.backend.kind);
     if (fd) |d| p.hold(d);
-    if (builtin.os.tag == .linux) o.linked = .of(options.deadline);
+    if (builtin.os.tag == .linux) o.backend.linked = .of(options.deadline);
     const done = p.loop.start(o) catch {
         if (fd) |d| p.release(d);
         Scheduler.leaveWait(t);
@@ -153,7 +153,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
         s.spend();
         return;
     }
-    if (!o.state.uring.timeout_pending) if (options.deadline) |at| {
+    if (!o.backend.state.uring.timeout_pending) if (options.deadline) |at| {
         // No room for the timer: end the operation now.
         if (!w.deadline.arm(s, at)) {
             w.timed_out = true;
@@ -165,7 +165,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     Scheduler.leaveWait(t);
     if (!canceledResult(o)) return;
     if (w.requested) return t.acknowledge();
-    if (w.timed_out or o.state.uring.timed_out) return error.Timeout;
+    if (w.timed_out or o.backend.state.uring.timed_out) return error.Timeout;
 }
 
 /// Runs an accept on its listener's one processor. Persistent accept queues
@@ -213,9 +213,9 @@ const RemoteAccept = struct {
         const o = request.op;
         o.callback = done;
         o.user_data = @intFromPtr(request); // safe: retained until the completion callback
-        p.hold(o.kind.accept);
+        p.hold(o.backend.kind.accept);
         p.loop.submit(o) catch {
-            p.release(o.kind.accept);
+            p.release(o.backend.kind.accept);
             request.failure = error.SystemResources;
             return request.scheduler.ready(request.task, .completed);
         };
@@ -224,7 +224,7 @@ const RemoteAccept = struct {
 
     fn done(_: *Loop, o: *Loop.Op) void {
         const request: *RemoteAccept = @ptrFromInt(o.user_data); // safe: submit retained the request
-        request.processor.release(o.kind.accept);
+        request.processor.release(o.backend.kind.accept);
         request.scheduler.ready(request.task, .completed);
     }
 
@@ -268,24 +268,24 @@ pub fn descriptorOf(kind: Loop.Op.Kind) ?Io.File.Handle {
 
 /// Whether a completed operation's result is the kernel's cancel.
 fn canceledResult(o: *const Loop.Op) bool {
-    if (!o.state.canceled) return false;
-    return switch (o.kind) {
-        .io => if (o.result.io) |_| false else |err| err == error.Canceled,
-        .accept => if (o.result.accept) |_| false else |err| err == error.Canceled,
-        .connect => if (o.result.connect) |_| false else |err| err == error.Canceled,
-        .read_at => if (o.result.read_at) |_| false else |err| err == error.Canceled,
-        .write_at => if (o.result.write_at) |_| false else |err| err == error.Canceled,
-        .sync => if (o.result.sync) |_| false else |err| err == error.Canceled,
+    if (!o.backend.state.canceled) return false;
+    return switch (o.backend.kind) {
+        .io => if (o.backend.result.io) |_| false else |err| err == error.Canceled,
+        .accept => if (o.backend.result.accept) |_| false else |err| err == error.Canceled,
+        .connect => if (o.backend.result.connect) |_| false else |err| err == error.Canceled,
+        .read_at => if (o.backend.result.read_at) |_| false else |err| err == error.Canceled,
+        .write_at => if (o.backend.result.write_at) |_| false else |err| err == error.Canceled,
+        .sync => if (o.backend.result.sync) |_| false else |err| err == error.Canceled,
         .close, .abort => false,
-        .timer => if (o.result.timer) |_| false else |err| err == error.Canceled,
-        .wait => if (o.result.wait) |_| false else |err| err == error.Canceled,
-        .raw => if (o.result.raw) |_| false else |err| err == error.Canceled,
+        .timer => if (o.backend.result.timer) |_| false else |err| err == error.Canceled,
+        .wait => if (o.backend.result.wait) |_| false else |err| err == error.Canceled,
+        .raw => if (o.backend.result.raw) |_| false else |err| err == error.Canceled,
     };
 }
 
 /// Sleeps until `at` on the running task's processor.
 pub fn sleep(s: *Scheduler, at: Io.Clock.Timestamp) error{ Canceled, SystemResources }!void {
-    var o: Loop.Op = .{ .kind = .{ .timer = at } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .timer = at } } };
     run(s, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
@@ -320,7 +320,7 @@ const Elsewhere = struct {
     errand: Scheduler.Errand = .{ .run = start },
     op: *Loop.Op,
     deadline: ?Io.Clock.Timestamp,
-    timer: Loop.Op = .{ .kind = .{ .timer = undefined } },
+    timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = undefined } } },
     processor: *Processor = undefined,
     /// Completions still to come: the operation's, and its timer's.
     left: u8 = 1,
@@ -334,7 +334,7 @@ const Elsewhere = struct {
         const o = e.op;
         o.callback = finished;
         o.user_data = @intFromPtr(e); // safe: read back by `finished` while the thread waits
-        const fd = descriptorOf(o.kind);
+        const fd = descriptorOf(o.backend.kind);
         if (fd) |d| p.hold(d);
         p.loop.submit(o) catch {
             if (fd) |d| p.release(d);
@@ -342,7 +342,7 @@ const Elsewhere = struct {
             return e.signal();
         };
         const at = e.deadline orelse return;
-        e.timer.kind = .{ .timer = at };
+        e.timer.backend.kind = .{ .timer = at };
         e.timer.callback = expired;
         if (p.loop.submit(&e.timer)) |_| {
             e.left += 1;
@@ -355,7 +355,7 @@ const Elsewhere = struct {
 
     fn finished(l: *Loop, o: *Loop.Op) void {
         const e: *Elsewhere = @ptrFromInt(o.user_data); // safe: `start` stored it
-        if (descriptorOf(o.kind)) |fd| e.processor.release(fd);
+        if (descriptorOf(o.backend.kind)) |fd| e.processor.release(fd);
         // The timer still armed: its cancel completes it, now or later.
         if (e.left == 2) l.cancel(&e.timer);
         e.settle();
@@ -363,7 +363,7 @@ const Elsewhere = struct {
 
     fn expired(l: *Loop, t: *Loop.Op) void {
         const e: *Elsewhere = @alignCast(@fieldParentPtr("timer", t)); // safe: the field belongs to this record
-        if (t.result.timer) |_| {
+        if (t.backend.result.timer) |_| {
             e.timed_out = true;
             l.cancel(e.op);
         } else |_| {}

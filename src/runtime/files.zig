@@ -39,13 +39,13 @@ fn request(core: *Core, prepared: *linux.io_uring_sqe) RequestError!linux.io_uri
         }
     };
     while (true) {
-        var op: Loop.Op = .{ .kind = .{ .raw = .{ .uring = .{ .context = prepared, .prepare = Prep.copy } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = prepared, .prepare = Prep.copy } } } } };
         perform.run(&core.scheduler, &op, .{}) catch |err| return switch (err) {
             error.Timeout => unreachable,
             error.Canceled => error.Canceled,
             error.SystemResources => error.SystemResources,
         }; // unreachable: no deadline
-        const cqe: linux.io_uring_cqe = .{ .res = (try op.result.raw).uring, .flags = 0, .user_data = 0 };
+        const cqe: linux.io_uring_cqe = .{ .res = (try op.backend.result.raw).uring, .flags = 0, .user_data = 0 };
         if (cqe.err() != .INTR) return cqe;
     }
 }

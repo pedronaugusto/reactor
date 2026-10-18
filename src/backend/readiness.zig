@@ -40,12 +40,12 @@ const socket = @import("../sys/socket.zig");
 const closes = @import("readiness/closes.zig");
 const records_ = @import("readiness/records.zig");
 
-pub const Direction = calls.Direction;
+pub const Waiter = @import("readiness/Waiter.zig");
+pub const Direction = records_.Direction;
 pub const Directions = records_.Directions;
-pub const How = calls.How;
-
-/// The clocks with a kernel timer of their own.
-pub const Clock = enum(u1) { real, boot };
+pub const How = Waiter.How;
+pub const Clock = Waiter.Clock;
+const Record = records_.Records(Waiter).Record;
 
 /// What a poller's event says.
 pub const Decoded = union(enum) {
@@ -95,7 +95,7 @@ const Outcome = union(enum) {
     done: calls.Progress,
 };
 
-/// What a waiting operation is asked to do, by `Waiter.act`.
+/// What a waiting operation is asked to do.
 const Action = enum {
     /// Make the call; false when it would wait.
     attempt,
@@ -108,60 +108,35 @@ const Action = enum {
     fired,
 };
 
-/// Who waits: an operation (this lives in its scratch) or a batch entry.
-pub const Waiter = struct {
-    prev: ?*Waiter = null,
-    next: ?*Waiter = null,
-    /// The operation's address; 0 for a batch entry.
-    op: usize = 0,
-    /// Acts on the operation, typed for it (operations only).
-    act: ?*const fn (w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome = null,
-    record: u32 = records_.none,
-    place: Place = .none,
-    direction: Direction = .read,
-    how: How = .call,
-    /// A connect that put its socket in non-blocking mode puts it back.
-    restore: bool = false,
-    clock: Clock = .real,
-    /// A timer's deadline on its clock, in nanoseconds.
-    deadline: i96 = 0,
+/// What `action` does to the operation `w` waits for.
+fn actOn(w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
+    const o: *op.Op = @ptrFromInt(w.op); // safe: `submit` stored this operation's address
+    switch (action) {
+        .closed => o.result = closedUnder(o),
+        .fired => o.result = .{ .timer = {} },
+        .attempt, .attempt_unwaitable => {
+            const may_wait = action == .attempt;
+            switch (o.kind) {
+                .raw => unreachable, // unreachable: raw requests require io_uring or IOCP
 
-    pub const Place = enum(u2) { none, record, timer, done };
-};
-
-/// The actions on an operation of type `OpPtr`'s pointee.
-fn Acts(comptime OpPtr: type) type {
-    return struct {
-        fn act(w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
-            const o: OpPtr = @ptrFromInt(w.op); // safe: `submit` stored this operation's address
-            switch (action) {
-                .closed => o.result = closedUnder(o),
-                .fired => o.result = .{ .timer = {} },
-                .attempt, .attempt_unwaitable => {
-                    const may_wait = action == .attempt;
-                    switch (o.kind) {
-                        .raw => unreachable, // unreachable: raw requests require io_uring or IOCP
-
-                        .io => |operation| {
-                            const result = calls.make(operation, room) orelse if (may_wait) return .wait else failure(operation);
-                            o.result = .{ .io = result };
-                            return .{ .done = calls.progress(operation, result) };
-                        },
-                        .accept => o.result = .{ .accept = calls.accept(fd) orelse if (may_wait) return .wait else error.SystemResources },
-                        .connect => {
-                            o.result = .{ .connect = if (may_wait) calls.connected(fd) else error.Unexpected };
-                            if (w.restore) calls.makeBlocking(fd);
-                        },
-                        // A registration refused because the descriptor is
-                        // not open is ready, as `poll` says (`POLLNVAL`).
-                        .wait => o.result = .{ .wait = if (may_wait or calls.ready(fd, w.direction)) {} else error.Unsupported },
-                        else => unreachable, // unreachable: only these wait on a descriptor
-                    }
+                .io => |operation| {
+                    const result = calls.make(operation, room) orelse if (may_wait) return .wait else failure(operation);
+                    o.result = .{ .io = result };
+                    return .{ .done = calls.progress(operation, result) };
                 },
+                .accept => o.result = .{ .accept = calls.accept(fd) orelse if (may_wait) return .wait else error.SystemResources },
+                .connect => {
+                    o.result = .{ .connect = if (may_wait) calls.connected(fd) else error.Unexpected };
+                    if (w.restore) calls.makeBlocking(fd);
+                },
+                // A registration refused because the descriptor is
+                // not open is ready, as `poll` says (`POLLNVAL`).
+                .wait => o.result = .{ .wait = if (may_wait or calls.ready(fd, w.direction)) {} else error.Unsupported },
+                else => unreachable, // unreachable: only these wait on a descriptor
             }
-            return .{ .done = .other };
-        }
-    };
+        },
+    }
+    return .{ .done = .other };
 }
 
 pub fn Readiness(comptime Poller: type) type {
@@ -169,8 +144,6 @@ pub fn Readiness(comptime Poller: type) type {
         const Self = @This();
         const Records = records_.Records(Waiter);
         const List = records_.List(Waiter);
-
-        pub const Scratch = Waiter;
 
         /// A batch operation waiting, from a pool sized at `init`.
         const Entry = struct {
@@ -243,15 +216,14 @@ pub fn Readiness(comptime Poller: type) type {
 
         // Operations.
 
-        fn waiterOf(o: anytype) *Waiter {
+        fn waiterOf(o: *op.Op) *Waiter {
             return &@field(o.state.storage.scratch, Poller.name);
         }
 
         /// Starts `o`; true when it completed at once (its result is set).
-        pub fn submit(self: *Self, o: anytype) SubmitError!bool {
-            o.state.storage.scratch = @unionInit(@TypeOf(o.state.storage.scratch), Poller.name, .{
+        pub fn submit(self: *Self, o: *op.Op) SubmitError!bool {
+            o.state.storage.scratch = @unionInit(op.Scratch, Poller.name, .{
                 .op = @intFromPtr(o), // safe: read back as this operation by its actions
-                .act = Acts(@TypeOf(o)).act,
             });
             const w = waiterOf(o);
             switch (o.kind) {
@@ -463,7 +435,7 @@ pub fn Readiness(comptime Poller: type) type {
 
         /// Asks for `o` to end; its completion arrives at the next poll,
         /// unless it completed already (then that result stands).
-        pub fn cancel(self: *Self, o: anytype) void {
+        pub fn cancel(self: *Self, o: *op.Op) void {
             const w = waiterOf(o);
             switch (w.place) {
                 .none, .done => return,
@@ -528,8 +500,6 @@ pub fn Readiness(comptime Poller: type) type {
 
         /// Delivers completions to `sink`, waiting as `wait` allows.
         pub fn poll(self: *Self, wait: Wait, sink: anytype) PollError!void {
-            const Sink = @typeInfo(@TypeOf(sink)).pointer.child;
-            const OpPtr = @typeInfo(@TypeOf(Sink.complete)).@"fn".param_types[1].?;
             var timeout = if (self.done.head != null or self.woke) Wait.nowait else wait;
             while (try self.pump(timeout) == Poller.max_events) timeout = .nowait;
             // A wake this poll took, or one taken before it, is answered by
@@ -538,7 +508,7 @@ pub fn Readiness(comptime Poller: type) type {
             while (self.done.pop()) |w| {
                 w.place = .none;
                 if (w.op != 0) {
-                    sink.complete(@as(OpPtr, @ptrFromInt(w.op))); // safe: `submit` stored this operation's address
+                    sink.complete(@as(*op.Op, @ptrFromInt(w.op))); // safe: `submit` stored this operation's address
                 } else {
                     const e = Entry.of(w);
                     const token = e.token;
@@ -608,7 +578,7 @@ pub fn Readiness(comptime Poller: type) type {
 
         fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action, limit: usize) Outcome {
             _ = self;
-            if (w.act) |f| return f(w, fd, action, limit);
+            if (w.op != 0) return actOn(w, fd, action, limit);
             const e = Entry.of(w);
             switch (action) {
                 .closed => e.outcome = .canceled,
@@ -834,7 +804,7 @@ pub fn Readiness(comptime Poller: type) type {
 
 /// Whether the room the poller counts for `r`'s descriptor is room a write
 /// in blocking mode takes without waiting (asked once per descriptor).
-fn counts(r: anytype) bool {
+fn counts(r: *Record) bool {
     if (comptime !calls.counts_room) return false;
     if (r.room_counted == null) r.room_counted = calls.roomCounted(r.fd);
     return r.room_counted.?;
@@ -842,7 +812,7 @@ fn counts(r: anytype) bool {
 
 /// The room counted for a write in blocking mode to `r`'s descriptor, less
 /// what writes moved since; null where none is counted.
-fn countedRoom(r: anytype) ?usize {
+fn countedRoom(r: *Record) ?usize {
     const n = r.room orelse return null;
     if (!counts(r)) return null;
     return @intCast(@min(n, std.math.maxInt(usize)));
@@ -859,7 +829,7 @@ fn directions(d: Direction) Directions {
 // Results.
 
 /// The result of an operation cancelled before it completed.
-fn canceled(o: anytype) op.Result {
+fn canceled(o: *op.Op) op.Result {
     return switch (o.kind) {
         .raw => unreachable, // unreachable: raw requests never enter a readiness backend
 
@@ -878,7 +848,7 @@ fn canceled(o: anytype) op.Result {
 
 /// The result of an operation whose descriptor was closed (or aborted)
 /// under it, as io_uring reports a cancel nobody here asked for.
-fn closedUnder(o: anytype) op.Result {
+fn closedUnder(o: *op.Op) op.Result {
     return switch (o.kind) {
         .raw => unreachable, // unreachable: raw requests never enter a readiness backend
 

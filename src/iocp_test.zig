@@ -461,10 +461,10 @@ test "the loop alone on IOCP: a timer, a real-clock timer, a wake" {
     defer l.deinit(testing.allocator);
     const system = Io.Threaded.global_single_threaded.io();
     const now = Io.Clock.Timestamp.now(system, .awake);
-    var timer: Loop.Op = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) }, .user_data = 7 };
+    var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) } }, .user_data = 7 };
     try l.submit(&timer);
     const wall = Io.Clock.Timestamp.now(system, .real);
-    var real: Loop.Op = .{ .kind = .{ .timer = wall.addDuration(.{ .raw = .fromMilliseconds(3), .clock = .real }) }, .user_data = 8 };
+    var real: Loop.Op = .{ .backend = .{ .kind = .{ .timer = wall.addDuration(.{ .raw = .fromMilliseconds(3), .clock = .real }) } }, .user_data = 8 };
     try l.submit(&real);
     var out: [4]*Loop.Op = undefined;
     var seen: usize = 0;
@@ -497,7 +497,7 @@ test "a host's own port: the loop's entries handed back through complete" {
     const accepted = try server.accept(system);
     var buffer: [8]u8 = undefined;
     var data: [1][]u8 = .{&buffer};
-    var read: Loop.Op = .{ .kind = .{ .io = .{ .net_read = .{ .socket_handle = accepted.socket.handle, .data = &data } } } };
+    var read: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_read = .{ .socket_handle = accepted.socket.handle, .data = &data } } } } };
     try l.submit(&read);
     try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
     try writeAll(system, client.socket.handle, "host");
@@ -510,9 +510,9 @@ test "a host's own port: the loop's entries handed back through complete" {
     var out: [1]*Loop.Op = undefined;
     const done = l.reap(&out);
     try testing.expectEqual(@as(usize, 1), done.len);
-    try testing.expectEqual(@as(usize, 4), (try (try done[0].result.io).net_read).data_len);
+    try testing.expectEqual(@as(usize, 4), (try (try done[0].backend.result.io).net_read).data_len);
     // The socket was bound by the loop: closed through it.
-    var close: Loop.Op = .{ .kind = .{ .close = accepted.socket.handle } };
+    var close: Loop.Op = .{ .backend = .{ .kind = .{ .close = accepted.socket.handle } } };
     try l.submit(&close);
     try testing.expectEqual(@as(u32, 1), try l.run(.nowait));
 }
@@ -620,9 +620,9 @@ test "the loop alone: a socket's readiness through AFD's poll" {
     var client = try server.socket.address.connect(system, .{ .mode = .stream });
     defer client.close(system);
     const accepted = try server.accept(system);
-    var writable: Loop.Op = .{ .kind = .{ .wait = .{ .writable = accepted.socket.handle } }, .user_data = 1 };
+    var writable: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .writable = accepted.socket.handle } } }, .user_data = 1 };
     try l.submit(&writable);
-    var readable: Loop.Op = .{ .kind = .{ .wait = .{ .readable = accepted.socket.handle } }, .user_data = 2 };
+    var readable: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .readable = accepted.socket.handle } } }, .user_data = 2 };
     try l.submit(&readable);
     var out: [2]*Loop.Op = undefined;
     // Room to send at once; nothing to read yet.
@@ -630,7 +630,7 @@ test "the loop alone: a socket's readiness through AFD's poll" {
     var done = l.reap(&out);
     try testing.expectEqual(@as(usize, 1), done.len);
     try testing.expectEqual(@as(usize, 1), done[0].user_data);
-    try done[0].result.wait;
+    try done[0].backend.result.wait;
     try writeAll(system, client.socket.handle, "r");
     while (true) {
         _ = try l.run(.once);
@@ -638,8 +638,8 @@ test "the loop alone: a socket's readiness through AFD's poll" {
         if (done.len > 0) break;
     }
     try testing.expectEqual(@as(usize, 2), done[0].user_data);
-    try done[0].result.wait;
-    var close: Loop.Op = .{ .kind = .{ .close = accepted.socket.handle } };
+    try done[0].backend.result.wait;
+    var close: Loop.Op = .{ .backend = .{ .kind = .{ .close = accepted.socket.handle } } };
     try l.submit(&close);
     _ = try l.run(.nowait);
 }

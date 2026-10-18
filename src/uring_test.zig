@@ -111,12 +111,12 @@ test "a socket write the send buffer has room for is made at once; one that woul
         _ = linux.close(fd);
     };
     var bytes: [4096]u8 = @splat(0x5a);
-    var write: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } };
+    var write: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } } };
     try testing.expect(try l.start(&write));
-    try testing.expectEqual(bytes.len, try (try write.result.io).net_write);
+    try testing.expectEqual(bytes.len, try (try write.backend.result.io).net_write);
     // Fill the send buffer: the next write waits in the ring for room.
     while (true) {
-        var fill: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } };
+        var fill: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = sockets[0], .data = &.{&bytes} } } } } };
         if (!try l.start(&fill)) {
             var drain: [1 << 16]u8 = undefined;
             while (true) {
@@ -127,7 +127,7 @@ test "a socket write the send buffer has room for is made at once; one that woul
             var out: [1]*Loop.Op = undefined;
             const done = l.reap(&out);
             try testing.expectEqual(@as(usize, 1), done.len);
-            try testing.expect(try (try done[0].result.io).net_write > 0);
+            try testing.expect(try (try done[0].backend.result.io).net_write > 0);
             break;
         }
     }
@@ -190,7 +190,7 @@ test "the loop alone: a timer and a wake, completions reaped" {
     };
     defer l.deinit(testing.allocator);
     const due = Io.Clock.Timestamp.now(Io.Threaded.global_single_threaded.io(), .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
-    var timer: Loop.Op = .{ .kind = .{ .timer = due }, .user_data = 7 };
+    var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = due } }, .user_data = 7 };
     try l.submit(&timer);
     try timer_testing.expectDelivered(&l, due);
     var out: [4]*Loop.Op = undefined;

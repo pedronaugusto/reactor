@@ -375,7 +375,7 @@ fn loopTimers(r: Report, gpa: std.mem.Allocator, c: Config) !void {
     const t0 = now(io);
     for (ops) |*o| {
         const at = start.addDuration(.{ .raw = .fromMicroseconds(@intCast(random.uintLessThan(u32, 50_000) + 1000)), .clock = .awake });
-        o.* = .{ .kind = .{ .timer = at } };
+        o.* = .{ .backend = .{ .kind = .{ .timer = at } } };
         try l.submit(o);
     }
     const t1 = now(io);

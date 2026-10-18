@@ -9,6 +9,8 @@ const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+const op = @import("../op.zig");
+
 pub const bound = 8;
 pub const Slot = struct {
     record: *Record = undefined,
@@ -28,14 +30,14 @@ pub const Record = struct {
     armed: bool = false,
     ending: bool = false,
     closing: bool = false,
-    head: ?*anyopaque = null,
-    tail: ?*anyopaque = null,
+    head: ?*op.Op = null,
+    tail: ?*op.Op = null,
 };
 
 records: []Record,
 descriptors: []std.atomic.Value(linux.fd_t),
-ready_head: ?*anyopaque = null,
-ready_tail: ?*anyopaque = null,
+ready_head: ?*op.Op = null,
+ready_tail: ?*op.Op = null,
 enabled: bool,
 
 pub fn init(gpa: Allocator, count: usize, enabled: bool) Allocator.Error!Accept {
@@ -132,7 +134,7 @@ fn acquire(a: *Accept, fd: linux.fd_t) ?*Record {
     return null;
 }
 
-pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
+pub fn submit(a: *Accept, u: anytype, o: *op.Op) bool {
     const fd = o.kind.accept;
     if (!a.enabled and a.find(fd) == null) return false;
     const r = a.find(fd) orelse (a.acquire(fd) orelse return false);
@@ -148,10 +150,7 @@ pub fn submit(a: *Accept, u: anytype, o: anytype) bool {
         a.ready(o);
     } else {
         o.state.next = null;
-        if (r.tail) |raw| {
-            const tail: @TypeOf(o) = @ptrCast(@alignCast(raw)); // safe: this listener links operations of one type
-            tail.state.next = o;
-        } else r.head = o;
+        if (r.tail) |tail| tail.state.next = o else r.head = o;
         r.tail = o;
     }
     if (a.enabled and !r.ending) a.arm(u, r);
@@ -172,17 +171,14 @@ fn arm(_: *Accept, u: anytype, r: *Record) void {
     r.armed = r.pending != 0;
 }
 
-fn ready(a: *Accept, o: anytype) void {
+fn ready(a: *Accept, o: *op.Op) void {
     o.state.next = null;
-    if (a.ready_tail) |raw| {
-        const tail: @TypeOf(o) = @ptrCast(@alignCast(raw)); // safe: this list contains operations of one type
-        tail.state.next = o;
-    } else a.ready_head = o;
+    if (a.ready_tail) |tail| tail.state.next = o else a.ready_head = o;
     a.ready_tail = o;
 }
 
-fn pop(comptime Op: type, r: *Record) ?*Op {
-    const o: *Op = @ptrCast(@alignCast(r.head orelse return null)); // safe: submit linked an Op here
+fn pop(r: *Record) ?*op.Op {
+    const o = r.head orelse return null;
     r.head = o.state.next;
     if (r.head == null) r.tail = null;
     o.state.next = null;
@@ -190,10 +186,8 @@ fn pop(comptime Op: type, r: *Record) ?*Op {
 }
 
 pub fn deliver(a: *Accept, sink: anytype) bool {
-    const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
     const any = a.ready_head != null;
-    while (a.ready_head) |raw| {
-        const o: *Op = @ptrCast(@alignCast(raw)); // safe: ready linked an Op here
+    while (a.ready_head) |o| {
         a.ready_head = o.state.next;
         if (a.ready_head == null) a.ready_tail = null;
         o.state.next = null;
@@ -202,21 +196,20 @@ pub fn deliver(a: *Accept, sink: anytype) bool {
     return any;
 }
 
-pub fn cancel(a: *Accept, o: anytype) bool {
+pub fn cancel(a: *Accept, o: *op.Op) bool {
     const r = a.find(o.kind.accept) orelse return false;
-    var previous: ?@TypeOf(o) = null;
-    var raw = r.head;
-    while (raw) |address| {
-        const current: @TypeOf(o) = @ptrCast(@alignCast(address)); // safe: submit linked operations of this type
+    var previous: ?*op.Op = null;
+    var it = r.head;
+    while (it) |current| {
         if (current == o) {
             if (previous) |p| p.state.next = o.state.next else r.head = o.state.next;
-            if (r.tail == @as(?*anyopaque, o)) r.tail = @ptrCast(previous); // safe: previous is an operation in this listener's list
+            if (r.tail == o) r.tail = previous;
             o.result = .{ .accept = error.Canceled };
             a.ready(o);
             return true;
         }
         previous = current;
-        raw = current.state.next;
+        it = current.state.next;
     }
     return false;
 }
@@ -249,7 +242,6 @@ fn stop(u: anytype, r: *Record) void {
 
 /// A slot is retained until its sole completion, including after close.
 pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, sink: anytype) void {
-    const Op = @typeInfo(@typeInfo(@TypeOf(@TypeOf(sink.*).complete)).@"fn".param_types[1].?).pointer.child;
     const r = slot.record;
     std.debug.assert(slot.active);
     slot.active = false;
@@ -258,7 +250,7 @@ pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, si
     if (cqe.res >= 0) {
         if (r.closing) {
             _ = linux.close(cqe.res);
-        } else if (pop(Op, r)) |o| {
+        } else if (pop(r)) |o| {
             o.result = .{ .accept = peer(slot, cqe.res) };
             sink.complete(o);
         } else {
@@ -270,7 +262,7 @@ pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, si
             r.ahead = @min(bound, r.ahead * 2);
         }
     } else if (cqe.err() != .CANCELED or r.closing) {
-        while (pop(Op, r)) |o| {
+        while (pop(r)) |o| {
             o.result = .{ .accept = failure(cqe.err()) };
             sink.complete(o);
         }

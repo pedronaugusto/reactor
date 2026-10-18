@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `Loop.Op` holds its `kind`, `result`, `state` and linked deadline in `backend`, the operation's backend half (`backend/op.zig`'s `Op`), which is all a backend sees of it; `callback` and `user_data` stay beside it. An operation is `.{ .backend = .{ .kind = ... }, .callback = ... }` and its result `o.backend.result`. The backends take that half by its type where they took any operation (`anytype`), so what they read of an operation is checked against one declaration; what each backend keeps in an operation is a type of its own below that declaration (io_uring's and IOCP's request memory, the readiness backends' `Waiter`), and the casts that recovered an operation's type from a sink are gone.
+
 ## [0.6.1] - 2026-10-17
 
 ### Changed

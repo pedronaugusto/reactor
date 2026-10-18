@@ -13,7 +13,8 @@ const Driver = @import("testing/Driver.zig");
 const perform = @import("ops/perform.zig");
 const stacks_ = @import("scheduler/stacks.zig");
 const pending = @import("backend/pending.zig");
-const UringState = @import("backend/op.zig").UringState;
+const backend_op = @import("backend/op.zig");
+const UringState = backend_op.UringState;
 
 fn native(r: *Runtime, backend: Loop.Backend) !void {
     r.init(testing.allocator, .{ .workers = 0, .backend = backend, .max_tasks = 64 }) catch |err| switch (err) {
@@ -35,7 +36,7 @@ test "later: callback delivery permits reuse and never also enters reap" {
             const count: *Self = @ptrFromInt(op.user_data); // safe: this test retains the counter through delivery
             count.count += 1;
             if (count.count < 8) {
-                op.kind = .{ .timer = .now(testing.io, .awake) };
+                op.backend.kind = .{ .timer = .now(testing.io, .awake) };
                 loop.submit(op) catch @panic("bounded callback resubmission failed");
             }
         }
@@ -47,7 +48,7 @@ test "later: callback delivery permits reuse and never also enters reap" {
     };
     defer loop.deinit(testing.allocator);
     var count: Count = .{};
-    var op: Loop.Op = .{ .kind = .{ .timer = .now(testing.io, .awake) }, .callback = Count.done, .user_data = @intFromPtr(&count) }; // safe: retained through every callback
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } }, .callback = Count.done, .user_data = @intFromPtr(&count) }; // safe: retained through every callback
     try loop.submit(&op);
     while (count.count < 8) _ = try loop.run(.once);
     var reaped: [1]*Loop.Op = undefined;
@@ -86,9 +87,9 @@ fn fakeRequest(io: Io) anyerror!usize {
     const core = Runtime.recognize(io).?;
     var byte: [1]u8 = undefined;
     const handle: Io.File.Handle = if (builtin.os.tag == .windows) @ptrFromInt(42) else 42; // safe: the fake never dereferences a descriptor
-    var op: Loop.Op = .{ .kind = .{ .read_at = .{ .file = handle, .buffer = &byte, .offset = 0 } } };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .read_at = .{ .file = handle, .buffer = &byte, .offset = 0 } } } };
     try perform.run(&core.core.scheduler, &op, .{});
-    return op.result.read_at;
+    return op.backend.result.read_at;
 }
 
 fn raceProperty(_: void, c: *shakedown.Case) !void {
@@ -194,8 +195,8 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     defer file.close(r.io());
     const ring = r.core.processors[0].loop.backend.io_uring;
     @memset(pool.memory, 0x3d);
-    var write: Loop.Op = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = pool.memory[0..4096], .offset = 0 } } };
-    try testing.expect(!try ring.submit(&write));
+    var write: Loop.Op = .{ .backend = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = pool.memory[0..4096], .offset = 0 } } } };
+    try testing.expect(!try ring.submit(&write.backend));
     const sqe = ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask];
     try testing.expectEqual(linux.IORING_OP.WRITE_FIXED, sqe.opcode);
     // Use the ordinary loop path for delivery accounting after inspecting.
@@ -203,7 +204,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     const Sink = struct {
         const Self = @This();
         completed: bool = false,
-        pub fn complete(self: *Self, _: *Loop.Op) void {
+        pub fn complete(self: *Self, _: *backend_op.Op) void {
             self.completed = true;
         }
         pub fn completePending(_: *Self, _: pending.Token, _: pending.Outcome) void {
@@ -213,14 +214,14 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     };
     var sink: Sink = .{};
     while (!sink.completed) try ring.poll(.forever, &sink);
-    try testing.expectEqual(@as(usize, 4096), try write.result.write_at);
+    try testing.expectEqual(@as(usize, 4096), try write.backend.result.write_at);
     @memset(pool.memory[4096..], 0);
-    var read: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = pool.memory[4096..], .offset = 0 } } };
-    try testing.expect(!try ring.submit(&read));
+    var read: Loop.Op = .{ .backend = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = pool.memory[4096..], .offset = 0 } } } };
+    try testing.expect(!try ring.submit(&read.backend));
     try testing.expectEqual(linux.IORING_OP.READ_FIXED, ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask].opcode);
     sink.completed = false;
     while (!sink.completed) try ring.poll(.forever, &sink);
-    try testing.expectEqual(@as(usize, 4096), try read.result.read_at);
+    try testing.expectEqual(@as(usize, 4096), try read.backend.result.read_at);
     for (pool.memory[4096..]) |byte| try testing.expectEqual(@as(u8, 0x3d), byte);
     const slot = pool.fixed.?.items[0].index;
     try testing.expectEqual(@as(u32, 0), ring.buffers.slots[slot].users);
@@ -242,11 +243,11 @@ test "later: explicitly requested SQPOLL stays enabled and wakes after idle" {
         }
     };
     var context: u8 = 0;
-    var op: Loop.Op = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Request.prepare } } } };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Request.prepare } } } } };
     try loop.submit(&op);
     var reaped: [1]*Loop.Op = undefined;
     while (loop.reap(&reaped).len == 0) _ = try loop.run(.once);
-    try testing.expectEqual(@as(i32, 0), (try op.result.raw).uring);
+    try testing.expectEqual(@as(i32, 0), (try op.backend.result.raw).uring);
 }
 
 fn boundPair(io: Io, interface: Io.net.Interface) !void {
@@ -493,7 +494,7 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
     var context: u8 = 0;
     var ops: [128]Loop.Op = undefined;
     for (&ops) |*op| {
-        op.* = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Counter.prepare } } }, .callback = Counter.callback, .user_data = @intFromPtr(&count) }; // safe: the counter is retained through run
+        op.* = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Counter.prepare } } } }, .callback = Counter.callback, .user_data = @intFromPtr(&count) }; // safe: the counter is retained through run
         try loop.submit(op);
         loop.cancel(op);
         try testing.expectEqual(@as(usize, 0), count);
@@ -599,7 +600,7 @@ test "later: native zero-copy send completes ownership before payload reuse" {
         var sent: usize = 0;
         var notified = false;
         while (sent < payload.len) {
-            var op: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{payload[sent..]} } } } };
+            var op: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{payload[sent..]} } } } } };
             try loop.submit(&op);
             try testing.expectEqual(linux.IORING_OP.SEND_ZC, loop.backend.io_uring.ring.sq.sqes[(loop.backend.io_uring.ring.sq.sqe_tail -% 1) & loop.backend.io_uring.ring.sq.mask].opcode);
             // Unknown SEND_ZC flags produce native EINVAL; ordinary SEND must
@@ -607,11 +608,11 @@ test "later: native zero-copy send completes ownership before payload reuse" {
             if (invalid) loop.backend.io_uring.ring.sq.sqes[(loop.backend.io_uring.ring.sq.sqe_tail -% 1) & loop.backend.io_uring.ring.sq.mask].ioprio = std.math.maxInt(u16);
             var out: [1]*Loop.Op = undefined;
             while (loop.reap(&out).len == 0) _ = try loop.run(.once);
-            const n = try (try op.result.io).net_write;
+            const n = try (try op.backend.result.io).net_write;
             try testing.expect(n > 0);
-            try testing.expect(op.state.uring.ready());
-            if (invalid) try testing.expect(op.state.uring.use_copy);
-            notified = notified or op.state.uring.notification_seen;
+            try testing.expect(op.backend.state.uring.ready());
+            if (invalid) try testing.expect(op.backend.state.uring.use_copy);
+            notified = notified or op.backend.state.uring.notification_seen;
             @memset(payload[sent..][0..n], 0);
             sent += n;
         }
@@ -805,7 +806,7 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
     const index = pool.fixed.?.items[0].index;
     for (0..32) |_| {
         var data: [1][]u8 = .{pool.memory[0..4096]};
-        var op: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = .{ .handle = pipe[0], .flags = .{ .nonblocking = false } }, .data = &data } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = .{ .handle = pipe[0], .flags = .{ .nonblocking = false } }, .data = &data } } } } };
         const loop = &r.core.processors[0].loop;
         try loop.submit(&op);
         try testing.expectEqual(linux.IORING_OP.READ_FIXED, ring.ring.sq.sqes[(ring.ring.sq.sqe_tail -% 1) & ring.ring.sq.mask].opcode);
@@ -813,7 +814,7 @@ test "later: canceled fixed-buffer pipe read drains before unregister and a full
         loop.cancel(&op);
         var out: [1]*Loop.Op = undefined;
         while (loop.reap(&out).len == 0) _ = try loop.run(.once);
-        try testing.expectError(error.Canceled, op.result.io);
+        try testing.expectError(error.Canceled, op.backend.result.io);
         try testing.expectEqual(@as(u32, 0), ring.buffers.slots[index].users);
         @memset(pool.memory, 0xdd);
     }
@@ -881,7 +882,7 @@ test "later: SQPOLL close captures published fixed-file references before unregi
         const file = try tmp.dir.createFile(testing.io, "published", .{ .read = true });
         try file.writePositionalAll(testing.io, "held", 0);
         var bytes: [4]u8 = undefined;
-        var op: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = &bytes, .offset = 0 } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = &bytes, .offset = 0 } } } };
         try loop.submit(&op);
         const ring = &loop.backend.io_uring.ring;
         try testing.expect(ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].flags & linux.IOSQE_FIXED_FILE != 0);
@@ -891,7 +892,7 @@ test "later: SQPOLL close captures published fixed-file references before unregi
         file.close(testing.io);
         var out: [1]*Loop.Op = undefined;
         while (loop.reap(&out).len == 0) _ = try loop.run(.once);
-        try testing.expectEqual(@as(usize, 4), try op.result.read_at);
+        try testing.expectEqual(@as(usize, 4), try op.backend.result.read_at);
         try testing.expectEqualStrings("held", &bytes);
     }
 }
@@ -1003,16 +1004,16 @@ test "later: canceling native zero-copy sends drains ownership before poisoning 
         // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
         defer _ = reader.cancel(testing.io) catch {};
         var bytes: [64 << 10]u8 = @splat(0x61);
-        var op: Loop.Op = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{&bytes} } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{&bytes} } } } } };
         try loop.submit(&op);
         if (round % 2 == 0) _ = try loop.run(.nowait);
         loop.cancel(&op);
         var out: [1]*Loop.Op = undefined;
         while (loop.reap(&out).len == 0) _ = try loop.run(.once);
-        if (op.result.io) |result| {
+        if (op.backend.result.io) |result| {
             _ = try result.net_write;
         } else |err| try testing.expectEqual(error.Canceled, err);
-        try testing.expect(op.state.uring.ready());
+        try testing.expect(op.backend.state.uring.ready());
         @memset(&bytes, 0xdd);
         try stream.shutdown(testing.io, .send);
         try reader.await(testing.io);
@@ -1024,7 +1025,7 @@ fn loopAllocationFailures(gpa: std.mem.Allocator) !void {
     var loop: Loop = undefined;
     try loop.init(gpa, .{ .max_ops = 8 });
     defer loop.deinit(gpa);
-    var op: Loop.Op = .{ .kind = .{ .timer = .now(testing.io, .awake) } };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } } };
     try loop.submit(&op);
     var out: [1]*Loop.Op = undefined;
     while (loop.reap(&out).len == 0) _ = try loop.run(.once);

@@ -101,13 +101,13 @@ pub fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.
         .file_write_streaming => |f| if (fileOnLane(r, f.file)) return perFiles(r, "operate", .{operation}),
         else => {},
     }
-    var o: Loop.Op = .{ .kind = .{ .io = operation } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .io = operation } } };
     run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => failure(operation),
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    return o.result.io;
+    return o.backend.result.io;
 }
 
 fn deviceOverlapped(d: Io.Operation.DeviceIoControl) bool {
@@ -177,13 +177,13 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
         if (d.len > 0) break d;
     } else return 0;
     if (cachedRead(file.handle, buffer, offset)) |n| return n;
-    var o: Loop.Op = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = buffer, .offset = offset } } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = buffer, .offset = offset } } } };
     run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    return o.result.read_at;
+    return o.backend.result.read_at;
 }
 
 /// A read the page cache can answer, answered now: one syscall that never
@@ -209,13 +209,13 @@ pub fn fileWritePositional(userdata: ?*anyopaque, file: Io.File, header: []const
         if (splat > 0 and data[data.len - 1].len > 0) break :first data[data.len - 1];
         return 0;
     };
-    var o: Loop.Op = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = bytes, .offset = offset } } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .write_at = .{ .file = file.handle, .bytes = bytes, .offset = offset } } } };
     run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    return o.result.write_at;
+    return o.backend.result.write_at;
 }
 
 /// A sync is a ring operation on io_uring; elsewhere no kernel queue
@@ -224,13 +224,13 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
     const r = Core.running(userdata);
     const on_ring = r.backendKind() == .io_uring and r.options.files == .auto and Scheduler.processor() != null;
     if (!on_ring) return onLane(r, .sync, "fileSync", .{file});
-    var o: Loop.Op = .{ .kind = .{ .sync = file.handle } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .sync = file.handle } } };
     perform.run(&r.scheduler, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => onLane(r, .sync, "fileSync", .{file}),
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    return o.result.sync;
+    return o.backend.result.sync;
 }
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
@@ -251,7 +251,7 @@ pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
 /// processor's kernel queue holds on it (and on epoll and kqueue lets go of
 /// its registration).
 fn closeOnRing(r: *Core, handle: Io.File.Handle) void {
-    var o: Loop.Op = .{ .kind = .{ .close = handle } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .close = handle } } };
     perform.run(&r.scheduler, &o, .{ .cancelable = false }) catch socket.close(handle);
 }
 
@@ -290,7 +290,7 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
     const t = Scheduler.current();
     for (r.processors) |*other| {
         if (other == me or !r.scheduler.holds(other.index, fd)) continue;
-        var a: Abort = .{ .op = .{ .kind = .{ .abort = fd } }, .task = t, .scheduler = &r.scheduler, .target = other };
+        var a: Abort = .{ .op = .{ .backend = .{ .kind = .{ .abort = fd } } }, .task = t, .scheduler = &r.scheduler, .target = other };
         if (t != null) {
             Scheduler.park(.{ .func = Abort.send, .context = &a });
         } else {
@@ -346,13 +346,13 @@ pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.
     // On Windows the options name the accepted socket's mode: a listener is
     // a stream socket there, and its connections are opened as stream
     // sockets of the peer's family.
-    var o: Loop.Op = .{ .kind = .{ .accept = server } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .accept = server } } };
     runAccept(r, &o) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    return o.result.accept;
+    return o.backend.result.accept;
 }
 
 pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
@@ -369,13 +369,13 @@ pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, option
         Loop.closing(fd);
         socket.close(fd);
     }
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } } };
     run(r, &o, .{ .deadline = deadlineOf(r, options.timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => error.Timeout,
         error.SystemResources => error.SystemResources,
     };
-    o.result.connect catch |err| return narrow(net.IpAddress.ConnectError, err);
+    o.backend.result.connect catch |err| return narrow(net.IpAddress.ConnectError, err);
     if (start == .nonblocking and socket.send_honors_dontwait) socket.setBlocking(fd) catch |err| return narrow(net.IpAddress.ConnectError, err);
     return .{ .handle = fd, .address = socket.localAddress(fd) catch |err| return narrow(net.IpAddress.ConnectError, err) };
 }
@@ -408,13 +408,13 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
         Loop.closing(fd);
         socket.close(fd);
     }
-    var o: Loop.Op = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .connect = .{ .socket = fd, .address = .{ .unix = address }, .nonblocking = start == .nonblocking } } } };
     run(r, &o, .{}) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.SystemResources => error.SystemResources,
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    o.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
+    o.backend.result.connect catch |err| return narrow(net.UnixAddress.ConnectError, err);
     if (start == .nonblocking and socket.send_honors_dontwait) socket.setBlocking(fd) catch |err| return narrow(net.UnixAddress.ConnectError, err);
     return fd;
 }
@@ -434,14 +434,14 @@ pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.C
     }
     if (!iocp(r)) return onLane(r, .wait, "childWait", .{child});
     if (builtin.os.tag != .windows) unreachable; // unreachable: IOCP is Windows'
-    var o: Loop.Op = .{ .kind = .{ .wait = .{ .object = child.id.? } } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .object = child.id.? } } } };
     run(r, &o, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         // No packet to be had: std's own wait, on the lane.
         error.SystemResources => return onLane(r, .wait, "childWait", .{child}),
         error.Timeout => unreachable, // unreachable: no deadline given
     };
-    o.result.wait catch |err| switch (err) {
+    o.backend.result.wait catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.Unsupported, error.Unexpected => return onLane(r, .wait, "childWait", .{child}),
     };
@@ -560,7 +560,7 @@ pub fn netLookup(userdata: ?*anyopaque, host_name: net.HostName, resolved: *Io.Q
 
 fn runAccept(r: *Core, o: *Loop.Op) perform.Error!void {
     if (Scheduler.processor()) |p| {
-        const owner = r.scheduler.listenerOwner(o.kind.accept, p);
+        const owner = r.scheduler.listenerOwner(o.backend.kind.accept, p);
         return perform.accept(&r.scheduler, owner, o);
     }
     return run(r, o, .{});

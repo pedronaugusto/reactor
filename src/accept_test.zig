@@ -6,6 +6,7 @@ const Io = std.Io;
 const Runtime = @import("Runtime.zig");
 const Accept = @import("backend/uring/Accept.zig");
 const Loop = @import("Loop.zig");
+const op = @import("backend/op.zig");
 
 const Harness = struct {
     sqe: std.os.linux.io_uring_sqe = undefined,
@@ -15,10 +16,10 @@ const Harness = struct {
         h.submissions += 1;
         return &h.sqe;
     }
-    pub fn submitSingleAccept(h: *Harness, _: *Loop.Op) void {
+    pub fn submitSingleAccept(h: *Harness, _: *op.Op) void {
         h.submissions += 1;
     }
-    pub fn complete(h: *Harness, _: *Loop.Op) void {
+    pub fn complete(h: *Harness, _: *op.Op) void {
         h.completed += 1;
     }
 };
@@ -28,8 +29,8 @@ test "accept-ahead listener cancellation releases its task before the listener r
     var table = try Accept.init(testing.allocator, 2, true);
     defer table.deinit(testing.allocator);
     var h: Harness = .{};
-    var a: Loop.Op = .{ .kind = .{ .accept = 17 } };
-    var b: Loop.Op = .{ .kind = .{ .accept = 17 } };
+    var a: op.Op = .{ .kind = .{ .accept = 17 } };
+    var b: op.Op = .{ .kind = .{ .accept = 17 } };
     try testing.expect(table.submit(&h, &a));
     try testing.expect(table.submit(&h, &b));
     try testing.expectEqual(@as(usize, 1), h.submissions);
@@ -56,8 +57,8 @@ test "closing one listener keeps a colliding listener reachable" {
     var table = try Accept.init(testing.allocator, 2, true);
     defer table.deinit(testing.allocator);
     var h: Harness = .{};
-    var a: Loop.Op = .{ .kind = .{ .accept = 17 } };
-    var b: Loop.Op = .{ .kind = .{ .accept = 19 } };
+    var a: op.Op = .{ .kind = .{ .accept = 17 } };
+    var b: op.Op = .{ .kind = .{ .accept = 19 } };
     try testing.expect(table.submit(&h, &a));
     try testing.expect(table.submit(&h, &b));
     table.close(&h, 17);
@@ -141,9 +142,9 @@ test "accepting a burst keeps every connected peer" {
     const accepted = try first.await(io);
     accepted.close(io);
     for (1..clients.len) |_| {
-        var op: Loop.Op = .{ .kind = .{ .accept = server.socket.handle } };
-        try perform.run(&runtime.core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }) });
-        const socket = try op.result.accept;
+        var o: Loop.Op = .{ .backend = .{ .kind = .{ .accept = server.socket.handle } } };
+        try perform.run(&runtime.core.scheduler, &o, .{ .deadline = perform.deadline(Scheduler.processor().?, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(100) } }) });
+        const socket = try o.backend.result.accept;
         socket.close(io);
     }
 }
@@ -157,7 +158,7 @@ test "a reserved listener slot survives an earlier slot being released" {
     try testing.expect(table.reserve(6));
     table.reset(&table.records[0]);
     var h: Harness = .{};
-    var o: Loop.Op = .{ .kind = .{ .accept = 6 } };
+    var o: op.Op = .{ .kind = .{ .accept = 6 } };
     try testing.expect(table.submit(&h, &o));
     try testing.expectEqual(@as(i32, 6), table.records[1].fd);
     try testing.expect(table.cancel(&o));

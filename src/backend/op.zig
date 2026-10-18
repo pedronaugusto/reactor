@@ -1,10 +1,42 @@
 //! What an operation is, what it returns, and what the loop and its
-//! backend keep in it while it is under way. `Loop.Op` is built from these;
-//! the backends see an operation through these fields only.
+//! backend keep in it while it is under way: `Op`, the operation as its
+//! backend sees it, which `Loop.Op` embeds beside its completion.
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const Wheel = @import("../Wheel.zig");
+const uring = @import("uring/scratch.zig");
+const iocp = @import("iocp/scratch.zig");
+const Waiter = @import("readiness/Waiter.zig");
+
+/// An operation as its backend sees it: what to do, its result, the
+/// loop's and the backend's state while it is under way, and its linked
+/// deadline. Caller-owned and pinned from `submit` until its completion is
+/// delivered.
+pub const Op = struct {
+    kind: Kind,
+    /// Valid once completed, under the field of `kind`.
+    result: Result align(@alignOf(Kind)) = undefined,
+    /// The loop's and its backend's from `submit` to delivery.
+    state: State = .{},
+    /// Absolute deadline, linked in the kernel where supported. Other
+    /// backends are timed by the runtime's wheel.
+    linked: if (builtin.os.tag == .linux) Linked else void = if (builtin.os.tag == .linux) .{} else {},
+};
+
+/// A deadline in the operation's own bytes: sixteen of them, where an
+/// optional timestamp would take forty-eight in every operation.
+pub const Linked = struct {
+    /// Nanoseconds on `clock`, saturating; read only when `set`.
+    ns: i64 = 0,
+    clock: Io.Clock = .awake,
+    set: bool = false,
+
+    pub fn of(at: ?Io.Clock.Timestamp) Linked {
+        const t = at orelse return .{};
+        return .{ .ns = std.math.lossyCast(i64, t.raw.nanoseconds), .clock = t.clock, .set = true };
+    }
+};
 
 pub const SqPoll = struct { idle_ms: u32 = 1000, cpu: ?u32 = null };
 
@@ -96,26 +128,46 @@ pub const Phase = enum(u8) {
 };
 
 /// The loop's and the backend's, from `submit` to delivery.
-pub fn State(comptime Scratch: type) type {
-    return struct {
-        phase: Phase = .idle,
-        /// The owner asked the kernel to end it.
-        canceled: bool = false,
-        /// The completion queue's link.
-        next: ?*anyopaque = null,
-        /// The phase owns the wheel node or kernel scratch, never both.
-        storage: Storage = .{ .node = .{} },
+pub const State = struct {
+    phase: Phase = .idle,
+    /// The owner asked the kernel to end it.
+    canceled: bool = false,
+    /// The link of whichever queue holds it: the loop's completions, a
+    /// backend's own.
+    next: ?*Op = null,
+    /// The phase owns the wheel node or kernel scratch, never both.
+    storage: Storage = .{ .node = .{} },
 
-        /// Kernel ownership beyond the primary CQE: linked timeout and
-        /// SEND_ZC notification must both settle before the frame is freed.
-        uring: if (builtin.os.tag == .linux) UringState else struct { timeout_pending: bool = false, timed_out: bool = false } = .{},
+    /// Kernel ownership beyond the primary CQE: linked timeout and
+    /// SEND_ZC notification must both settle before the frame is freed.
+    uring: if (builtin.os.tag == .linux) UringState else struct { timeout_pending: bool = false, timed_out: bool = false } = .{},
 
-        pub const Storage = union {
-            node: Wheel.Node,
-            scratch: Scratch,
-        };
+    pub const Storage = union {
+        node: Wheel.Node,
+        scratch: Scratch,
     };
-}
+};
+
+/// What an operation keeps for its backend while the kernel holds it,
+/// under the backend's field (a readiness backend's under its poller's
+/// `name`).
+pub const Scratch = union {
+    /// A custom backend keeps nothing in an operation.
+    custom: void,
+    io_uring: if (has_uring) uring.Scratch else void,
+    iocp: if (has_iocp) iocp.Scratch else void,
+    epoll: if (has_epoll) Waiter else void,
+    kqueue: if (has_kqueue) Waiter else void,
+};
+
+/// The backends this system has.
+pub const has_uring = builtin.os.tag == .linux;
+pub const has_iocp = builtin.os.tag == .windows;
+pub const has_epoll = builtin.os.tag == .linux;
+pub const has_kqueue = switch (builtin.os.tag) {
+    .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
+    else => false,
+};
 
 /// Backend escapes preserve the ordinary operation's cancellation lifetime.
 pub const Raw = union(enum) {

@@ -658,7 +658,7 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
         defer l.deinit(testing.allocator);
         const sys = Io.Threaded.global_single_threaded.io();
         const due = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
-        var timer: Loop.Op = .{ .kind = .{ .timer = due }, .user_data = 7 };
+        var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = due } }, .user_data = 7 };
         try l.submit(&timer);
         try timer_testing.expectDelivered(&l, due);
         var out: [4]*Loop.Op = undefined;
@@ -672,7 +672,7 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
         var buffer: [8]u8 = undefined;
         var data: [1][]u8 = .{&buffer};
         const file: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
-        var read: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } }, .user_data = 1 };
+        var read: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } }, .user_data = 1 };
         try l.submit(&read);
         try testing.expectEqual(@as(u32, 0), try l.run(.nowait));
         // The host's own poller sees the loop's descriptor turn readable.
@@ -681,13 +681,13 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
         var pfd = [1]posix.pollfd{.{ .fd = handle, .events = posix.POLL.IN, .revents = 0 }};
         try testing.expectEqual(@as(usize, 1), try posix.poll(&pfd, 1000));
         try testing.expectEqual(@as(u32, 1), try l.run(.nowait));
-        try testing.expectEqual(@as(usize, 1), (try l.reap(&out)[0].result.io).file_read_streaming catch 0);
+        try testing.expectEqual(@as(usize, 1), (try l.reap(&out)[0].backend.result.io).file_read_streaming catch 0);
 
         // Data already there: made at once by `start`, nothing delivered.
         _ = posix.system.write(fds[1], "yz", 2);
-        var again: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } };
+        var again: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } } };
         try testing.expect(try l.start(&again));
-        try testing.expectEqual(@as(usize, 2), try (try again.result.io).file_read_streaming);
+        try testing.expectEqual(@as(usize, 2), try (try again.backend.result.io).file_read_streaming);
 
         const thread = try std.Thread.spawn(.{}, Loop.wake, .{&l});
         defer thread.join();
@@ -703,13 +703,13 @@ test "a descriptor closed outside the loop and announced with closing is waited 
         const sys = Io.Threaded.global_single_threaded.io();
         const first = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
         // A wait registers the read end, then is cancelled.
-        var waiting: Loop.Op = .{ .kind = .{ .wait = .{ .readable = first[0] } } };
+        var waiting: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .readable = first[0] } } } };
         try l.submit(&waiting);
         _ = try l.run(.nowait);
         l.cancel(&waiting);
         _ = try l.run(.nowait);
         var out: [4]*Loop.Op = undefined;
-        try testing.expectError(error.Canceled, l.reap(&out)[0].result.wait);
+        try testing.expectError(error.Canceled, l.reap(&out)[0].backend.result.wait);
         // Closed behind the loop's back, announced; the number comes back.
         Loop.closing(first[0]);
         _ = posix.system.close(first[0]);
@@ -719,13 +719,13 @@ test "a descriptor closed outside the loop and announced with closing is waited 
             _ = posix.system.close(fd);
         };
         try testing.expectEqual(first[0], second[0]);
-        var again: Loop.Op = .{ .kind = .{ .wait = .{ .readable = second[0] } } };
+        var again: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .readable = second[0] } } } };
         try l.submit(&again);
         _ = try l.run(.nowait);
         _ = posix.system.write(second[1], "x", 1);
         const deadline = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
         try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = deadline }));
-        try l.reap(&out)[0].result.wait;
+        try l.reap(&out)[0].backend.result.wait;
     }
 }
 
@@ -768,7 +768,7 @@ test "r6: a short final stream read preserves EOF readiness" {
         defer if (sender_open) pair[1].close(io);
         var buffer: [64]u8 = undefined;
         var data: [1][]u8 = .{&buffer};
-        var read: Loop.Op = .{ .kind = .{ .io = .{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } } } };
+        var read: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } } } } };
         var out: [4]*Loop.Op = undefined;
         // Register while empty. Both the final bytes and EOF are present
         // before the next poll: an edge must cover both reads.
@@ -786,13 +786,13 @@ test "r6: a short final stream read preserves EOF readiness" {
         sender_open = false;
         const deadline = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
         try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = deadline }));
-        const got = (try (try l.reap(&out)[0].result.io).net_read).data_len;
+        const got = (try (try l.reap(&out)[0].backend.result.io).net_read).data_len;
         try testing.expectEqualStrings("final bytes", buffer[0..got]);
         for (0..2) |_| {
             try l.submit(&read);
             const end = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
             try testing.expectEqual(@as(u32, 1), try l.run(.{ .within = end }));
-            try testing.expectEqual(@as(usize, 0), (try (try l.reap(&out)[0].result.io).net_read).data_len);
+            try testing.expectEqual(@as(usize, 0), (try (try l.reap(&out)[0].backend.result.io).net_read).data_len);
         }
     }
 }
@@ -817,13 +817,13 @@ test "r6: refused IPv6 connect followed by IPv4 reuses readiness" {
 
 /// A wait on `w` that ends ready, with nothing else to wait for.
 fn expectReady(l: *Loop, w: Loop.Waitable) !void {
-    var o: Loop.Op = .{ .kind = .{ .wait = w } };
+    var o: Loop.Op = .{ .backend = .{ .kind = .{ .wait = w } } };
     if (!try l.start(&o)) {
         _ = try l.run(.nowait);
         var out: [1]*Loop.Op = undefined;
         try testing.expectEqual(@as(usize, 1), l.reap(&out).len);
     }
-    try o.result.wait;
+    try o.backend.result.wait;
 }
 
 test "a wait on a descriptor that is not open is ready, as a poll says, and does not panic" {
@@ -853,21 +853,21 @@ test "a stream read or write on a descriptor that is not open reports it, as Thr
         var data: [1][]u8 = .{&buffer};
         // In blocking mode a call is made only once the descriptor is ready.
         const file: Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
-        var read: Loop.Op = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } };
+        var read: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .file_read_streaming = .{ .file = file, .data = &data } } } } };
         if (!try l.start(&read)) {
             _ = try l.run(.nowait);
             var out: [1]*Loop.Op = undefined;
             _ = l.reap(&out);
         }
-        try testing.expectError(error.NotOpenForReading, (try read.result.io).file_read_streaming);
+        try testing.expectError(error.NotOpenForReading, (try read.backend.result.io).file_read_streaming);
         const bytes: []const []const u8 = &.{"x"};
-        var write: Loop.Op = .{ .kind = .{ .io = .{ .file_write_streaming = .{ .file = file, .header = &.{}, .data = bytes, .splat = 1 } } } };
+        var write: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .file_write_streaming = .{ .file = file, .header = &.{}, .data = bytes, .splat = 1 } } } } };
         if (!try l.start(&write)) {
             _ = try l.run(.nowait);
             var out: [1]*Loop.Op = undefined;
             _ = l.reap(&out);
         }
-        try testing.expectError(error.NotOpenForWriting, (try write.result.io).file_write_streaming);
+        try testing.expectError(error.NotOpenForWriting, (try write.backend.result.io).file_write_streaming);
     }
 }
 
@@ -1012,7 +1012,7 @@ test "a priority wait on the loop alone is a readiness operation where the kerne
         const io = testing.io;
         const pair = try tcpPair(io);
         defer closePair(io, pair);
-        var o: Loop.Op = .{ .kind = .{ .wait = .{ .priority = pair[0].socket.handle } } };
+        var o: Loop.Op = .{ .backend = .{ .kind = .{ .wait = .{ .priority = pair[0].socket.handle } } } };
         const done = try l.start(&o);
         if (!done) {
             // Nothing urgent yet; then the urgent byte arrives.
@@ -1025,9 +1025,9 @@ test "a priority wait on the loop alone is a readiness operation where the kerne
             _ = l.reap(&out);
         }
         if (backend == .kqueue or !wait_ext.has_priority) {
-            try testing.expectError(error.Unsupported, o.result.wait);
+            try testing.expectError(error.Unsupported, o.backend.result.wait);
         } else {
-            try o.result.wait;
+            try o.backend.result.wait;
         }
     }
 }

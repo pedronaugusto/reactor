@@ -13,22 +13,19 @@ pub const pending = @import("backend/pending.zig");
 pub const Wait = @import("backend/wait.zig").Wait;
 pub const Custom = @import("backend/Custom.zig");
 
-const has_uring = builtin.os.tag == .linux;
+const has_uring = op.has_uring;
 const uring_file = @import("backend/Uring.zig");
 pub const Uring = if (has_uring) uring_file else void;
 
 pub const readiness = @import("backend/readiness.zig");
 const epoll_poller = @import("backend/readiness/Epoll.zig");
 const kqueue_poller = @import("backend/readiness/Kqueue.zig");
-const has_epoll = builtin.os.tag == .linux;
+const has_epoll = op.has_epoll;
 pub const Epoll = if (has_epoll) readiness.Readiness(epoll_poller) else void;
-const has_kqueue = switch (builtin.os.tag) {
-    .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
-    else => false,
-};
+const has_kqueue = op.has_kqueue;
 pub const Kqueue = if (has_kqueue) readiness.Readiness(kqueue_poller) else void;
 
-const has_iocp = builtin.os.tag == .windows;
+const has_iocp = op.has_iocp;
 const iocp_file = @import("backend/Iocp.zig");
 pub const Iocp = if (has_iocp) iocp_file else void;
 
@@ -37,15 +34,6 @@ pub const Kind = enum { io_uring, epoll, kqueue, iocp };
 
 pub const SubmitError = error{ SystemResources, Unexpected };
 pub const PollError = error{ SystemResources, Unexpected };
-
-/// What an operation keeps for its backend while the kernel holds it.
-pub const Scratch = union {
-    custom: Custom.Scratch,
-    io_uring: if (has_uring) Uring.Scratch else void,
-    iocp: if (has_iocp) Iocp.Scratch else void,
-    epoll: if (has_epoll) Epoll.Scratch else void,
-    kqueue: if (has_kqueue) Kqueue.Scratch else void,
-};
 
 pub const Backend = union(enum) {
     /// Absent (void) where the system has no io_uring.
@@ -90,10 +78,10 @@ pub const Backend = union(enum) {
         b.* = undefined;
     }
 
-    /// Hands `o` (a `*Loop.Op`) to the kernel. Its completion reaches the
+    /// Hands `o` to the kernel. Its completion reaches the
     /// sink of a later `poll`, unless this returns true: a readiness
     /// backend found it complete at once, its result set.
-    pub fn submit(b: *Backend, o: anytype) SubmitError!bool {
+    pub fn submit(b: *Backend, o: *op.Op) SubmitError!bool {
         switch (b.*) {
             .io_uring => |u| if (has_uring) return u.submit(o) else unreachable, // unreachable: no such backend here
             .epoll => |e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
@@ -105,7 +93,7 @@ pub const Backend = union(enum) {
     }
 
     /// Asks the kernel to end `o`; its completion still arrives.
-    pub fn cancel(b: *Backend, o: anytype) bool {
+    pub fn cancel(b: *Backend, o: *op.Op) bool {
         switch (b.*) {
             .io_uring => |u| if (has_uring) u.cancel(o) else unreachable, // unreachable: no such backend here
             .epoll => |e| if (has_epoll) e.cancel(o) else unreachable, // unreachable: no such backend here
@@ -196,19 +184,16 @@ pub const Backend = union(enum) {
     }
 };
 
-/// The untyped sink a custom backend delivers to, over a typed one: the
-/// loop, whose `complete` takes its own `*Op`.
+/// The sink a custom backend delivers to, over the loop's own.
 fn CustomSink(comptime SinkPtr: type) type {
-    const Sink = @typeInfo(SinkPtr).pointer.child;
-    const op_pointer = @typeInfo(@TypeOf(Sink.complete)).@"fn".param_types[1].?;
     return struct {
         fn of(sink: SinkPtr) Custom.Sink {
             return .{ .context = sink, .complete = complete, .completePending = completePending };
         }
 
-        fn complete(context: *anyopaque, o: *anyopaque) void {
+        fn complete(context: *anyopaque, o: *op.Op) void {
             const sink: SinkPtr = @ptrCast(@alignCast(context)); // safe: `of` stored this sink
-            sink.complete(@as(op_pointer, @ptrCast(@alignCast(o)))); // safe: a custom backend returns the ops it was given
+            sink.complete(o);
         }
 
         fn completePending(context: *anyopaque, token: pending.Token, outcome: pending.Outcome) void {

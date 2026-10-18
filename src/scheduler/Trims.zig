@@ -18,7 +18,7 @@ const Record = struct {
     keep_from: usize = 0,
 };
 const Bucket = struct {
-    op: Loop.Op = .{ .kind = .{ .timer = .{ .raw = .zero, .clock = .awake } }, .callback = fired },
+    op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .{ .raw = .zero, .clock = .awake } } }, .callback = fired },
     loop: ?*Loop = null,
     head: ?*Record = null,
     tail: ?*Record = null,
@@ -31,7 +31,7 @@ const Bucket = struct {
     fn schedule(bucket: *Bucket) void {
         if (bucket.armed) return;
         const first = bucket.head orelse return;
-        bucket.op.kind = .{ .timer = .{ .raw = first.deadline, .clock = .awake } };
+        bucket.op.backend.kind = .{ .timer = .{ .raw = first.deadline, .clock = .awake } };
         bucket.loop.?.submit(&bucket.op) catch return;
         bucket.armed = true;
     }
@@ -109,7 +109,7 @@ fn unlink(record: *Record) void {
 fn fired(loop: *Loop, op: *Loop.Op) void {
     const bucket: *Bucket = @alignCast(@fieldParentPtr("op", op)); // safe: the init-reserved bucket owns this timer
     bucket.armed = false;
-    op.result.timer catch return;
+    op.backend.result.timer catch return;
     const now = loop.clock.now(.awake);
     while (bucket.head) |record| {
         if (record.deadline.nanoseconds > now.nanoseconds) break;

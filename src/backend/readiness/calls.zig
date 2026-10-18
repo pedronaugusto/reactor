@@ -22,9 +22,8 @@ const op = @import("../op.zig");
 const file = @import("../../sys/file.zig");
 const sys_poll = @import("../../sys/poll.zig");
 
-/// The ways a descriptor is waited on. `priority` is the exceptional
-/// condition `poll` calls `POLLPRI`.
-pub const Direction = enum(u2) { read, write, priority };
+const Direction = @import("records.zig").Direction;
+const How = @import("Waiter.zig").How;
 
 const bug = Threaded.errnoBug;
 
@@ -65,19 +64,6 @@ pub fn subject(operation: Io.Operation) struct { Io.File.Handle, Direction } {
         .device_io_control => |o| .{ o.file.handle, .read },
     };
 }
-
-/// How an operation is made on a descriptor that is not ready yet.
-pub const How = enum(u2) {
-    /// A call that never waits (a socket's): made at once, and again on
-    /// each readiness until it does not report `EAGAIN`.
-    call,
-    /// A descriptor in blocking mode: called only once it is ready.
-    ready_then_call,
-    /// Readiness alone (a `wait`).
-    readiness,
-    /// A connect under way: its outcome once the socket is writable.
-    connect,
-};
 
 pub fn howOf(operation: Io.Operation) How {
     return switch (operation) {

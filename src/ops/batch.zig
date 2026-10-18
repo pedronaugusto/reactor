@@ -420,13 +420,13 @@ fn awaitSingle(s: *Scheduler, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.Aw
     const index = batch.submitted.head;
     const operation = batch.storage[index.toIndex()].submission.operation;
     if (!loop_internal.canPend(&p.loop, operation)) return false;
-    var op: Loop.Op = .{ .kind = .{ .io = operation } };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .io = operation } } };
     perform.run(s, &op, .{ .deadline = perform.deadline(p, timeout) }) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         error.Timeout => error.Timeout,
         error.SystemResources => error.ConcurrencyUnavailable,
     };
-    const result = try op.result.io;
+    const result = try op.backend.result.io;
     complete(batch, index, result);
     batch.submitted = .{ .head = .none, .tail = .none };
     return true;

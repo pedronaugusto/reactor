@@ -36,7 +36,7 @@ fn unexpected(status: Status) error{Unexpected} {
 
 /// The result of a completed operation whose final status and transfer
 /// count are `status` and `information`.
-pub fn of(o: anytype, status: Status, information: usize) op.Result {
+pub fn of(o: *op.Op, status: Status, information: usize) op.Result {
     const canceled = ended(status);
     const ours = canceled and o.state.canceled;
     return switch (o.kind) {
@@ -63,7 +63,7 @@ pub fn of(o: anytype, status: Status, information: usize) op.Result {
     };
 }
 
-fn io(o: anytype, operation: Io.Operation, status: Status, information: usize) Io.Operation.Result {
+fn io(o: *op.Op, operation: Io.Operation, status: Status, information: usize) Io.Operation.Result {
     // Ended though nobody here asked: its handle was closed.
     const closed = ended(status);
     return switch (operation) {
@@ -98,7 +98,7 @@ fn one(s: Io.Operation.NetSend, information: usize) struct { ?net.Socket.SendErr
     return .{ null, 1 };
 }
 
-fn received(o: anytype, r: Io.Operation.NetReceive, status: Status, information: usize) struct { ?net.Socket.ReceiveError, usize } {
+fn received(o: *op.Op, r: Io.Operation.NetReceive, status: Status, information: usize) struct { ?net.Socket.ReceiveError, usize } {
     const d = &o.state.storage.scratch.iocp.request.datagram_in;
     return datagram(&r.message_buffer[0], r.data_buffer, status, information, &d.address);
 }

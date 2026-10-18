@@ -72,38 +72,27 @@ pub const UringFeatures = packed struct {
 /// Caller-owned and pinned from `submit` until its completion is
 /// delivered: the loop never copies or allocates one.
 pub const Op = struct {
-    // Keep the completion fields beside the kind, ahead of aligned backend
-    // scratch. Wheel cancellation then touches fewer cache lines.
-    kind: Kind,
+    // Keep the completion fields ahead of the kind, and both ahead of the
+    // aligned backend scratch. Wheel cancellation then touches fewer cache
+    // lines.
     /// Runs inside `run`, on the loop's thread. Null: the completion waits
     /// for `reap`.
-    callback: ?*const fn (l: *Loop, o: *Op) void align(@alignOf(Kind)) = null,
+    callback: ?*const fn (l: *Loop, o: *Op) void = null,
     user_data: usize = 0,
-    /// Valid once completed, under the field of `kind`.
-    result: Result align(@alignOf(Kind)) = undefined,
-    /// The loop's and its backend's from `submit` to delivery.
-    state: op.State(backends.Scratch) = .{},
-
-    /// Absolute deadline, linked in the kernel where supported. Other
-    /// backends are timed by the runtime's wheel.
-    linked: if (builtin.os.tag == .linux) Linked else void = if (builtin.os.tag == .linux) .{} else {},
-
-    /// A deadline in the Op's own bytes: sixteen of them, where an optional
-    /// timestamp would take forty-eight in every operation.
-    pub const Linked = struct {
-        /// Nanoseconds on `clock`, saturating; read only when `set`.
-        ns: i64 = 0,
-        clock: Io.Clock = .awake,
-        set: bool = false,
-
-        pub fn of(at: ?Io.Clock.Timestamp) Linked {
-            const t = at orelse return .{};
-            return .{ .ns = std.math.lossyCast(i64, t.raw.nanoseconds), .clock = t.clock, .set = true };
-        }
-    };
+    /// The operation's backend half, which is all a backend sees of it: its
+    /// kind, its result (valid once completed, under the field of its
+    /// kind), the loop's and the backend's state from `submit` to delivery,
+    /// and its linked deadline.
+    backend: op.Op,
 
     pub const Kind = op.Kind;
     pub const Result = op.Result;
+    pub const Linked = op.Linked;
+
+    /// The operation whose backend half `o` is.
+    fn of(o: *op.Op) *Op {
+        return @fieldParentPtr("backend", o);
+    }
 };
 
 pub const Waitable = op.Waitable;
@@ -149,16 +138,16 @@ const List = struct {
     tail: ?*Op = null,
 
     fn push(l: *List, o: *Op) void {
-        o.state.next = null;
-        if (l.tail) |t| t.state.next = o else l.head = o;
+        o.backend.state.next = null;
+        if (l.tail) |t| t.backend.state.next = &o.backend else l.head = o;
         l.tail = o;
     }
 
     fn pop(l: *List) ?*Op {
         const o = l.head orelse return null;
-        l.head = @ptrCast(@alignCast(o.state.next)); // safe: only `push` links, and it links `*Op`s
+        l.head = if (o.backend.state.next) |next| Op.of(next) else null;
         if (l.head == null) l.tail = null;
-        o.state.next = null;
+        o.backend.state.next = null;
         return o;
     }
 };
@@ -278,48 +267,48 @@ pub fn kind(l: *const Loop) ?backends.Kind {
 pub fn submit(l: *Loop, o: *Op) SubmitError!void {
     if (!try l.start(o)) return;
     l.in_flight += 1;
-    o.state.phase = .done;
+    o.backend.state.phase = .done;
     l.ready.push(o);
 }
 
 /// As `submit`, but an operation that completes at once is not queued:
-/// this returns true, `o.result` is set, and nothing is delivered for it.
+/// this returns true, `o.backend.result` is set, and nothing is delivered for it.
 /// A host that runs its own tasks saves a trip through its scheduler.
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     l.installPressure();
     l.assertOwner();
-    assert(o.state.phase == .idle);
+    assert(o.backend.state.phase == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
-    o.state = .{};
-    switch (o.kind) {
+    o.backend.state = .{};
+    switch (o.backend.kind) {
         .timer => |deadline| if (l.backend.kind() == null or (deadline.clock != .real and deadline.clock != .boot)) {
-            o.state.phase = .timer;
-            l.wheel.arm(&o.state.storage.node, l.deadlineTick(deadline));
+            o.backend.state.phase = .timer;
+            l.wheel.arm(&o.backend.state.storage.node, l.deadlineTick(deadline));
             l.in_flight += 1;
             return false;
         },
         .io => |*operation| if (empty(operation)) |result| {
-            o.result = .{ .io = result };
+            o.backend.result = .{ .io = result };
             return true;
         },
         .read_at => |r| if (r.buffer.len == 0) {
-            o.result = .{ .read_at = 0 };
+            o.backend.result = .{ .read_at = 0 };
             return true;
         },
         .write_at => |w| if (w.bytes.len == 0) {
-            o.result = .{ .write_at = 0 };
+            o.backend.result = .{ .write_at = 0 };
             return true;
         },
         else => {},
     }
-    o.state.storage = .{ .scratch = undefined };
-    o.state.phase = .kernel;
-    const done = l.backend.submit(o) catch |err| {
-        o.state.phase = .idle;
+    o.backend.state.storage = .{ .scratch = undefined };
+    o.backend.state.phase = .kernel;
+    const done = l.backend.submit(&o.backend) catch |err| {
+        o.backend.state.phase = .idle;
         return err;
     };
     if (done) {
-        o.state.phase = .idle;
+        o.backend.state.phase = .idle;
         return true;
     }
     l.in_flight += 1;
@@ -342,12 +331,12 @@ pub fn closing(fd: Io.File.Handle) void {
 /// this call.
 pub fn cancel(l: *Loop, o: *Op) void {
     l.assertOwner();
-    switch (o.state.phase) {
+    switch (o.backend.state.phase) {
         .idle, .done => {},
         .timer => {
-            l.wheel.disarm(&o.state.storage.node);
-            o.state.canceled = true;
-            o.result = .{ .timer = error.Canceled };
+            l.wheel.disarm(&o.backend.state.storage.node);
+            o.backend.state.canceled = true;
+            o.backend.result = .{ .timer = error.Canceled };
             l.deliver(o);
         },
         .kernel => @call(.never_inline, cancelKernel, .{ l, o }),
@@ -356,10 +345,10 @@ pub fn cancel(l: *Loop, o: *Op) void {
 
 // Keep backend dispatch out of the wheel's cancellation path.
 fn cancelKernel(l: *Loop, o: *Op) void {
-    if (o.state.canceled) return;
-    o.state.canceled = true;
-    if (l.backend.cancel(o)) {
-        o.state.phase = .done;
+    if (o.backend.state.canceled) return;
+    o.backend.state.canceled = true;
+    if (l.backend.cancel(&o.backend)) {
+        o.backend.state.phase = .done;
         l.ready.push(o);
     }
 }
@@ -404,7 +393,7 @@ pub fn reap(l: *Loop, out: []*Op) []*Op {
     var n: usize = 0;
     while (n < out.len) : (n += 1) {
         const o = l.reaped.pop() orelse break;
-        o.state.phase = .idle;
+        o.backend.state.phase = .idle;
         out[n] = o;
     }
     return out[0..n];
@@ -542,10 +531,10 @@ fn deliverReady(l: *Loop) u32 {
 fn deliver(l: *Loop, o: *Op) void {
     l.in_flight -= 1;
     if (o.callback) |callback| {
-        o.state.phase = .idle;
+        o.backend.state.phase = .idle;
         callback(l, o);
     } else {
-        o.state.phase = .done;
+        o.backend.state.phase = .done;
         l.reaped.push(o);
     }
 }
@@ -559,9 +548,9 @@ const Counted = struct {
         c.count += 1;
     }
 
-    pub fn complete(c: *Counted, o: *Op) void {
+    pub fn complete(c: *Counted, o: *op.Op) void {
         c.count += 1;
-        c.loop.deliver(o);
+        c.loop.deliver(Op.of(o));
     }
 
     pub fn completePending(c: *Counted, token: backends.pending.Token, outcome: backends.pending.Outcome) void {
@@ -578,10 +567,11 @@ const Fired = struct {
     count: u32 = 0,
 
     pub fn fire(f: *Fired, node: *Wheel.Node) void {
-        const storage: *op.State(backends.Scratch).Storage = @ptrCast(@alignCast(node)); // safe: the timer owns this union's node
-        const state: *op.State(backends.Scratch) = @alignCast(@fieldParentPtr("storage", storage)); // safe: the storage belongs to the operation's state
-        const o: *Op = @alignCast(@fieldParentPtr("state", state)); // safe: the state is a field of an operation
-        o.result = .{ .timer = {} };
+        const storage: *op.State.Storage = @ptrCast(@alignCast(node)); // safe: the timer owns this union's node
+        const state: *op.State = @alignCast(@fieldParentPtr("storage", storage)); // safe: the storage belongs to the operation's state
+        const half: *op.Op = @alignCast(@fieldParentPtr("state", state)); // safe: the state is a field of an operation
+        const o = Op.of(half);
+        o.backend.result = .{ .timer = {} };
         f.count += 1;
         f.loop.deliver(o);
     }
@@ -602,9 +592,9 @@ const Pressure = struct {
         var sink: Pressure = .{ .loop = loop };
         loop.backend.io_uring.complete(cqe, &sink);
     }
-    pub fn complete(p: *Pressure, o: *Op) void {
+    pub fn complete(p: *Pressure, o: *op.Op) void {
         o.state.phase = .done;
-        p.loop.ready.push(o);
+        p.loop.ready.push(Op.of(o));
     }
     pub fn completePending(p: *Pressure, token: backends.pending.Token, outcome: backends.pending.Outcome) void {
         p.loop.in_flight -= 1;

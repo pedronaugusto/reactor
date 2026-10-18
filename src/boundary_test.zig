@@ -36,7 +36,7 @@ test "a deadline beyond the end of the timeline waits and cancels" {
     loop_internal.initWith(&loop, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 4);
     defer loop.deinit(testing.allocator);
     const far: Io.Clock.Timestamp = .{ .clock = .awake, .raw = .{ .nanoseconds = std.math.maxInt(i96) } };
-    var timer: Loop.Op = .{ .kind = .{ .timer = far } };
+    var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = far } } };
     try loop.submit(&timer);
     // Armed at the end of the timeline: a wait is long but never negative or wrapped.
     const left = loop.nextTimeout().?;
@@ -45,7 +45,7 @@ test "a deadline beyond the end of the timeline waits and cancels" {
     loop.cancel(&timer);
     var reaped: [1]*Loop.Op = undefined;
     try testing.expectEqual(@as(usize, 1), loop.reap(&reaped).len);
-    try testing.expectError(error.Canceled, timer.result.timer);
+    try testing.expectError(error.Canceled, timer.backend.result.timer);
 }
 
 test "a worker count past the processors a runtime can number is refused" {

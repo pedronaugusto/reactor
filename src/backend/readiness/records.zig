@@ -10,6 +10,10 @@ const posix = std.posix;
 
 pub const none = std.math.maxInt(u32);
 
+/// The ways a descriptor is waited on. `priority` is the exceptional
+/// condition `poll` calls `POLLPRI`.
+pub const Direction = enum(u2) { read, write, priority };
+
 /// The directions a descriptor is registered for.
 pub const Directions = packed struct(u3) {
     read: bool = false,

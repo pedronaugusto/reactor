@@ -20,7 +20,7 @@ fn unexpected(e: E) error{Unexpected} {
 }
 
 /// The result of a completed operation.
-pub fn of(o: anytype, cqe: linux.io_uring_cqe) op.Result {
+pub fn of(o: *op.Op, cqe: linux.io_uring_cqe) op.Result {
     const e = cqe.err();
     const canceled = e == .CANCELED;
     const ours = canceled and o.state.canceled;
@@ -59,7 +59,7 @@ pub fn ofPending(tag: Io.Operation.Tag, cqe: linux.io_uring_cqe) pending.Outcome
     };
 }
 
-fn io(o: anytype, operation: Io.Operation, cqe: linux.io_uring_cqe) Io.Operation.Result {
+fn io(o: *op.Op, operation: Io.Operation, cqe: linux.io_uring_cqe) Io.Operation.Result {
     const e = cqe.err();
     const n: usize = if (cqe.res >= 0) @intCast(cqe.res) else 0;
     // Cancelled though nobody here asked: its descriptor was closed.
@@ -75,13 +75,13 @@ fn io(o: anytype, operation: Io.Operation, cqe: linux.io_uring_cqe) Io.Operation
     };
 }
 
-fn readResult(o: anytype, r: Io.Operation.NetRead, n: usize) net.Stream.ReadResult {
+fn readResult(o: *op.Op, r: Io.Operation.NetRead, n: usize) net.Stream.ReadResult {
     if (r.control.len == 0) return .{ .data_len = n };
     const header = &o.state.storage.scratch.io_uring.message.header;
     return .{ .data_len = n, .control_len = header.controllen, .control_truncated = header.flags & posix.MSG.CTRUNC != 0 };
 }
 
-fn received(o: anytype, r: Io.Operation.NetReceive, n: usize) struct { ?net.Socket.ReceiveError, usize } {
+fn received(o: *op.Op, r: Io.Operation.NetReceive, n: usize) struct { ?net.Socket.ReceiveError, usize } {
     const m = &o.state.storage.scratch.io_uring.message;
     fillMessage(&r.message_buffer[0], r.data_buffer[0..n], &m.address, &m.header);
     return .{ null, 1 };
@@ -132,7 +132,7 @@ pub fn sendFlags(flags: net.SendFlags) u32 {
         posix.MSG.NOSIGNAL;
 }
 
-fn accept(o: anytype, cqe: linux.io_uring_cqe) net.Server.AcceptError!net.Socket {
+fn accept(o: *op.Op, cqe: linux.io_uring_cqe) net.Server.AcceptError!net.Socket {
     const e = cqe.err();
     if (e != .SUCCESS) return switch (e) {
         .AGAIN, .BADF, .FAULT, .NOTSOCK, .OPNOTSUPP => bug(e),

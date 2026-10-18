@@ -104,13 +104,13 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
         defer native.leave(entered);
         if (!native.taskRuntime(core) or core.backendKind() == null) break :native;
         const p = Scheduler.processor().?;
-        var op: Loop.Op = .{ .kind = .{ .connect = .{ .socket = socket.handle, .address = .{ .ip = address.* } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .connect = .{ .socket = socket.handle, .address = .{ .ip = address.* } } } } };
         perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             error.Timeout => error.Timeout,
             error.SystemResources => error.SystemResources,
         };
-        op.result.connect catch |err| return switch (err) {
+        op.backend.result.connect catch |err| return switch (err) {
             inline else => |e| narrow: {
                 inline for (@typeInfo(Error).error_set.error_names.?) |name| if (comptime std.mem.eql(u8, name, @errorName(e))) break :narrow @field(Error, name);
                 break :narrow error.Unexpected;
