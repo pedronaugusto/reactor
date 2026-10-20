@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-20
+
 ### Added
 
 - `net.message.send` and `net.message.receive`: a stream socket's data with its control data, on any `Io` (POSIX), each a call that never waits in the kernel and a wait for the socket's readiness through `wait` between them. The kernel's answers keep their names (`BadMessage` for `EBADMSG`, `KeyExpired` for `EKEYEXPIRED`, `InputOutput` for `EIO`, `MessageTooBig`), where std's stream read and write fold them into `Unexpected`: Linux's kernel record layer (kTLS) says with them that a record failed to open, that its receive path waits for new keys, and that the next record is not data and the read gave no control room to name its type. For cloak's kernel record layer (its C9).
