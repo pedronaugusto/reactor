@@ -313,6 +313,8 @@ fn fileSequence(io: Io, dir: Io.Dir, path: []const u8, steps: []const Step, out:
     }
 }
 fn differential(_: void, c: *shakedown.Case) !void {
+    // The oracle runs on the case's own `Io`, a new one per fuzzer input.
+    const oracle = c.io();
     var r: Runtime = undefined;
     try native(&r, .auto);
     defer r.deinit();
@@ -323,20 +325,20 @@ fn differential(_: void, c: *shakedown.Case) !void {
     for (steps[0..length]) |*step| step.* = .{ .kind = @intCast(c.source.below(5)), .offset = @intCast(c.source.below(63)), .length = @intCast(c.source.below(32)), .byte = @intCast(c.source.below(255)) };
     var expected: [24]Observation = @splat(.{});
     var actual: [24]Observation = @splat(.{});
-    try fileSequence(testing.io, tmp.dir, "oracle", steps[0..length], expected[0..length]);
+    try fileSequence(oracle, tmp.dir, "oracle", steps[0..length], expected[0..length]);
     try fileSequence(r.io(), tmp.dir, "candidate", steps[0..length], actual[0..length]);
     for (expected[0..length], actual[0..length]) |a, b| {
         try testing.expectEqual(a.count, b.count);
         try testing.expectEqual(a.err, b.err);
         try testing.expectEqualSlices(u8, &a.bytes, &b.bytes);
     }
-    const left = try tmp.dir.openFile(testing.io, "oracle", .{});
-    defer left.close(testing.io);
+    const left = try tmp.dir.openFile(oracle, "oracle", .{});
+    defer left.close(oracle);
     const right = try tmp.dir.openFile(r.io(), "candidate", .{});
     defer right.close(r.io());
     var a: [128]u8 = undefined;
     var b: [128]u8 = undefined;
-    const n = try left.readPositionalAll(testing.io, &a, 0);
+    const n = try left.readPositionalAll(oracle, &a, 0);
     try testing.expectEqual(n, try right.readPositionalAll(r.io(), &b, 0));
     try testing.expectEqualSlices(u8, a[0..n], b[0..n]);
 }
@@ -763,7 +765,7 @@ fn networkDifferential(backend: Loop.Backend, c: *shakedown.Case) !void {
     var payload: [256]u8 = undefined;
     const count = 1 + @as(usize, @intCast(c.source.below(255)));
     for (payload[0..count]) |*byte| byte.* = @intCast(c.source.below(255));
-    const expected = try networkSequence(testing.io, payload[0..count]);
+    const expected = try networkSequence(c.io(), payload[0..count]);
     const actual = try networkSequence(r.io(), payload[0..count]);
     try testing.expectEqualSlices(u8, &expected.bytes, &actual.bytes);
     try testing.expectEqual(expected.canceled, actual.canceled);
