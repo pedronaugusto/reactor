@@ -20,3 +20,6 @@ pub const literal = resolve_file.literal;
 pub const abort = @import("net/abort.zig").abort;
 pub const Deadlines = @import("net/Deadlines.zig");
 pub const Receiver = @import("net/Receiver.zig");
+/// A stream socket's messages with their control data, the kernel's own
+/// answers kept apart (`BadMessage`, `KeyExpired`, `InputOutput`). POSIX.
+pub const message = @import("net/message.zig");

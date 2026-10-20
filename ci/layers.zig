@@ -19,6 +19,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys/getaddrinfo.zig",
         "src/sys/lookup_windows.zig",
         "src/sys/receive.zig",
+        "src/sys/message.zig",
     } },
     .{ .name = "time and lanes", .patterns = &.{
         "src/Wheel.zig",
@@ -106,6 +107,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/net/resolve.zig",
         "src/ext/net/abort.zig",
         "src/ext/net/Deadlines.zig",
+        "src/ext/net/message.zig",
         "src/ext/net/Receiver.zig",
         "src/ext/net/receiver/Groups.zig",
         "src/ext/net/receiver/Registrations.zig",

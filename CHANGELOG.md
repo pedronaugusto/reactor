@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `net.message.send` and `net.message.receive`: a stream socket's data with its control data, on any `Io` (POSIX), each a call that never waits in the kernel and a wait for the socket's readiness through `wait` between them. The kernel's answers keep their names (`BadMessage` for `EBADMSG`, `KeyExpired` for `EKEYEXPIRED`, `InputOutput` for `EIO`, `MessageTooBig`), where std's stream read and write fold them into `Unexpected`: Linux's kernel record layer (kTLS) says with them that a record failed to open, that its receive path waits for new keys, and that the next record is not data and the read gave no control room to name its type. For cloak's kernel record layer (its C9).
+
 ### Changed
 
 - Development: the tests read the calling thread through one helper that is never inlined (`src/testing/thread.zig`). std keeps the id in a thread-local on Linux, and an optimized test that read it before and after an `Io` call that moved its task could get the thread it left on aarch64: a check that the root came back home would pass whatever happened.

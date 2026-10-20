@@ -7,5 +7,6 @@ pub const Notify = @import("sys/Notify.zig");
 pub const poll = @import("sys/poll.zig");
 pub const process = @import("sys/process.zig");
 pub const receive = @import("sys/receive.zig");
+pub const message = @import("sys/message.zig");
 pub const getaddrinfo = @import("sys/getaddrinfo.zig");
 pub const win32 = @import("sys/win32.zig");

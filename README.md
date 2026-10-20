@@ -184,8 +184,13 @@ counted by `reactor.fallbacks()`.
   started.
 - **`Signals`**: signals and console control events, to several listeners.
 - **`net`**: `connect` with a timeout, a bounded `resolve`, `abort`,
-  per-operation `Deadlines`, and a `Receiver` whose idle connections hold no
-  buffer.
+  per-operation `Deadlines`, a `Receiver` whose idle connections hold no
+  buffer, and `message`: a stream socket's sends and receives with their
+  control data (POSIX), the kernel's own answers kept as their own errors
+  (`BadMessage`, `KeyExpired`, `InputOutput`), which std's error sets fold
+  into `Unexpected`. A kernel record layer (Linux kTLS) takes a record's
+  type as a control message and answers in those; the control data is the
+  caller's to build and read.
 
 ## Scope
 
