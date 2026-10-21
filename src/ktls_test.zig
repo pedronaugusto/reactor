@@ -1,16 +1,18 @@
-//! The receive path of Linux's kernel record layer (kTLS) stopping for new
-//! keys: after a TLS 1.3 KeyUpdate the kernel answers `KeyExpired` until the
+//! Linux's kernel record layer (kTLS) under reactor's calls: TLS 1.3 with
+//! AES-128-GCM, the peer's half played here (RFC 8446 5.2). A file a
+//! runtime's `netWriteFile` sends to a socket whose write direction is the
+//! kernel's goes out as records the peer opens. The receive path stopping
+//! for new keys: after a KeyUpdate the kernel answers `KeyExpired` until the
 //! next keys are installed, and `net.message.receive` given a `Wake` waits
-//! for the record layer's owner to signal it. The records are sealed here,
-//! as a peer would (AES-128-GCM, RFC 8446 5.2); the kernel opens them. Linux
-//! 6.14 or later (a second install of a direction is refused before it);
-//! skipped where the kernel has no record layer.
+//! for the record layer's owner to signal it (Linux 6.14 or later; before it
+//! the kernel does not stop). Skipped where the kernel has no record layer.
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const posix = std.posix;
 const Io = std.Io;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
+const net = Io.net;
 
 const reactor = @import("reactor.zig");
 const message = reactor.net.message;
@@ -19,6 +21,7 @@ const supported = @import("Scheduler.zig").supported;
 const is_linux = builtin.os.tag == .linux;
 
 const sol_tls = 282;
+const tls_tx = 1;
 const tls_rx = 2;
 const tls_get_record_type = 2;
 const tcp_ulp = 31;
@@ -64,20 +67,45 @@ const Keys = struct {
         var plain: [256]u8 = undefined;
         @memcpy(plain[0..content.len], content);
         plain[content.len] = kind;
-        var nonce = k.iv;
-        const sequence: [8]u8 = @bitCast(std.mem.nativeToBig(u64, k.sequence));
-        for (nonce[4..], sequence) |*n, s| n.* ^= s;
-        k.sequence += 1;
         var tag: [Aes128Gcm.tag_length]u8 = undefined;
-        Aes128Gcm.encrypt(out[5..][0..inner], &tag, plain[0..inner], &header, nonce, k.key);
+        Aes128Gcm.encrypt(out[5..][0..inner], &tag, plain[0..inner], &header, k.nonce(), k.key);
         @memcpy(out[5 + inner ..][0..tag.len], &tag);
         return out[0 .. 5 + length];
+    }
+
+    /// One record's content opened into `out`, its inner type returned.
+    fn open(k: *Keys, header: [5]u8, body: []const u8, out: []u8) !struct { u8, []const u8 } {
+        if (header[0] != application_data or body.len <= Aes128Gcm.tag_length) return error.NotARecord;
+        const inner = body.len - Aes128Gcm.tag_length;
+        try Aes128Gcm.decrypt(out[0..inner], body[0..inner], body[inner..][0..Aes128Gcm.tag_length].*, &header, k.nonce(), k.key);
+        var end = inner;
+        while (end > 0 and out[end - 1] == 0) end -= 1;
+        if (end == 0) return error.NotARecord;
+        return .{ out[end - 1], out[0 .. end - 1] };
+    }
+
+    /// The next record's nonce, the sequence number counted past it.
+    fn nonce(k: *Keys) [12]u8 {
+        var n = k.iv;
+        const sequence: [8]u8 = @bitCast(std.mem.nativeToBig(u64, k.sequence));
+        for (n[4..], sequence) |*b, s| b.* ^= s;
+        k.sequence += 1;
+        return n;
     }
 };
 
 fn install(fd: posix.fd_t, keys: Keys) !void {
+    return installDirection(fd, tls_rx, keys);
+}
+
+fn installDirection(fd: posix.fd_t, direction: u32, keys: Keys) !void {
     const info = keys.info();
-    if (posix.errno(posix.system.setsockopt(fd, sol_tls, tls_rx, std.mem.asBytes(&info), @sizeOf(CryptoInfo))) != .SUCCESS) return error.InstallRefused;
+    if (posix.errno(posix.system.setsockopt(fd, sol_tls, direction, std.mem.asBytes(&info), @sizeOf(CryptoInfo))) != .SUCCESS) return error.InstallRefused;
+}
+
+fn upperLayer(fd: posix.fd_t) bool {
+    const ulp = "tls";
+    return posix.errno(posix.system.setsockopt(fd, posix.IPPROTO.TCP, tcp_ulp, ulp, ulp.len)) == .SUCCESS;
 }
 
 /// A connected loopback TCP pair, the second end's receive path the kernel's.
@@ -127,8 +155,7 @@ const Stopped = struct {
         errdefer for (ends) |fd| {
             _ = posix.system.close(fd);
         };
-        const ulp = "tls";
-        if (posix.errno(posix.system.setsockopt(ends[1], posix.IPPROTO.TCP, tcp_ulp, ulp, ulp.len)) != .SUCCESS) return error.SkipZigTest;
+        if (!upperLayer(ends[1])) return error.SkipZigTest;
         var first = Keys.of(1);
         var next = Keys.of(2);
         install(ends[1], first) catch return error.SkipZigTest;
@@ -223,5 +250,80 @@ test "a receive stopped for new keys waits for its wake, on Threaded and on a ru
     defer r.deinit();
     try r.start();
     var task = try r.io().concurrent(all, .{r.io()});
+    try task.await(r.io());
+}
+
+const file_size = 300 << 10;
+
+fn byteAt(i: usize) u8 {
+    return @truncate((i *% 2654435761) >> 11);
+}
+
+/// Reads the raw records off `fd` to the end of the stream, opens each,
+/// and checks that together they hold the file.
+fn openAll(io: Io, fd: posix.fd_t, keys: Keys) !void {
+    var opener = keys;
+    var stream: net.Stream = .{ .socket = .{ .handle = fd, .address = .{ .ip4 = .loopback(0) } } };
+    var buffer: [1 << 15]u8 = undefined;
+    var reader = stream.reader(io, &buffer);
+    var plain: [1 << 15]u8 = undefined;
+    var at: usize = 0;
+    while (true) {
+        const header = (reader.interface.takeArray(5) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        }).*;
+        const length = std.mem.readInt(u16, header[3..5], .big);
+        const body = try reader.interface.take(length);
+        const kind, const content = try opener.open(header, body, &plain);
+        try testing.expectEqual(@as(u8, application_data), kind);
+        for (content, 0..) |b, i| if (b != byteAt(at + i)) return error.Corrupt;
+        at += content.len;
+    }
+    try testing.expectEqual(@as(usize, file_size), at);
+}
+
+fn sendsSealed(io: Io) !void {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "sealed", .{ .read = true });
+    defer file.close(io);
+    var chunk: [4096]u8 = undefined;
+    var at: usize = 0;
+    while (at < file_size) : (at += chunk.len) {
+        for (&chunk, 0..) |*b, i| b.* = byteAt(at + i);
+        try file.writePositionalAll(io, &chunk, at);
+    }
+
+    const ends = connected() catch return error.SkipZigTest;
+    defer for (ends) |fd| {
+        _ = posix.system.close(fd);
+    };
+    if (!upperLayer(ends[0])) return error.SkipZigTest;
+    const keys = Keys.of(3);
+    installDirection(ends[0], tls_tx, keys) catch return error.SkipZigTest;
+
+    var opening = try io.concurrent(openAll, .{ io, ends[1], keys });
+    // glint-ignore: Z026 -- cleanup should the send fail first; the peer's own result is judged by `await` below
+    defer opening.cancel(io) catch {};
+    var buffer: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &buffer);
+    while (true) {
+        _ = io.vtable.netWriteFile(io.userdata, ends[0], "", &file_reader, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+    }
+    _ = posix.system.shutdown(ends[0], posix.SHUT.WR);
+    try opening.await(io);
+}
+
+test "a file sent by the kernel to a socket whose writes the kernel seals goes out as records" {
+    if (!is_linux or !supported) return error.SkipZigTest;
+    var r: reactor.Runtime = undefined;
+    try r.init(testing.allocator, small);
+    defer r.deinit();
+    try r.start();
+    var task = try r.io().concurrent(sendsSealed, .{r.io()});
     try task.await(r.io());
 }
