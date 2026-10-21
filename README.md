@@ -197,7 +197,8 @@ counted by `reactor.fallbacks()`.
   (`BadMessage`, `KeyExpired`, `InputOutput`), which std's error sets fold
   into `Unexpected`. A kernel record layer (Linux kTLS) takes a record's
   type as a control message and answers in those; the control data is the
-  caller's to build and read.
+  caller's to build and read. A receive given a `Wake` (`Receive.rekey`)
+  waits through the layer's stop for new keys until their owner signals it.
 
 ## Scope
 

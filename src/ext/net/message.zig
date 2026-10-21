@@ -14,6 +14,13 @@
 //! it, and wait for the socket's readiness through `wait`: native on a
 //! runtime, a cancelable wait on any other `Io`.
 //!
+//! A receive given a `Wake` (`Receive.rekey`) waits through a stop for new
+//! keys: the record layer's owner signals it once they are in. Linux stops
+//! after giving out a TLS 1.3 KeyUpdate, and until the next keys a stopped
+//! socket polls as not readable though records wait behind it; one that
+//! polls readable then has ended or failed, which the stop hides, so the
+//! receive answers `KeyExpired` and leaves it to the owner.
+//!
 //! The control data is the caller's to build and read (`cmsghdr`); reactor
 //! knows no record layer. POSIX: on Windows these are a compile error. On
 //! Darwin a send to a socket in blocking mode can wait in the kernel, which
@@ -31,8 +38,18 @@ pub const Received = sys.Received;
 
 pub const Error = sys.Error || wait.WaitError;
 
+pub const Receive = struct {
+    /// When the receive gives up waiting for the socket, and for new keys.
+    timeout: Io.Timeout = .none,
+    /// Where the kernel's record layer stops its receive path for new keys
+    /// (`KeyExpired`), a wake its owner signals once they are installed, which
+    /// the receive waits for; null: `KeyExpired` is answered at once. A signal
+    /// with no receive stopped is kept and costs the next stop one more try.
+    rekey: ?*wait.Wake = null,
+};
+
 /// One receive: data into `data`, control data into `control`, waiting
-/// until the socket has something or `timeout` passes. `data_len` 0 is the
+/// until the socket has something or the timeout passes. `data_len` 0 is the
 /// end of the stream when `data` had room. At most `max_pieces` of `data`
 /// are filled.
 pub const receive = if (is_windows) @compileError("socket messages are POSIX's") else receivePosix;
@@ -45,10 +62,23 @@ pub const send = if (is_windows) @compileError("socket messages are POSIX's") el
 
 pub const max_pieces = sys.max_pieces;
 
-fn receivePosix(io: Io, socket: Io.net.Socket.Handle, data: []const []u8, control: []u8, timeout: Io.Timeout) Error!Received {
-    const deadline = timeout.toDeadline(io);
+fn receivePosix(io: Io, socket: Io.net.Socket.Handle, data: []const []u8, control: []u8, options: Receive) Error!Received {
+    const deadline = options.timeout.toDeadline(io);
+    // The socket ended the last wait for new keys: a stop found again then
+    // hides the socket's end or a failure.
+    var socket_first = false;
     while (true) {
-        if (try sys.receive(socket, data, control)) |received| return received;
+        const result = sys.receive(socket, data, control) catch |err| switch (err) {
+            error.KeyExpired => {
+                const keys = options.rekey orelse return err;
+                if (socket_first) return err;
+                socket_first = try wait.waitAny(io, &.{ .{ .wake = keys }, .{ .readable = socket } }, deadline) == 1;
+                continue;
+            },
+            else => return err,
+        };
+        socket_first = false;
+        if (result) |received| return received;
         try wait.wait(io, .{ .readable = socket }, deadline);
     }
 }

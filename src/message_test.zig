@@ -55,7 +55,7 @@ fn passesData(io: Io) !void {
 
     var data: [16]u8 = undefined;
     var room: Rights align(@alignOf(usize)) = undefined;
-    const got = try message.receive(io, ends[1], &.{&data}, std.mem.asBytes(&room), ms(5_000));
+    const got = try message.receive(io, ends[1], &.{&data}, std.mem.asBytes(&room), .{ .timeout = ms(5_000) });
     try testing.expectEqualStrings("hello", data[0..got.data_len]);
     try testing.expect(!got.control_truncated);
     try testing.expect(got.control_len >= @offsetOf(Rights, "fd") + @sizeOf(posix.fd_t));
@@ -74,7 +74,7 @@ fn waitsForData(io: Io) !void {
     const ends = try pair();
     defer closeAll(&ends);
     var data: [16]u8 = undefined;
-    try testing.expectError(error.Timeout, message.receive(io, ends[1], &.{&data}, &.{}, ms(20)));
+    try testing.expectError(error.Timeout, message.receive(io, ends[1], &.{&data}, &.{}, .{ .timeout = ms(20) }));
 
     var later = try io.concurrent(struct {
         fn send(inner: Io, fd: posix.fd_t) !void {
@@ -82,13 +82,13 @@ fn waitsForData(io: Io) !void {
             _ = try message.send(inner, fd, &.{"late"}, &.{}, ms(5_000));
         }
     }.send, .{ io, ends[0] });
-    const got = try message.receive(io, ends[1], &.{&data}, &.{}, ms(5_000));
+    const got = try message.receive(io, ends[1], &.{&data}, &.{}, .{ .timeout = ms(5_000) });
     try testing.expectEqualStrings("late", data[0..got.data_len]);
     try later.await(io);
 
     // The end of the stream reads as no data.
     _ = posix.system.shutdown(ends[0], posix.SHUT.WR);
-    const end = try message.receive(io, ends[1], &.{&data}, &.{}, ms(5_000));
+    const end = try message.receive(io, ends[1], &.{&data}, &.{}, .{ .timeout = ms(5_000) });
     try testing.expectEqual(@as(usize, 0), end.data_len);
 }
 
