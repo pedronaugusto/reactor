@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A runtime's `netWriteFile` (std's `Writer.sendFile` on a stream): the kernel's `sendfile` on Linux and Darwin, where std 0.17's `Io.Threaded` answers `Unimplemented` and the writer copied through memory. Each send waits for the socket to be writable through the task's loop and asks for at most a quarter of its send buffer, so a call is seldom cut short; a socket in blocking mode (a runtime's, on Linux) is sent to in a blocking bracket or on a lane. What the writer and the reader hold goes first as a write. Darwin sends from a positional reader only; a reader or a file the kernel cannot send from answers `Unimplemented`, and the writer copies. Under Linux's kernel record layer (kTLS) the kernel seals what it sends (cloak's C9).
+
 ### Changed
 
 - Development: the differential properties in `later_test` run their oracle on `Case.io()`, an `Io` of each fuzzer input's own (shakedown 0.4.13 for development).

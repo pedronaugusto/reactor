@@ -19,6 +19,7 @@ const batch = @import("../ops/batch.zig");
 const perform = @import("../ops/perform.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const io_ops = @import("io_ops.zig");
+const send_file = @import("send_file.zig");
 
 const general = .general;
 
@@ -137,7 +138,7 @@ pub const raw: Io.VTable = .{
     .netListenUnix = route.borrowed("netListenUnix"),
     .netConnectUnix = io_ops.netConnectUnix,
     .netSocketCreatePair = route.borrowed("netSocketCreatePair"),
-    .netWriteFile = route.onLane(general, "netWriteFile"),
+    .netWriteFile = send_file.netWriteFile,
     .netClose = io_ops.netClose,
     .netShutdown = route.borrowed("netShutdown"),
     .netInterfaceNameResolve = route.borrowed("netInterfaceNameResolve"),

@@ -109,6 +109,13 @@ Benchmarks are code in `bench/`; measurements are maintained separately.
   workers on owned `Io.Threaded` lanes, so std's own code and std's own
   cancellation serve them; calls that never block run std's code on the
   worker.
+- **A file sent to a socket** (`Writer.sendFile`, the `netWriteFile`
+  slot) goes by the kernel's `sendfile` on Linux and Darwin, where
+  `Io.Threaded` has none and a writer copies through memory: each send
+  waits for the socket to be writable through the task's loop and asks
+  for what its room takes. Under a kernel record layer (kTLS) the kernel
+  seals what it sends. Darwin sends from a positional reader only; other
+  systems copy.
 - **epoll and kqueue** make a socket's call at once and wait for readiness
   only when it would block, with each descriptor registered once for its
   life. File calls run on the worker. A worker lends its processor while

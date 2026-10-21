@@ -23,6 +23,7 @@ test {
     _ = @import("airlock_test.zig");
     _ = @import("net_test.zig");
     _ = @import("message_test.zig");
+    _ = @import("send_file_test.zig");
     _ = @import("resolve_test.zig");
     _ = @import("accept_test.zig");
     _ = @import("files_test.zig");
