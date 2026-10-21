@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Development: the lint gates glint's A005 as well (the aegis pack's five rules at gate).
 - Development: the differential properties in `later_test` run their oracle on `Case.io()`, an `Io` of each fuzzer input's own (shakedown 0.4.13 for development).
 
 ## [0.7.1] - 2026-10-20
