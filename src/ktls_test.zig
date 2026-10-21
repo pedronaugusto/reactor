@@ -23,7 +23,6 @@ const is_linux = builtin.os.tag == .linux;
 const sol_tls = 282;
 const tls_tx = 1;
 const tls_rx = 2;
-const tls_get_record_type = 2;
 const tcp_ulp = 31;
 const cipher_aes_gcm_128 = 51;
 const tls_1_3 = 0x0304;

@@ -33,7 +33,6 @@ const Io = std.Io;
 const net = Io.net;
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
-const ws2_32 = windows.ws2_32;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
 const Threaded = Io.Threaded;

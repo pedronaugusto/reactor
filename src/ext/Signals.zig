@@ -13,7 +13,6 @@ const Signals = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
-const assert = std.debug.assert;
 const posix = std.posix;
 const Io = std.Io;
 const windows = std.os.windows;

@@ -10,7 +10,6 @@ const aegis = @import("aegis");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 
 const clocks = @import("clock.zig");
 const shuttle = @import("shuttle");

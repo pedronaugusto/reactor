@@ -9,7 +9,6 @@
 //! and holds the task there until it has disarmed it.
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const Task = @import("../scheduler/Task.zig");

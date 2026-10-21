@@ -7,7 +7,6 @@
 //! lists its members is the task's (Task.zig, "Groups").
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
 

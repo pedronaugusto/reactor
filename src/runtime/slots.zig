@@ -4,7 +4,6 @@
 //! calls back into its `Io` (vtable/route.zig).
 const std = @import("std");
 const crash = @import("../sys/crash.zig");
-const assert = std.debug.assert;
 const Io = std.Io;
 const Alignment = std.mem.Alignment;
 

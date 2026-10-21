@@ -12,7 +12,6 @@
 const Fake = @This();
 
 const std = @import("std");
-const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 

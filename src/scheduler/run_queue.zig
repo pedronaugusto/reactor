@@ -11,7 +11,6 @@
 //! owner writes on every task switch would bounce between cores; the fields
 //! the owner writes stay off every line a thief reads.
 const std = @import("std");
-const assert = std.debug.assert;
 
 pub const capacity = 256;
 const mask = capacity - 1;

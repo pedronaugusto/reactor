@@ -4,7 +4,6 @@
 //! Systems without a watch use the wait lane.
 const builtin = @import("builtin");
 const std = @import("std");
-const Io = std.Io;
 const Child = std.process.Child;
 
 const Core = @import("Core.zig");

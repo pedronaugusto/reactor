@@ -6,7 +6,6 @@
 //! threads write an eventfd; `real` and `boot` timers are one absolute
 //! timerfd each.
 const std = @import("std");
-const assert = std.debug.assert;
 const posix = std.posix;
 const linux = std.os.linux;
 

@@ -1,6 +1,5 @@
 //! A backend given as an interface: reactor's seeded fake in its tests.
 //! Operations cross it as the backends' `op.Op`, batch operations by token.
-const Custom = @This();
 
 const std = @import("std");
 const Io = std.Io;
