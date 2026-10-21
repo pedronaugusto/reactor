@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-21
+
 ### Breaking
 
 - `net.message.receive` takes `Receive` options in place of its timeout: `.timeout`, and `.rekey`, a `Wake` the owner of a kernel record layer signals once new keys are installed. Where Linux's kTLS stops its receive path after a TLS 1.3 KeyUpdate (`KeyExpired`, Linux 6.14 and later), a receive given one waits for it beside the socket and reads on under the next keys; a stopped socket polls as not readable though records wait behind it, so one that polls readable has ended or failed, and the receive answers `KeyExpired` for its owner. Without one, `KeyExpired` is answered at once, as before. Tests seal TLS 1.3 records as a peer would and let the kernel open them (`ktls`, Linux 7.0).
