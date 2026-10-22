@@ -2,6 +2,7 @@
 //! caller; these only bind an interface and finish a nonblocking connect.
 const builtin = @import("builtin");
 const std = @import("std");
+const afd = @import("afd.zig");
 const Io = std.Io;
 const posix = std.posix;
 const net = Io.net;
@@ -107,6 +108,29 @@ pub fn windowsConnect(io: Io, socket: net.Socket.Handle, address: *const net.IpA
     return switch (result.device_io_control.u.Status) {
         .SUCCESS => {},
         .CONNECTION_REFUSED => error.ConnectionRefused,
+        .CANCELLED => error.Canceled,
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => error.Unexpected,
+    };
+}
+
+/// A Unix socket from `socket.openUnix` connected by AFD through `io`'s
+/// `operate`, its statuses mapped as the IOCP backend maps them: std 0.17's
+/// `Io.Threaded` answers `Unexpected` for all but resources, a listener's
+/// absence among them.
+pub fn windowsConnectUnix(io: Io, socket: net.Socket.Handle, address: *const net.UnixAddress) net.UnixAddress.ConnectError!void {
+    const windows = std.os.windows;
+    var request: afd.ConnectInfo(windows.ws2_32.sockaddr.un) = .{ .address = .{ .path = @splat(0) } };
+    // The path is informational to AFD: the socket's option named the
+    // target already. As std, a suffix.
+    const n = @min(address.path.len, request.address.path.len - 1);
+    @memcpy(request.address.path[0..n], address.path[address.path.len - n ..]);
+    const result = try io.operate(.{ .device_io_control = .{ .file = .{ .handle = socket, .flags = .{ .nonblocking = true } }, .code = windows.IOCTL.AFD.CONNECT, .in = std.mem.asBytes(&request), .out = &.{} } });
+    return switch (result.device_io_control.u.Status) {
+        .SUCCESS => {},
+        .CONNECTION_REFUSED => error.ConnectionRefused,
+        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => error.FileNotFound,
+        .ACCESS_DENIED => error.AccessDenied,
         .CANCELLED => error.Canceled,
         .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
         else => error.Unexpected,

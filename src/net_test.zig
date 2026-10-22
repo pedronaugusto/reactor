@@ -362,3 +362,33 @@ test "connect binds its requested local endpoint" {
     try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &result.stream.socket.address.ip4.bytes);
     try testing.expect(result.stream.socket.address.getPort() != 0);
 }
+
+test "connectUnix names a refused connect and a missing path as std does, on Threaded too" {
+    if (!Io.net.has_unix_sockets) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const path = try Io.Dir.path.join(gpa, &.{ root, "socket" });
+    defer gpa.free(path);
+    const address = try Io.net.UnixAddress.init(path);
+    // No path: a missing file on POSIX; Windows may answer it as refused.
+    if (net.connectUnix(io, &address)) |stream| {
+        stream.close(io);
+        return error.TestUnexpectedResult;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        error.ConnectionRefused => if (builtin.os.tag != .windows) return err,
+        else => return err,
+    }
+    {
+        var server = try address.listen(io, .{});
+        defer server.deinit(io);
+        const stream = try net.connectUnix(io, &address);
+        stream.close(io);
+    }
+    // The path a listener left behind, with nothing listening at it.
+    try testing.expectError(error.ConnectionRefused, net.connectUnix(io, &address));
+}

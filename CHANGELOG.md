@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `net.connectUnix`: a Unix stream socket connected on any `Io`, its errors std's names everywhere. On Windows over an `Io` other than a runtime it connects by AFD through `operate`, where std 0.17's `Io.Threaded` answers `Unexpected` for a refused connect (no listener at the path) and a missing path: here they are `ConnectionRefused` and `FileNotFound`, as a runtime's IOCP backend has them.
+
 ## [0.8.0] - 2026-10-21
 
 ### Breaking

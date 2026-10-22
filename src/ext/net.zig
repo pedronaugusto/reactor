@@ -10,6 +10,7 @@ pub const ConnectOptions = connect_file.Options;
 pub const Connected = connect_file.Connected;
 pub const ConnectError = connect_file.Error;
 pub const connect = connect_file.connect;
+pub const connectUnix = connect_file.connectUnix;
 
 pub const ResolveOptions = resolve_file.Options;
 pub const ResolveError = resolve_file.Error;

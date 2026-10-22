@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const dial = @import("../../sys/dial.zig");
+const socket_sys = @import("../../sys/socket.zig");
 const Loop = @import("../../Loop.zig");
 const Scheduler = @import("../../Scheduler.zig");
 const perform = @import("../../ops/perform.zig");
@@ -85,6 +86,23 @@ pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Co
             break :expired error.Timeout;
         },
     };
+}
+
+/// A Unix stream socket connected to `address` on any `Io`, its errors
+/// std's names for them everywhere: `ConnectionRefused` where nothing
+/// listens at the path, `FileNotFound` where there is none. A runtime, and
+/// every system but Windows, connects by `UnixAddress.connect`; on Windows
+/// any other `Io` connects through its `operate`, where std 0.17's
+/// `Io.Threaded` answers `Unexpected` for both.
+pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Stream {
+    if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return address.connect(io);
+    const handle = socket_sys.openUnix(address, .blocking) catch |err| return switch (err) {
+        error.ProtocolUnsupportedByAddressFamily => error.AddressFamilyUnsupported,
+        else => |e| e,
+    };
+    errdefer socket_sys.close(handle);
+    try dial.windowsConnectUnix(io, handle, address);
+    return .{ .socket = .{ .handle = handle, .address = .{ .ip4 = .loopback(0) } } };
 }
 
 fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {

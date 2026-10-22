@@ -161,6 +161,17 @@ Zero-copy send is off by default: hosted loopback measurements found no
 payload size where it paid. SQPOLL owns an extra kernel thread, and an unsupported explicit request
 fails.
 
+## Extensions on another Io
+
+An extension keeps its promise on every `Io`: natively on a runtime, and on
+any other through the slots that `Io` has. Where std's own slot breaks the
+promise on a platform, the extension makes the call itself through
+`Io.operate`, so no caller catches std's gap.
+
+| Extension | std's gap | What the extension does |
+| --- | --- | --- |
+| `net.connectUnix` | `Io.Threaded`'s Windows unix connect (Zig 0.17) answers `Unexpected` for every status but resources: no listener at the path (`STATUS_CONNECTION_REFUSED`) and no path at all among them. | On Windows over any `Io` but a runtime, it opens the socket as the runtime does (`sys.socket.openUnix`) and connects by `IOCTL_AFD_CONNECT` through `operate`, mapping the statuses as the IOCP backend does: refused is `ConnectionRefused`, a missing path `FileNotFound`. A runtime, and every other system, connects by `UnixAddress.connect`. |
+
 ## Workers
 
 A runtime started without `workers` runs the logical CPUs less one, and on Darwin a quarter of them. The kernel's loopback path there costs more per message with more threads in it (a thread for each socket plateaus at ~165k 64-byte round trips a second however many there are; system time per message on 15 workers was twice that on 4), so tasks that talk to each other through sockets run faster on a few workers, while arithmetic-only tasks scale to every CPU. The quarter is measured on one machine (Apple M3 Max, 16 CPUs): 2 to 4 workers were best for sockets, 15 for arithmetic.
