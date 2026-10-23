@@ -391,4 +391,9 @@ test "connectUnix names a refused connect and a missing path as std does, on Thr
     }
     // The path a listener left behind, with nothing listening at it.
     try testing.expectError(error.ConnectionRefused, net.connectUnix(io, &address));
+    // A path in a directory that is not there.
+    const nowhere_path = try Io.Dir.path.join(gpa, &.{ root, "nowhere", "socket" });
+    defer gpa.free(nowhere_path);
+    const nowhere = try Io.net.UnixAddress.init(nowhere_path);
+    try testing.expectError(error.FileNotFound, net.connectUnix(io, &nowhere));
 }
