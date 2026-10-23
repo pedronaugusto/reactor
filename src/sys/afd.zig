@@ -111,11 +111,15 @@ pub fn bind(handle: Handle, address: *const net.IpAddress, mode: windows.AFD.BIN
     };
 }
 
-/// The Unix socket bound to no path, as std binds one before connecting.
+/// The Unix socket bound to no path, as std binds one before connecting:
+/// the family and an empty name, its one NUL. The whole of a zeroed
+/// `sockaddr.un` is refused (`INVALID_PARAMETER`) when the path the socket
+/// targets is in a directory that is not there.
 pub fn bindUnixUnnamed(handle: Handle) error{ SystemResources, Unexpected }!void {
     const Storage = extern struct { info: windows.AFD.BIND_INFO, address: ws2_32.sockaddr.un };
     var storage: Storage = .{ .info = .{ .Mode = .Unix }, .address = .{ .path = @splat(0) } };
-    return switch (control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address))) {
+    const in = std.mem.asBytes(&storage)[0 .. @offsetOf(Storage, "address") + @offsetOf(ws2_32.sockaddr.un, "path") + 1];
+    return switch (control(handle, windows.IOCTL.AFD.BIND, in, std.mem.asBytes(&storage.address))) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),
