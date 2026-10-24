@@ -397,3 +397,7 @@ test "connectUnix names a refused connect and a missing path as std does, on Thr
     const nowhere = try Io.net.UnixAddress.init(nowhere_path);
     try testing.expectError(error.FileNotFound, net.connectUnix(io, &nowhere));
 }
+
+test {
+    _ = @import("sys/afd.zig");
+}

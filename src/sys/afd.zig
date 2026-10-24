@@ -175,3 +175,77 @@ pub const PollHandle = extern struct {
     events: u32,
     status: Status,
 };
+
+test "probe: a Unix connect's statuses by bind and listener (Windows)" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const ws = struct {
+        const Socket = windows.HANDLE;
+        extern "ws2_32" fn WSAStartup(version: u16, data: *[512]u8) callconv(.winapi) i32;
+        extern "ws2_32" fn socket(family: i32, kind: i32, protocol: i32) callconv(.winapi) Socket;
+        extern "ws2_32" fn bind(s: Socket, name: *const anyopaque, len: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn listen(s: Socket, backlog: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn closesocket(s: Socket) callconv(.winapi) i32;
+    };
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var data: [512]u8 = undefined;
+    _ = ws.WSAStartup(0x0202, &data);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const Listener = enum { std_slash, std_backslash, winsock_slash, winsock_backslash };
+    const Bind = enum { none, family, family_nul, whole };
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(gpa);
+    for (std.enums.values(Listener)) |l| {
+        const name = try gpa.print("{s}\\{t}", .{ root, l });
+        defer gpa.free(name);
+        if (l == .std_slash or l == .winsock_slash) std.mem.replaceScalar(u8, name, '\\', '/');
+        const address = try net.UnixAddress.init(name);
+        var server: ?net.Server = null;
+        var listener: ?ws.Socket = null;
+        switch (l) {
+            .std_slash, .std_backslash => server = try address.listen(io, .{}),
+            .winsock_slash, .winsock_backslash => {
+                const s = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+                var un: ws2_32.sockaddr.un = .{ .path = @splat(0) };
+                @memcpy(un.path[0..name.len], name);
+                const rb = ws.bind(s, &un, @intCast(@offsetOf(ws2_32.sockaddr.un, "path") + name.len + 1));
+                const rl = ws.listen(s, 16);
+                try report.print(gpa, "{t}: winsock bind {d} listen {d}\n", .{ l, rb, rl });
+                listener = s;
+            },
+        }
+        defer if (server) |*s| s.deinit(io);
+        defer if (listener) |s| {
+            _ = ws.closesocket(s);
+        };
+        for (std.enums.values(Bind)) |b| {
+            const handle = try open(ws2_32.AF.UNIX, .stream, null);
+            defer windows.CloseHandle(handle);
+            const path = try Threaded.sliceToPrefixedFileW(null, name, .{ .allow_relative = false });
+            var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
+            const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
+            const opt: Status = if (option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes)) |_| .SUCCESS else |_| .UNSUCCESSFUL;
+            const Storage = extern struct { info: windows.AFD.BIND_INFO, address: ws2_32.sockaddr.un };
+            var storage: Storage = .{ .info = .{ .Mode = .Unix }, .address = .{ .path = @splat(0) } };
+            const head = @offsetOf(Storage, "address");
+            const fam = @offsetOf(ws2_32.sockaddr.un, "path");
+            const bound: Status = switch (b) {
+                .none => .SUCCESS,
+                .family => control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage)[0 .. head + fam], std.mem.asBytes(&storage.address)),
+                .family_nul => control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage)[0 .. head + fam + 1], std.mem.asBytes(&storage.address)),
+                .whole => control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address)),
+            };
+            var request: ConnectInfo(ws2_32.sockaddr.un) = .{ .address = .{ .path = @splat(0) } };
+            const n = @min(name.len, request.address.path.len - 1);
+            @memcpy(request.address.path[0..n], name[name.len - n ..]);
+            const connected = control(handle, windows.IOCTL.AFD.CONNECT, std.mem.asBytes(&request), &.{});
+            try report.print(gpa, "{t} {t}: option {t} bind {t} connect {t}\n", .{ l, b, opt, bound, connected });
+        }
+    }
+    std.debug.print("{s}", .{report.items});
+    return error.ProbeReport;
+}
