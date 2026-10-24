@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - A lane's call could wait forever for a thread to start on: the lane counted only the threads a reserve job found new, but std's executor gives a reserve job to whichever of its threads is free first, so a thread made for one could find it taken and wait idle, uncounted. A call then waited, holding the lane's queue lock, for a thread it could not see, and the thread finishing a call waited for that lock. Seen on the sync lane under airlock's `Batch` through `syncLane` (a chronicle backup); every lane could. The lane now reads its threads from the executor's own count. The test gives the executor a thread no reserve ran on and makes four calls: they hung every run before.
+- A runtime's listen and bind on Windows are reactor's own over AFD, where it borrowed std 0.17's, whose bind reports every refusal but a sharing violation as `Unexpected`: a listen with `reuse_address` on a port another socket holds exclusively, or on a port in a range Windows reserves (Hyper-V's excluded ranges), is `AccessDenied`; an address that is not this machine's `AddressUnavailable`. A connect's own bind names them too, its ports used up as `AddressUnavailable`, as POSIX names it. The test holds a port with `SO_EXCLUSIVEADDRUSE` and listens over it, and binds and listens on TEST-NET-1.
 
 ## [0.8.2] - 2026-10-24
 

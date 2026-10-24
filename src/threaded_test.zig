@@ -3,6 +3,7 @@
 //! `Threaded`'s blocking futexes inside a task. Checked against the
 //! `Threaded.zig` of the Zig that builds the tests: every function such a
 //! slot can reach, by name, through the whole file.
+const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
@@ -17,14 +18,13 @@ const source: [:0]const u8 = @embedFile("threaded.source");
 /// between a lane and a worker is a decision: this list changes with it,
 /// and the test below holds the vtable to it.
 const borrowed = [_][]const u8{
-    "dirClose",                    "fileSeekBy",           "fileSeekTo",            "fileIsTty",
-    "fileEnableAnsiEscapeCodes",   "fileTryLock",          "fileUnlock",            "fileDowngradeLock",
-    "fileSupportsAnsiEscapeCodes", "processSetCurrentDir", "processSetCurrentPath", "processReplace",
-    "fileMemoryMapDestroy",        "processCurrentPath",   "progressParentFile",    "inheritParentDir",
-    "inheritParentFile",           "randomSecure",         "netListenIp",           "netBindIp",
-    "netListenUnix",               "netSocketCreatePair",  "netShutdown",           "netInterfaceNameResolve",
-    "netInterfaceName",
-};
+    "dirClose",                    "fileSeekBy",              "fileSeekTo",            "fileIsTty",
+    "fileEnableAnsiEscapeCodes",   "fileTryLock",             "fileUnlock",            "fileDowngradeLock",
+    "fileSupportsAnsiEscapeCodes", "processSetCurrentDir",    "processSetCurrentPath", "processReplace",
+    "fileMemoryMapDestroy",        "processCurrentPath",      "progressParentFile",    "inheritParentDir",
+    "inheritParentFile",           "randomSecure",            "netListenUnix",         "netSocketCreatePair",
+    "netShutdown",                 "netInterfaceNameResolve", "netInterfaceName",
+} ++ (if (builtin.os.tag == .windows) [_][]const u8{} else [_][]const u8{ "netListenIp", "netBindIp" });
 
 /// The file slots that run std's code on a worker inside a blocking
 /// bracket under `files = .auto` on epoll and kqueue (route.files), and the

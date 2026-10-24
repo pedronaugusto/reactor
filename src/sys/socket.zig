@@ -18,6 +18,8 @@ const is_windows = builtin.os.tag == .windows;
 pub const Handle = net.Socket.Handle;
 
 pub const OpenError = error{
+    AccessDenied,
+    AddressUnavailable,
     AddressFamilyUnsupported,
     ProtocolUnsupportedBySystem,
     ProcessFdQuotaExceeded,
@@ -122,11 +124,38 @@ fn openWindows(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.
     };
     const unspecified: net.IpAddress = if (family == ws2_32.AF.INET6) .{ .ip6 = .unspecified(0) } else .{ .ip4 = .unspecified(0) };
     _ = afd.bind(handle, &unspecified, .Active) catch |err| return switch (err) {
-        error.AddressInUse => error.Unexpected,
+        error.AccessDenied => error.AccessDenied,
+        // Any port taken: what POSIX names a connect that finds no free
+        // local port.
+        error.AddressInUse, error.AddressUnavailable => error.AddressUnavailable,
         error.SystemResources => error.SystemResources,
         error.Unexpected => error.Unexpected,
     };
     return handle;
+}
+
+/// A stream socket listening at `address`, on Windows, made as std 0.17's
+/// `netListenIp` makes it with the bind's refusals named (`afd.bind`),
+/// where std's report all but one of them `Unexpected`.
+pub fn listenIp(address: *const net.IpAddress, options: net.IpAddress.ListenOptions) net.IpAddress.ListenError!net.Socket {
+    if (comptime !is_windows) unreachable; // unreachable: elsewhere the slot is std's, whose errors are named
+    const handle = try afd.open(Threaded.posixAddressFamily(address), options.mode, options.protocol);
+    errdefer close(handle);
+    if (options.reuse_address) try afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.REUSEADDR, @as(u32, 1));
+    const bound = try afd.bind(handle, address, .Passive);
+    try afd.listen(handle, options.kernel_backlog);
+    return .{ .handle = handle, .address = bound };
+}
+
+/// A socket bound to `address`, on Windows, made as std 0.17's `netBindIp`
+/// makes it with the bind's refusals named.
+pub fn bindIp(address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
+    if (comptime !is_windows) unreachable; // unreachable: elsewhere the slot is std's, whose errors are named
+    const handle = try afd.open(Threaded.posixAddressFamily(address), options.mode, options.protocol);
+    errdefer close(handle);
+    const bound = try afd.bind(handle, address, .Active);
+    if (options.allow_broadcast) try afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.BROADCAST, @as(u32, 1));
+    return .{ .handle = handle, .address = bound };
 }
 
 pub const OpenUnixError = OpenError || error{FileNotFound};

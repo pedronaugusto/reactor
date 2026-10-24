@@ -96,17 +96,37 @@ pub fn option(handle: Handle, mode: windows.AFD.SOCKOPT_INFO.Mode, level: i32, n
     };
 }
 
+pub const BindError = error{ AccessDenied, AddressInUse, AddressUnavailable, SystemResources, Unexpected };
+
 /// Binds the socket's own end to `address` (an unspecified one picks a
-/// free port); returns the address bound.
-pub fn bind(handle: Handle, address: *const net.IpAddress, mode: windows.AFD.BIND_INFO.MODE) error{ AddressInUse, SystemResources, Unexpected }!net.IpAddress {
+/// free port); returns the address bound. The refusals are named as
+/// Winsock names them: `ACCESS_DENIED` (`WSAEACCES`: a port another socket
+/// holds exclusively, or one in a range the system reserves) is
+/// `AccessDenied`, the sharing statuses (`WSAEADDRINUSE`) `AddressInUse`,
+/// `INVALID_ADDRESS_COMPONENT` (`WSAEADDRNOTAVAIL`: an address that is not
+/// this machine's) `AddressUnavailable`.
+pub fn bind(handle: Handle, address: *const net.IpAddress, mode: windows.AFD.BIND_INFO.MODE) BindError!net.IpAddress {
     const Storage = extern struct { info: windows.AFD.BIND_INFO, address: Threaded.PosixAddress };
     var storage: Storage = .{ .info = .{ .Mode = mode }, .address = undefined };
     const len = Threaded.addressToPosix(address, &storage.address);
     const in = std.mem.asBytes(&storage)[0 .. @offsetOf(Storage, "address") + len];
     return switch (control(handle, windows.IOCTL.AFD.BIND, in, std.mem.asBytes(&storage.address)[0..len])) {
         .SUCCESS => Threaded.addressFromPosix(&storage.address),
+        .ACCESS_DENIED => error.AccessDenied,
         .SHARING_VIOLATION, .ADDRESS_ALREADY_EXISTS => error.AddressInUse,
-        .INSUFFICIENT_RESOURCES => error.SystemResources,
+        .INVALID_ADDRESS_COMPONENT => error.AddressUnavailable,
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
+        else => |status| windows.unexpectedStatus(status),
+    };
+}
+
+/// Starts a bound stream socket listening, `backlog` connections held by
+/// the kernel.
+pub fn listen(handle: Handle, backlog: u31) error{ SystemResources, Unexpected }!void {
+    const info: windows.AFD.LISTEN_INFO = .{ .UseSAN = .FALSE, .MaximumConnectionQueue = backlog, .UseDelayedAcceptance = .FALSE };
+    return switch (control(handle, windows.IOCTL.AFD.START_LISTEN, std.mem.asBytes(&info), &.{})) {
+        .SUCCESS => {},
+        .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),
     };
 }

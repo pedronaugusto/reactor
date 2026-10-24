@@ -2,6 +2,7 @@
 //! an evented form, std's own code on a lane where a call may block, and
 //! std's own code borrowed on the worker where it never blocks and never
 //! calls back into its `Io` (vtable/route.zig).
+const builtin = @import("builtin");
 const std = @import("std");
 const crash = @import("../sys/crash.zig");
 const Io = std.Io;
@@ -21,6 +22,7 @@ const io_ops = @import("io_ops.zig");
 const send_file = @import("send_file.zig");
 
 const general = .general;
+const is_windows = builtin.os.tag == .windows;
 
 /// The slots as they work, before the brackets `vtable` puts around them.
 pub const raw: Io.VTable = .{
@@ -130,9 +132,9 @@ pub const raw: Io.VTable = .{
     .random = random,
     .randomSecure = route.borrowed("randomSecure"),
 
-    .netListenIp = route.borrowed("netListenIp"),
+    .netListenIp = if (is_windows) io_ops.netListenIpWindows else route.borrowed("netListenIp"),
     .netAccept = io_ops.netAccept,
-    .netBindIp = route.borrowed("netBindIp"),
+    .netBindIp = if (is_windows) io_ops.netBindIpWindows else route.borrowed("netBindIp"),
     .netConnectIp = io_ops.netConnectIp,
     .netListenUnix = route.borrowed("netListenUnix"),
     .netConnectUnix = io_ops.netConnectUnix,

@@ -13,6 +13,8 @@ const Runtime = @import("Runtime.zig");
 const Loop = @import("Loop.zig");
 const supported = @import("Scheduler.zig").supported;
 const backend = @import("backend.zig");
+const afd = @import("sys/afd.zig");
+const sys_socket = @import("sys/socket.zig");
 
 fn skipOffWindows() !void {
     if (builtin.os.tag != .windows or !supported) return error.SkipZigTest;
@@ -213,6 +215,39 @@ test "a cancelled accept loses no connection: the next accept takes it" {
     try writeAll(io, client.socket.handle, "x");
     var buffer: [4]u8 = undefined;
     try testing.expectEqual(@as(usize, 1), try readOne(io, accepted.socket.handle, &buffer));
+}
+
+/// `SO_EXCLUSIVEADDRUSE`, which std's options cannot ask for: `~SO_REUSEADDR`.
+const exclusive_address_use: u32 = ~@as(u32, std.os.windows.ws2_32.SO.REUSEADDR);
+
+test "a listen or a bind the system refuses is named: a port held exclusively, an address not this machine's" {
+    // AFD's calls exist only there.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    const ws2_32 = std.os.windows.ws2_32;
+    // The holder listens with the port to itself, as a service guarding
+    // its port does.
+    const holder = try afd.open(ws2_32.AF.INET, .stream, .tcp);
+    defer sys_socket.close(holder);
+    try afd.setOption(holder, ws2_32.SOL.SOCKET, exclusive_address_use, @as(u32, 1));
+    const held = try afd.bind(holder, &.{ .ip4 = .loopback(0) }, .Passive);
+    try afd.listen(holder, 1);
+    // std 0.17 reports this one `Unexpected`.
+    try testing.expectError(error.AccessDenied, held.listen(io, .{ .reuse_address = true }));
+    // TEST-NET-1 (RFC 5737) is no machine's own.
+    const elsewhere: net.IpAddress = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 0 } };
+    try testing.expectError(error.AddressUnavailable, elsewhere.bind(io, .{ .mode = .dgram }));
+    try testing.expectError(error.AddressUnavailable, elsewhere.listen(io, .{}));
+    // A listener as std makes one: it accepts.
+    var server = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var stream = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var accepted = try server.accept(io);
+    accepted.close(io);
 }
 
 test "a datagram socket connects, which names its own end" {

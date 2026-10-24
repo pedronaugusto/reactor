@@ -380,6 +380,20 @@ pub fn netConnectIp(userdata: ?*anyopaque, address: *const net.IpAddress, option
     return .{ .handle = fd, .address = socket.localAddress(fd) catch |err| return narrow(net.IpAddress.ConnectError, err) };
 }
 
+/// Windows: reactor's own AFD listen, its bind's refusals named
+/// (`socket.listenIp`); std's names all but one `Unexpected`. Elsewhere the
+/// slot is std's own, borrowed.
+pub fn netListenIpWindows(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ListenOptions) net.IpAddress.ListenError!net.Socket {
+    _ = userdata;
+    return socket.listenIp(address, options);
+}
+
+/// Windows: reactor's own AFD bind, its refusals named (`socket.bindIp`).
+pub fn netBindIpWindows(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
+    _ = userdata;
+    return socket.bindIp(address, options);
+}
+
 /// `err` in the set `E`, or `Unexpected` when `E` has no such error.
 fn narrow(comptime E: type, err: anytype) E {
     switch (err) {
