@@ -197,6 +197,7 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
     defer gpa.free(root);
     const Listener = enum { std_slash, std_backslash, winsock_slash, winsock_backslash };
     const Bind = enum { none, family, family_nul, whole };
+    const Target = enum { nt_normalized, win32_raw, nt_raw };
     var report: std.ArrayList(u8) = .empty;
     defer report.deinit(gpa);
     for (std.enums.values(Listener)) |l| {
@@ -222,12 +223,24 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
         defer if (listener) |s| {
             _ = ws.closesocket(s);
         };
-        for (std.enums.values(Bind)) |b| {
+        for (std.enums.values(Target)) |t| for (std.enums.values(Bind)) |b| {
             const handle = try open(ws2_32.AF.UNIX, .stream, null);
             defer windows.CloseHandle(handle);
-            const path = try Threaded.sliceToPrefixedFileW(null, name, .{ .allow_relative = false });
-            var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
-            const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
+            var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = undefined;
+            const len: usize = switch (t) {
+                .nt_normalized => len: {
+                    const path = try Threaded.sliceToPrefixedFileW(null, name, .{ .allow_relative = false });
+                    target.Path = path.data;
+                    break :len path.len;
+                },
+                .win32_raw => try std.unicode.wtf8ToWtf16Le(&target.Path, name),
+                .nt_raw => len: {
+                    target.Path[0..4].* = .{ '\\', '?', '?', '\\' };
+                    break :len 4 + try std.unicode.wtf8ToWtf16Le(target.Path[4..], name);
+                },
+            };
+            target.Path[len] = 0;
+            const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * len];
             const opt: Status = if (option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes)) |_| .SUCCESS else |_| .UNSUCCESSFUL;
             const Storage = extern struct { info: windows.AFD.BIND_INFO, address: ws2_32.sockaddr.un };
             var storage: Storage = .{ .info = .{ .Mode = .Unix }, .address = .{ .path = @splat(0) } };
@@ -243,8 +256,8 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
             const n = @min(name.len, request.address.path.len - 1);
             @memcpy(request.address.path[0..n], name[name.len - n ..]);
             const connected = control(handle, windows.IOCTL.AFD.CONNECT, std.mem.asBytes(&request), &.{});
-            try report.print(gpa, "{t} {t}: option {t} bind {t} connect {t}\n", .{ l, b, opt, bound, connected });
-        }
+            try report.print(gpa, "{t} {t} {t}: option {t} bind {t} connect {t}\n", .{ l, t, b, opt, bound, connected });
+        };
     }
     std.debug.print("{s}", .{report.items});
     return error.ProbeReport;
