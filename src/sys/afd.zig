@@ -176,6 +176,115 @@ pub const PollHandle = extern struct {
     status: Status,
 };
 
+test "probe: a Unix connect through Winsock, read and written as std's stream (Windows)" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const ws = struct {
+        const Socket = windows.HANDLE;
+        extern "ws2_32" fn WSAStartup(version: u16, data: *[512]u8) callconv(.winapi) i32;
+        extern "ws2_32" fn socket(family: i32, kind: i32, protocol: i32) callconv(.winapi) Socket;
+        extern "ws2_32" fn bind(s: Socket, name: *const anyopaque, len: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn listen(s: Socket, backlog: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn accept(s: Socket, name: ?*anyopaque, len: ?*i32) callconv(.winapi) Socket;
+        extern "ws2_32" fn connect(s: Socket, name: *const anyopaque, len: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn recv(s: Socket, buf: [*]u8, len: i32, flags: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn closesocket(s: Socket) callconv(.winapi) i32;
+        extern "ws2_32" fn WSAGetLastError() callconv(.winapi) i32;
+    };
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var report: std.ArrayList(u8) = .empty;
+    defer report.deinit(gpa);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    std.mem.replaceScalar(u8, root, '\\', '/');
+    {
+        const early = try gpa.print("{s}/early", .{root});
+        defer gpa.free(early);
+        const a = try net.UnixAddress.init(early);
+        if (a.listen(io, .{})) |sv| {
+            var server = sv;
+            server.deinit(io);
+            try report.print(gpa, "std listen before WSAStartup: ok\n", .{});
+        } else |err| try report.print(gpa, "std listen before WSAStartup: {t}\n", .{err});
+    }
+    var data: [512]u8 = undefined;
+    try report.print(gpa, "WSAStartup {d}\n", .{ws.WSAStartup(0x0202, &data)});
+    const Un = ws2_32.sockaddr.un;
+    const sockaddr = struct {
+        fn of(path: []const u8) struct { Un, i32 } {
+            var un: Un = .{ .path = @splat(0) };
+            @memcpy(un.path[0..path.len], path);
+            return .{ un, @intCast(@offsetOf(Un, "path") + path.len + 1) };
+        }
+    }.of;
+    const name = try gpa.print("{s}/socket", .{root});
+    defer gpa.free(name);
+    const listener = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+    defer _ = ws.closesocket(listener);
+    {
+        const un, const len = sockaddr(name);
+        try report.print(gpa, "listener bind {d} listen {d}\n", .{ ws.bind(listener, &un, len), ws.listen(listener, 4) });
+    }
+    {
+        const client = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+        const un, const len = sockaddr(name);
+        const rc = ws.connect(client, &un, len);
+        try report.print(gpa, "connect {d} ({d})\n", .{ rc, if (rc != 0) ws.WSAGetLastError() else 0 });
+        const stream: net.Stream = .{ .socket = .{ .handle = client, .address = .{ .ip4 = .loopback(0) } } };
+        var buf: [16]u8 = undefined;
+        var w = stream.writer(io, &buf);
+        if (w.interface.writeAll("hello")) |_| {
+            if (w.interface.flush()) |_| try report.print(gpa, "std write: ok\n", .{}) else |err| try report.print(gpa, "std flush: {t} {?t}\n", .{ err, w.err });
+        } else |err| try report.print(gpa, "std write: {t} {?t}\n", .{ err, w.err });
+        const peer = ws.accept(listener, null, null);
+        var got: [16]u8 = undefined;
+        const n = ws.recv(peer, &got, got.len, 0);
+        try report.print(gpa, "peer got {d}: {s}\n", .{ n, if (n > 0) got[0..@intCast(n)] else "" });
+        _ = ws.closesocket(peer);
+        stream.close(io);
+        try report.print(gpa, "std close: ok\n", .{});
+    }
+    {
+        const after = try gpa.print("{s}/after", .{root});
+        defer gpa.free(after);
+        const a = try net.UnixAddress.init(after);
+        if (a.listen(io, .{})) |sv| {
+            var server = sv;
+            server.deinit(io);
+            try report.print(gpa, "std listen after WSAStartup: ok\n", .{});
+        } else |err| try report.print(gpa, "std listen after WSAStartup: {t}\n", .{err});
+    }
+    const missing_dir = try gpa.print("{s}/nowhere/socket", .{root});
+    defer gpa.free(missing_dir);
+    const missing_file = try gpa.print("{s}/none", .{root});
+    defer gpa.free(missing_file);
+    try tmp.dir.writeFile(io, .{ .sub_path = "plain", .data = "x" });
+    const plain = try gpa.print("{s}/plain", .{root});
+    defer gpa.free(plain);
+    // A socket file whose listener is gone.
+    const stale = try gpa.print("{s}/stale", .{root});
+    defer gpa.free(stale);
+    {
+        const s = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+        const un, const len = sockaddr(stale);
+        _ = ws.bind(s, &un, len);
+        _ = ws.listen(s, 1);
+        _ = ws.closesocket(s);
+    }
+    for ([_][]const u8{ missing_dir, missing_file, plain, stale }) |target| {
+        const client = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+        defer _ = ws.closesocket(client);
+        const un, const len = sockaddr(target);
+        const rc = ws.connect(client, &un, len);
+        try report.print(gpa, "connect {s}: {d} ({d})\n", .{ target[root.len..], rc, if (rc != 0) ws.WSAGetLastError() else 0 });
+    }
+    std.debug.print("{s}", .{report.items});
+    return error.ProbeReport;
+}
+
 test "probe: a Unix connect's statuses by bind and listener (Windows)" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     const ws = struct {
