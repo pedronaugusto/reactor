@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-24
+
 ### Fixed
 
 - `net.connectUnix` on Windows over an `Io` other than a runtime connects through Winsock (`socket` and `connect`, the path as given), as Git for Windows does, where 0.8.1 drove AFD as std 0.17 does and the system refused it: the unnamed bind before the connect failed with `INVALID_PARAMETER` once a listener was at the path, so a connect to a live daemon was `Unexpected`. Nothing listening is `ConnectionRefused` (Winsock's answer for a missing file too), a directory missing on the way `FileNotFound`. The test listens through Winsock on Windows, as Git for Windows' daemons do, writes through std's stream and reads it at the listener.
