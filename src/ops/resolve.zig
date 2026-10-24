@@ -1,6 +1,7 @@
 //! The bounded DNS stub for targets without libc. Its sockets and files
 //! use the caller's Io, so DNS never needs a second resolver thread.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const net = Io.net;
 const HostName = net.HostName;
@@ -29,10 +30,20 @@ pub const Config = struct {
     server_count: usize = 0,
     search: [254]u8 = undefined,
     search_len: usize = 0,
-    ndots: u8 = 1,
-    attempts: u8 = 2,
-    timeout: u8 = 5,
+    /// A name with at least this many dots is tried as written first.
+    ndots: Ndots = .literal(1),
+    /// How many rounds over the servers before giving up.
+    attempts: Attempts = .literal(2),
+    /// How long one query waits for its answer.
+    timeout: Timeout = .literal("5s"),
     rotate: bool = false,
+
+    /// resolv.conf's bounds, as musl reads them: a larger value is taken as
+    /// the bound, and an attempt or a timeout of zero as one.
+    pub const Ndots = aegis.int.Ranged(u8, 0, 15);
+    pub const Attempts = aegis.int.Ranged(u8, 1, 10);
+    pub const Timeout = aegis.units.Duration(.second, u8);
+    const max_timeout: u8 = 60;
 
     pub fn read(io: Io) Error!Config {
         var c: Config = .{};
@@ -77,11 +88,23 @@ pub const Config = struct {
                 const colon = std.mem.findScalar(u8, word, ':') orelse continue;
                 const value = std.fmt.parseInt(u8, word[colon + 1 ..], 10) catch continue;
                 const name = word[0..colon];
-                if (std.mem.eql(u8, name, "ndots")) c.ndots = @min(15, value) else if (std.mem.eql(u8, name, "attempts")) c.attempts = std.math.clamp(value, 1, 10) else if (std.mem.eql(u8, name, "timeout")) c.timeout = std.math.clamp(value, 1, 60);
+                if (std.mem.eql(u8, name, "ndots")) {
+                    c.ndots = clamped(Ndots, value);
+                } else if (std.mem.eql(u8, name, "attempts")) {
+                    c.attempts = clamped(Attempts, value);
+                } else if (std.mem.eql(u8, name, "timeout")) {
+                    c.timeout = .fromRaw(std.math.clamp(value, 1, max_timeout));
+                }
             }
         }
     }
 };
+
+/// `value` taken into `R`'s range, as resolv.conf's options are read.
+fn clamped(comptime R: type, value: R.Representation) R {
+    // unreachable: clamped into the range
+    return R.init(std.math.clamp(value, R.minimum, R.maximum)) catch unreachable;
+}
 
 pub fn lookup(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress) Error!usize {
     var canonical: Name = .{};
@@ -96,7 +119,9 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
     const config = try Config.read(io);
     const bare = std.mem.trimEnd(u8, name.bytes, ".");
     const absolute = name.bytes.len != bare.len;
-    const first = absolute or std.mem.countScalar(u8, bare, '.') >= config.ndots;
+    // ndots counts dots, and is compared with the name's count of them.
+    const ndots: usize = config.ndots.raw();
+    const first = absolute or std.mem.countScalar(u8, bare, '.') >= ndots;
     if (first) if (queryNamed(io, bare, port, family, out, &config, canonical)) |n| return n else |err| if (err == error.Canceled) return error.Canceled;
     if (!absolute) {
         var domains = std.mem.tokenizeAny(u8, config.search[0..config.search_len], " \t");
@@ -217,7 +242,7 @@ fn exchangeOne(r: Request) Error!Answer {
     const start: usize = if (r.config.rotate) entropy[2] % r.config.server_count else 0;
     var question: [288]u8 = undefined;
     const q = try makeQuery(&question, r.name, r.rr, std.mem.readInt(u16, entropy[0..2], .big));
-    for (0..r.config.attempts) |_| for (0..r.config.server_count) |step| {
+    for (0..r.config.attempts.raw()) |_| for (0..r.config.server_count) |step| {
         const server = r.config.servers[(start + step) % r.config.server_count];
         const local: net.IpAddress = switch (server) {
             .ip4 => .{ .ip4 = .unspecified(0) },
@@ -225,7 +250,7 @@ fn exchangeOne(r: Request) Error!Answer {
         };
         const socket = local.bind(r.io, .{ .mode = .dgram }) catch continue;
         defer socket.close(r.io);
-        const timeout: Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(r.config.timeout) } };
+        const timeout: Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = r.config.timeout.toIoDuration() } };
         const deadline = timeout.toDeadline(r.io);
         sendQuery(r.io, socket, &server, q, deadline) catch |err| {
             if (err == error.Canceled) return error.Canceled;

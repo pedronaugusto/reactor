@@ -59,8 +59,13 @@ test "DNS configuration honors bounds search and rotation" {
     config.line("options ndots:3 timeout:0 attempts:0 rotate");
     try testing.expectEqual(@as(usize, 3), config.server_count);
     try testing.expectEqualStrings("example.test local.test", config.search[0..config.search_len]);
-    try testing.expectEqual(@as(u8, 1), config.attempts);
-    try testing.expectEqual(@as(u8, 1), config.timeout);
+    try testing.expectEqual(@as(u8, 3), config.ndots.raw());
+    try testing.expectEqual(@as(u8, 1), config.attempts.raw());
+    try testing.expectEqual(@as(u8, 1), config.timeout.raw());
+    config.line("options ndots:40 timeout:200 attempts:99");
+    try testing.expectEqual(@as(u8, 15), config.ndots.raw());
+    try testing.expectEqual(@as(u8, 10), config.attempts.raw());
+    try testing.expectEqual(@as(u8, 60), config.timeout.raw());
     try testing.expect(config.rotate);
 }
 
