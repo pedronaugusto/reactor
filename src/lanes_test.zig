@@ -295,3 +295,49 @@ test "admission: a lane that cannot make threads queues behind its running calls
     other.retire(&refused.job);
     try testing.expectEqual(@as(u32, 0), other.charged());
 }
+
+/// A task of the test's own on a lane's executor, kept busy until let go:
+/// a thread of that executor no reserve job ever ran on.
+const Outsider = struct {
+    gate: Io.Event = .unset,
+    begun: Io.Event = .unset,
+    group: Io.Group = .init,
+
+    fn occupy(o: *Outsider, executor: Io) !void {
+        try executor.vtable.groupConcurrent(executor.userdata, &o.group, std.mem.asBytes(&o), .of(*Outsider), run);
+        try o.begun.wait(testing.io);
+    }
+
+    fn run(context: *const anyopaque) void {
+        const o: *const *Outsider = @ptrCast(@alignCast(context)); // safe: `occupy` passed a pointer to itself
+        o.*.begun.set(testing.io);
+        o.*.gate.waitUncancelable(testing.io);
+    }
+};
+
+test "a lane counts every thread its executor made, whatever ran on it first, so a call never waits for one it cannot see" {
+    var lanes: Lanes = undefined;
+    try lanes.init(testing.allocator, .{ .owned = .{ .sync = 1 } }, .{});
+    defer lanes.deinit(testing.allocator);
+    try lanes.prepare();
+    const executor = &lanes.threaded[@backingInt(Lanes.Lane.sync)];
+    // A thread of the executor the lane did not make for a reserve job, as
+    // when a busy thread takes a reserve job a new thread was made for. Up
+    // to 0.8.3 the lane counted only threads a reserve job found new: here
+    // it made its five beside this one, let one go, and then waited for a
+    // thread under five busy that never came, holding the lane's queue lock
+    // the thread finishing a call takes (the sync-lane deadlock).
+    var outsider: Outsider = .{};
+    try outsider.occupy(executor.io());
+    for (0..4) |_| {
+        var call: Prepared = .{};
+        call.job.lane = .sync;
+        lanes.submit(&call.job);
+        call.finished.waitUncancelable(testing.io);
+        while (call.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
+        lanes.retire(&call.job);
+    }
+    try testing.expectEqual(@as(u32, @intCast(workerCount(executor))), lanes.stats(.sync).threads);
+    outsider.gate.set(testing.io);
+    try outsider.group.await(executor.io());
+}

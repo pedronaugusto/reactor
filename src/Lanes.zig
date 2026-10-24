@@ -178,8 +178,6 @@ const Queue = struct {
 
 /// The threads a lane starts calls on, held for the whole of a start.
 const Launch = struct {
-    /// Threads the lane's executor has made: they stay until `deinit`.
-    threads: u32 = 0,
     /// Reserve jobs, each holding one of those threads out of the ready
     /// pool until let go: as many as the lane can hold threads.
     reserve: []Reserve = &.{},
@@ -357,25 +355,35 @@ const Reserve = struct {
     gate: Io.Event = .unset,
     /// Set once it runs: whether its thread is one the executor made for it.
     entered: std.atomic.Value(bool) = .init(false),
-    made: bool = false,
     /// Set once it no longer touches the entry.
     left: std.atomic.Value(bool) = .init(false),
-
-    /// Whether this thread has run a lane job before. Every thread of an
-    /// owned lane's executor is made for a reserve job, which runs first on
-    /// it, so a reserve job that finds this unset is on a new thread.
-    threadlocal var seen: bool = false;
 
     fn hold(context: *const anyopaque) void {
         const pointer: *const *Reserve = @ptrCast(@alignCast(context)); // safe: `grow` copies a pointer to its entry
         const entry = pointer.*;
-        entry.made = !seen;
-        seen = true;
         entry.entered.store(true, .release);
         entry.gate.waitUncancelable(system());
         entry.left.store(true, .release);
     }
 };
+
+/// The threads `threaded` has made, which stay until `deinit`: its own
+/// count, kept under its mutex as it makes them. Not one counted on the
+/// lane's side: a reserve job is taken by whichever thread of the executor
+/// is free first, so a thread made for one may find it gone and wait idle,
+/// and a count of the threads reserve jobs found new misses it (an idle
+/// thread `awaitIdle` cannot see: the 0.8.2 sync-lane deadlock).
+fn threadsOf(threaded: *Io.Threaded) u32 {
+    threaded.mutex.lockUncancelable(system());
+    defer threaded.mutex.unlock(system());
+    return madeLocked(threaded);
+}
+
+/// `threadsOf` with the executor's mutex held. std 0.17's `WaitGroup`
+/// counts each started thread as one `one_pending` (2) in its state.
+fn madeLocked(threaded: *Io.Threaded) u32 {
+    return @intCast(threaded.wait_group.state.load(.monotonic) / 2);
+}
 
 /// Makes the lane hold at least `target` threads. std's executor makes a
 /// thread only when it has none idle, so reserve jobs are started until it
@@ -384,7 +392,7 @@ const Reserve = struct {
 /// the executor could start no more.
 fn grow(threaded: *Io.Threaded, group: *Io.Group, launching: *Launch, target: u32) bool {
     const io = threaded.io();
-    while (launching.threads < target) {
+    while (threadsOf(threaded) < target) {
         // Every thread held is a distinct one of the threads made, and the
         // reserve has room for as many as the lane may hold: a free entry
         // is there, or one let go whose job is leaving.
@@ -394,7 +402,6 @@ fn grow(threaded: *Io.Threaded, group: *Io.Group, launching: *Launch, target: u3
         entry.state = .holding;
         launching.held += 1;
         while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
-        if (entry.made) launching.threads += 1;
     }
     return true;
 }
@@ -586,7 +593,7 @@ pub fn cancel(l: *Lanes, job: *Job) void {
 /// Under the lane's launch lock: whether an owned lane holds at least
 /// `threads` threads, growing to them; false when it could not grow.
 fn reach(l: *Lanes, lane: Lane, launching: *Launch, threads: u32) bool {
-    if (l.mode != .owned or launching.threads >= threads) return true;
+    if (l.mode != .owned or threadsOf(&l.threaded[@backingInt(lane)]) >= threads) return true;
     const index = @backingInt(lane);
     return grow(&l.threaded[index], &l.reserve_groups[index], launching, threads);
 }
@@ -602,7 +609,7 @@ fn awaitIdle(l: *Lanes, lane: Lane, launching: *Launch) void {
     var released = false;
     while (true) {
         threaded.mutex.lockUncancelable(system());
-        const available = threaded.busy_count < launching.threads;
+        const available = threaded.busy_count < madeLocked(threaded);
         threaded.mutex.unlock(system());
         if (available) return;
         if (!released and launching.held > 0) {
@@ -634,7 +641,8 @@ pub fn stats(l: *Lanes, lane: Lane) Stats {
     // Threads the executor made, the reserve's included.
     var launching = s.launch.acquireUncancelable(system());
     defer launching.deinit(system());
-    return .{ .queued = queued, .running = running, .threads = launching.value().threads, .@"inline" = s.inlined.load(.monotonic) };
+    const made: u32 = if (l.mode == .owned) threadsOf(&l.threaded[@backingInt(lane)]) else 0;
+    return .{ .queued = queued, .running = running, .threads = made, .@"inline" = s.inlined.load(.monotonic) };
 }
 
 /// Executor capacity the admitted calls hold, in units.

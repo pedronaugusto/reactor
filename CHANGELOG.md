@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A lane's call could wait forever for a thread to start on: the lane counted only the threads a reserve job found new, but std's executor gives a reserve job to whichever of its threads is free first, so a thread made for one could find it taken and wait idle, uncounted. A call then waited, holding the lane's queue lock, for a thread it could not see, and the thread finishing a call waited for that lock. Seen on the sync lane under airlock's `Batch` through `syncLane` (a chronicle backup); every lane could. The lane now reads its threads from the executor's own count. The test gives the executor a thread no reserve ran on and makes four calls: they hung every run before.
+
 ## [0.8.2] - 2026-10-24
 
 ### Fixed
