@@ -397,3 +397,41 @@ test "connectUnix names a refused connect and a missing path as std does, on Thr
     const nowhere = try Io.net.UnixAddress.init(nowhere_path);
     try testing.expectError(error.FileNotFound, net.connectUnix(io, &nowhere));
 }
+
+test "connectUnix reaches a socket another program listens on through Winsock, as Git for Windows' daemons do" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const ws = struct {
+        const SOCKET = std.os.windows.HANDLE;
+        extern "ws2_32" fn WSAStartup(version: u16, data: *[512]u8) callconv(.winapi) i32;
+        extern "ws2_32" fn socket(family: i32, kind: i32, protocol: i32) callconv(.winapi) SOCKET;
+        extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, len: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.winapi) i32;
+        extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) i32;
+        extern "ws2_32" fn WSAGetLastError() callconv(.winapi) i32;
+    };
+    const ws2_32 = std.os.windows.ws2_32;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    // Written as git writes a path, with /.
+    std.mem.replaceScalar(u8, root, '\\', '/');
+    const path = try Io.Dir.path.join(gpa, &.{ root, "socket" });
+    defer gpa.free(path);
+    std.mem.replaceScalar(u8, path, '\\', '/');
+    var data: [512]u8 = undefined;
+    try testing.expectEqual(@as(i32, 0), ws.WSAStartup(0x0202, &data));
+    const listener = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+    try testing.expect(@intFromPtr(listener) != std.math.maxInt(usize));
+    defer _ = ws.closesocket(listener);
+    var name: ws2_32.sockaddr.un = .{ .path = @splat(0) };
+    @memcpy(name.path[0..path.len], path);
+    const len: i32 = @intCast(@offsetOf(ws2_32.sockaddr.un, "path") + path.len + 1);
+    if (ws.bind(listener, &name, len) != 0) std.debug.print("bind: {d}\n", .{ws.WSAGetLastError()});
+    if (ws.listen(listener, 4) != 0) std.debug.print("listen: {d}\n", .{ws.WSAGetLastError()});
+    const address = try Io.net.UnixAddress.init(path);
+    const stream = try net.connectUnix(io, &address);
+    stream.close(io);
+}
