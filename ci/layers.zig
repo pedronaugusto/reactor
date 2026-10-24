@@ -18,6 +18,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/sys/win32.zig",
         "src/sys/getaddrinfo.zig",
         "src/sys/lookup_windows.zig",
+        "src/sys/unix_windows.zig",
         "src/sys/receive.zig",
         "src/sys/message.zig",
         "src/sys/sendfile.zig",

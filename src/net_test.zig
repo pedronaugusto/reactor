@@ -363,7 +363,74 @@ test "connect binds its requested local endpoint" {
     try testing.expect(result.stream.socket.address.getPort() != 0);
 }
 
-test "connectUnix names a refused connect and a missing path as std does, on Threaded too" {
+/// A Unix listener: std's on POSIX; on Windows Winsock's, as Git for
+/// Windows' daemons listen (std 0.17's Windows listen drives AFD itself,
+/// which the system refuses in a process that has not used AF_UNIX through
+/// Winsock).
+const UnixListener = if (builtin.os.tag == .windows) struct {
+    handle: Socket,
+
+    const Socket = std.os.windows.HANDLE;
+    const ws2_32 = std.os.windows.ws2_32;
+    extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) c_int;
+    extern "ws2_32" fn socket(family: c_int, kind: c_int, protocol: c_int) callconv(.winapi) Socket;
+    extern "ws2_32" fn bind(s: Socket, name: *const anyopaque, len: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn listen(s: Socket, backlog: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn accept(s: Socket, name: ?*anyopaque, len: ?*c_int) callconv(.winapi) Socket;
+    extern "ws2_32" fn recv(s: Socket, buf: [*]u8, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    extern "ws2_32" fn closesocket(s: Socket) callconv(.winapi) c_int;
+
+    fn open(_: Io, address: *const Io.net.UnixAddress) !@This() {
+        var data: [512]u8 align(8) = undefined;
+        if (WSAStartup(0x202, &data) != 0) return error.SystemResources;
+        const handle = socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
+        if (@intFromPtr(handle) == std.math.maxInt(usize)) return error.Unexpected;
+        errdefer _ = closesocket(handle);
+        var name: ws2_32.sockaddr.un = .{ .path = @splat(0) };
+        @memcpy(name.path[0..address.path.len], address.path);
+        const len: c_int = @intCast(@offsetOf(ws2_32.sockaddr.un, "path") + address.path.len + 1);
+        if (bind(handle, &name, len) != 0 or listen(handle, 4) != 0) return error.Unexpected;
+        return .{ .handle = handle };
+    }
+
+    /// The first connection's first `out.len` bytes.
+    fn read(l: *@This(), _: Io, out: []u8) !void {
+        const peer = accept(l.handle, null, null);
+        if (@intFromPtr(peer) == std.math.maxInt(usize)) return error.Unexpected;
+        defer _ = closesocket(peer);
+        var n: usize = 0;
+        while (n < out.len) {
+            const got = recv(peer, out[n..].ptr, @intCast(out.len - n), 0);
+            if (got <= 0) return error.EndOfStream;
+            n += @intCast(got);
+        }
+    }
+
+    fn close(l: *@This(), _: Io) void {
+        _ = closesocket(l.handle);
+    }
+} else struct {
+    server: Io.net.Server,
+
+    fn open(io: Io, address: *const Io.net.UnixAddress) !@This() {
+        return .{ .server = try address.listen(io, .{}) };
+    }
+
+    /// The first connection's first `out.len` bytes.
+    fn read(l: *@This(), io: Io, out: []u8) !void {
+        const stream = try l.server.accept(io);
+        defer stream.close(io);
+        var buffer: [16]u8 = undefined;
+        var reader = stream.reader(io, &buffer);
+        try reader.interface.readSliceAll(out);
+    }
+
+    fn close(l: *@This(), io: Io) void {
+        l.server.deinit(io);
+    }
+};
+
+test "connectUnix reaches a listener, and names a refused connect and a missing path as std does, on Threaded too" {
     if (!Io.net.has_unix_sockets) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
@@ -371,10 +438,12 @@ test "connectUnix names a refused connect and a missing path as std does, on Thr
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
-    const path = try Io.Dir.path.join(gpa, &.{ root, "socket" });
+    // Written with /, as git writes a socket path; Windows takes either.
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, root, '\\', '/');
+    const path = try gpa.print("{s}/socket", .{root});
     defer gpa.free(path);
     const address = try Io.net.UnixAddress.init(path);
-    // No path: a missing file on POSIX; Windows may answer it as refused.
+    // No path: a missing file on POSIX; Windows answers it as refused.
     if (net.connectUnix(io, &address)) |stream| {
         stream.close(io);
         return error.TestUnexpectedResult;
@@ -383,11 +452,23 @@ test "connectUnix names a refused connect and a missing path as std does, on Thr
         error.ConnectionRefused => if (builtin.os.tag != .windows) return err,
         else => return err,
     }
+    // A directory not there on the way.
+    const nowhere_path = try gpa.print("{s}/nowhere/socket", .{root});
+    defer gpa.free(nowhere_path);
+    const nowhere = try Io.net.UnixAddress.init(nowhere_path);
+    try testing.expectError(error.FileNotFound, net.connectUnix(io, &nowhere));
     {
-        var server = try address.listen(io, .{});
-        defer server.deinit(io);
+        var listener: UnixListener = try .open(io, &address);
+        defer listener.close(io);
         const stream = try net.connectUnix(io, &address);
-        stream.close(io);
+        defer stream.close(io);
+        var buffer: [16]u8 = undefined;
+        var writer = stream.writer(io, &buffer);
+        try writer.interface.writeAll("hello");
+        try writer.interface.flush();
+        var got: [5]u8 = undefined;
+        try listener.read(io, &got);
+        try testing.expectEqualStrings("hello", &got);
     }
     // The path a listener left behind, with nothing listening at it.
     try testing.expectError(error.ConnectionRefused, net.connectUnix(io, &address));

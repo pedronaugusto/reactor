@@ -170,7 +170,7 @@ promise on a platform, the extension makes the call itself through
 
 | Extension | std's gap | What the extension does |
 | --- | --- | --- |
-| `net.connectUnix` | `Io.Threaded`'s Windows unix connect (Zig 0.17) answers `Unexpected` for every status but resources: no listener at the path (`STATUS_CONNECTION_REFUSED`) and no path at all among them. | On Windows over any `Io` but a runtime, it opens the socket as the runtime does (`sys.socket.openUnix`) and connects by `IOCTL_AFD_CONNECT` through `operate`, mapping the statuses as the IOCP backend does: refused is `ConnectionRefused`, a missing path `FileNotFound`. A runtime, and every other system, connects by `UnixAddress.connect`. |
+| `net.connectUnix` | `Io.Threaded`'s Windows unix connect (Zig 0.17) drives AFD itself, and the system refuses it: the AF_UNIX endpoint will not open in a process that has not used AF_UNIX through Winsock, its unnamed bind fails once a listener is at the path (`INVALID_PARAMETER`), and every status but resources is `Unexpected`. | On Windows over any `Io` but a runtime, it connects through Winsock (`sys/unix_windows.zig`: `socket` and `connect` with the path as given), as Git for Windows and every Winsock program do; Winsock is started once for the process and left running. `WSAECONNREFUSED` (nothing listening, or no socket at the path) is `ConnectionRefused`, `WSAENETDOWN` (a directory missing on the way) `FileNotFound`. The handle is a socket std's streams read, write and close. A runtime, and every other system, connects by `UnixAddress.connect`. |
 
 ## Workers
 
