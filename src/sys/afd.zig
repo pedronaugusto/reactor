@@ -190,7 +190,7 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
     const gpa = testing.allocator;
     const io = testing.io;
     var data: [512]u8 = undefined;
-    _ = ws.WSAStartup(0x0202, &data);
+    var started = false;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
@@ -208,8 +208,15 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
         var server: ?net.Server = null;
         var listener: ?ws.Socket = null;
         switch (l) {
-            .std_slash, .std_backslash => server = try address.listen(io, .{}),
+            .std_slash, .std_backslash => server = address.listen(io, .{}) catch |err| {
+                try report.print(gpa, "{t}: std listen {t}\n", .{ l, err });
+                continue;
+            },
             .winsock_slash, .winsock_backslash => {
+                if (!started) {
+                    try report.print(gpa, "WSAStartup {d}\n", .{ws.WSAStartup(0x0202, &data)});
+                    started = true;
+                }
                 const s = ws.socket(ws2_32.AF.UNIX, ws2_32.SOCK.STREAM, 0);
                 var un: ws2_32.sockaddr.un = .{ .path = @splat(0) };
                 @memcpy(un.path[0..name.len], name);
@@ -224,7 +231,10 @@ test "probe: a Unix connect's statuses by bind and listener (Windows)" {
             _ = ws.closesocket(s);
         };
         for (std.enums.values(Target)) |t| for (std.enums.values(Bind)) |b| {
-            const handle = try open(ws2_32.AF.UNIX, .stream, null);
+            const handle = open(ws2_32.AF.UNIX, .stream, null) catch |err| {
+                try report.print(gpa, "{t} {t} {t}: open {t}\n", .{ l, t, b, err });
+                continue;
+            };
             defer windows.CloseHandle(handle);
             var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = undefined;
             const len: usize = switch (t) {
