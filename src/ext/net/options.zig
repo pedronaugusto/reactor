@@ -1,9 +1,11 @@
 //! Socket options std's `Io` has no word for: Nagle's algorithm, keepalive
 //! and its timings, the buffer sizes, the traffic class. `connect` and
-//! `listen` set them on the socket they make before it connects or listens,
-//! which is when the buffers count: the window scale a connection uses is
-//! fixed by its first segment (tcp(7): "must be set prior to the listen(2)
-//! or connect(2) calls"). `setOptions` sets them on a socket already made.
+//! `listen` set the buffers and the traffic class on the socket they make
+//! before it connects or listens, which is when they count: the window
+//! scale a connection uses is fixed by its first segment (tcp(7): "must be
+//! set prior to the listen(2) or connect(2) calls"). `nodelay` and
+//! keepalive count from the first write, so `connect` sets them just after
+//! the `Io`'s own connect. `setOptions` sets them on a socket already made.
 //!
 //! A refused option is returned, named, never passed over. The kernel's own
 //! adjustments stand: Linux doubles a buffer size and caps it at
@@ -52,6 +54,13 @@ pub const Options = struct {
     /// on IPv6. `OptionUnsupported` on Windows, which accepts `IP_TOS` and
     /// ignores it.
     traffic_class: ?u8 = null,
+
+    /// Whether an option is asked for that must be set before the connect
+    /// or the listen: the buffers, which fix the window scale, and the
+    /// traffic class, which the first segment carries.
+    pub fn beforeConnect(o: Options) bool {
+        return o.send_buffer != null or o.receive_buffer != null or o.traffic_class != null;
+    }
 
     /// Whether any option is asked for.
     pub fn any(o: Options) bool {

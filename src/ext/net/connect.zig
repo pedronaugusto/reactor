@@ -33,9 +33,12 @@ pub const Options = struct {
     reuse_address: bool = false,
     /// Restrict outgoing traffic to this interface.
     interface: net.Interface = .none,
-    /// Socket options, set before the connect, so the buffers fix the
-    /// window scale its first segment carries. A refused one fails the
-    /// connect, named.
+    /// Socket options. The buffers and the traffic class are set before the
+    /// connect, on a socket reactor makes, so the window scale and the
+    /// class its first segment carries are the ones asked; `nodelay` and
+    /// keepalive, which take effect from the first write, are set just
+    /// after `io`'s own connect, so a wrapping `Io` keeps its connect. A
+    /// refused one fails the connect, named, the socket closed.
     socket: options_file.Options = .{},
 };
 
@@ -56,7 +59,18 @@ fn onTask(core: *Core) bool {
 }
 
 pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
-    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.any()) return made(io, address, options);
+    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.beforeConnect()) return made(io, address, options);
+    const connected = try throughIo(io, address, options);
+    if (options.socket.any()) options_file.setOptions(connected.stream.socket, options.socket) catch |err| {
+        connected.stream.close(io);
+        return err;
+    };
+    return connected;
+}
+
+/// A connection made by `io`'s own connect, with `options.timeout` kept as
+/// this `Io` best can.
+fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
     const plain: net.IpAddress.ConnectOptions = .{ .mode = options.mode, .protocol = options.protocol };
     if (options.timeout == .none) return .{ .stream = try address.connect(io, plain) };
     if (native.runtimeOf(io)) |core| if (onTask(core)) {

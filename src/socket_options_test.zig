@@ -141,3 +141,27 @@ test "on Apple's systems a socket given its options never raises SIGPIPE, which 
     try net.setOptions(accepted.socket, .{});
     try testing.expect(try sys.get(accepted.socket.handle, sys.no_sigpipe) != 0);
 }
+
+test "a connect asking only for nodelay and keepalive goes through the Io's own connect, and one asking for a buffer does not" {
+    const Counting = struct {
+        var connects: std.atomic.Value(u32) = .init(0);
+        fn connect(userdata: ?*anyopaque, address: *const IpAddress, options: IpAddress.ConnectOptions) IpAddress.ConnectError!Io.net.Socket {
+            _ = userdata;
+            _ = connects.fetchAdd(1, .monotonic);
+            return testing.io.vtable.netConnectIp(testing.io.userdata, address, options);
+        }
+    };
+    const Layer = @import("shakedown").Layer(u8, .{ .netConnectIp = Counting.connect });
+    var layer: Layer = .init(testing.io, 0);
+    const io = layer.io();
+    var server = try (IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
+    defer server.deinit(testing.io);
+    const light = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{ .idle = .literal(30) } } } });
+    defer light.stream.close(testing.io);
+    try testing.expectEqual(@as(u32, 1), Counting.connects.load(.monotonic));
+    try testing.expect(try sys.get(light.stream.socket.handle, sys.nodelay) != 0);
+    try testing.expectEqual(@as(c_int, 30), try sys.get(light.stream.socket.handle, sys.keep_idle));
+    const buffered = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .receive_buffer = .fromRaw(96 << 10) } });
+    defer buffered.stream.close(testing.io);
+    try testing.expectEqual(@as(u32, 1), Counting.connects.load(.monotonic));
+}
