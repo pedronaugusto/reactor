@@ -239,6 +239,8 @@ pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
         for (files) |f| closeBound(f.handle);
         return;
     }
+    const pin = Pin.of(native(r));
+    defer pin.end();
     if (native(r)) for (files) |f| abortElsewhere(r, f.handle);
     if (!native(r) or Scheduler.processor() == null) {
         for (files) |f| Loop.closing(f.handle);
@@ -246,6 +248,26 @@ pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
     }
     for (files) |f| closeOnRing(r, f.handle);
 }
+
+/// A close keeps its task on the processor it began on, through every park
+/// its aborts and closes make. The processors `abortElsewhere` passes over
+/// are the others than this one, and the close itself ends this one's hold:
+/// a task that resumed elsewhere would close there, and the processor it
+/// left would keep the descriptor in its kernel tables (io_uring's
+/// registered files, a listener's accepts) for a later file of that number.
+const Pin = struct {
+    task: ?*Task,
+
+    fn of(native_close: bool) Pin {
+        const t = if (native_close) Scheduler.current() else null;
+        if (t) |task| task.pins += 1;
+        return .{ .task = t };
+    }
+
+    fn end(p: Pin) void {
+        if (p.task) |task| task.pins -= 1;
+    }
+};
 
 /// Closes `handle` through the loop, which first ends every operation this
 /// processor's kernel queue holds on it (and on epoll and kqueue lets go of
@@ -270,21 +292,22 @@ pub fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
         for (sockets) |s| closeBound(s.handle);
         return;
     }
+    const pin = Pin.of(native(r));
+    defer pin.end();
     if (native(r)) for (sockets) |s| abortElsewhere(r, s.handle);
     if (!native(r) or Scheduler.processor() == null) {
         for (sockets) |s| Loop.closing(s.handle);
         return borrowed(r, "netClose", .{sockets});
     }
-    for (sockets) |s| {
-        abortElsewhere(r, s.handle);
-        if (Scheduler.processor() != null) closeOnRing(r, s.handle) else borrowed(r, "netClose", .{&[_]net.Socket{s}});
-    }
+    for (sockets) |s| closeOnRing(r, s.handle);
 }
 
 /// Another processor's kernel queue may hold an operation on `fd`, which
 /// would keep the socket open past its close: each such processor ends
 /// its operations on `fd` first, and the close waits until it has, so the
-/// number cannot be reused under a cancel still on its way.
+/// number cannot be reused under a cancel still on its way. The closing
+/// task is pinned (`Pin`), so the processor it waits on is the one it
+/// resumes on.
 fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
     const me = Scheduler.processor();
     const t = Scheduler.current();
