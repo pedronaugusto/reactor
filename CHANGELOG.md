@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-25
+
 ### Changed
 
 - A `net.connect` asking only for `nodelay` and keepalive connects through the `Io`'s own connect and sets them just after, so a wrapping `Io` (a test's layer, a fault injector) keeps its connect; they count from the first write. The buffers and the traffic class, which the first segment fixes, still go on a socket reactor makes before it connects.
