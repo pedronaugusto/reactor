@@ -1,16 +1,29 @@
 //! Networking over any `Io`: what `std.Io` cannot say, or cannot keep on
-//! every `Io` — a connect with a timeout, a bounded lookup, ending a
+//! every `Io` — socket options, a connect with a timeout, a bounded lookup, ending a
 //! socket's operations from another task, per-operation deadlines, and
 //! receives that hold no buffer while idle. Native on a runtime; on any
 //! other `Io`, the best its slots allow.
 const connect_file = @import("net/connect.zig");
 const resolve_file = @import("net/resolve.zig");
+const options_file = @import("net/options.zig");
+const listen_file = @import("net/listen.zig");
 
 pub const ConnectOptions = connect_file.Options;
 pub const Connected = connect_file.Connected;
 pub const ConnectError = connect_file.Error;
 pub const connect = connect_file.connect;
 pub const connectUnix = connect_file.connectUnix;
+
+pub const SocketOptions = options_file.Options;
+pub const Keepalive = options_file.Keepalive;
+pub const KeepaliveSeconds = options_file.KeepaliveSeconds;
+pub const KeepaliveCount = options_file.KeepaliveCount;
+pub const OptionsError = options_file.Error;
+pub const setOptions = options_file.setOptions;
+
+pub const ListenOptions = listen_file.Options;
+pub const ListenError = listen_file.Error;
+pub const listen = listen_file.listen;
 
 pub const ResolveOptions = resolve_file.Options;
 pub const ResolveError = resolve_file.Error;

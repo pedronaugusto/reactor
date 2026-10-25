@@ -21,6 +21,10 @@
 //!   `net.Deadlines`.
 //! - bulk: 256 MiB over loopback TCP from the root to a task, written in
 //!   64 KiB pieces and read 16 KiB at a time.
+//! - connect-options: connect, accept and close (the server first), with
+//!   no option, with nodelay, keepalive and both buffers set by
+//!   `net.connect`, and with the same set after std's connect by
+//!   `net.setOptions`.
 //! - stream: 64 MiB over loopback TCP between two tasks, written in 64 KiB
 //!   pieces and read through `Io.Reader` (a 64 KiB buffer): whole buffers,
 //!   and 4 KiB slices.
@@ -191,6 +195,7 @@ fn ioWorkloads(r: Report, gpa: std.mem.Allocator, io: Io, c: Config, runtime: ?*
     if (c.wants("lanes")) try lanes(r, io, c);
     if (c.wants("deadlines")) try deadlines(r, io, c);
     if (c.wants("connect")) try connects(r, io, c);
+    if (c.wants("connect-options")) try connectOptions(r, io, c);
     if (c.wants("resolve")) try resolves(r, io, c);
     if (c.wants("receiver")) try receivers(r, gpa, io, c);
     if (c.stats) if (runtime) |rt| {
@@ -712,6 +717,50 @@ fn connects(r: Report, io: Io, c: Config) !void {
         connected.stream.close(io);
     }
     try r.line("connect", "loopback connect, accept and close", @as(f64, @floatFromInt(n)) * std.time.ns_per_s / nsBetween(t0, now(io)), "conn/s");
+}
+
+const bench_options: reactor.net.SocketOptions = .{
+    .nodelay = true,
+    .keepalive = .{ .on = .{ .idle = .literal(30), .interval = .literal(5), .count = .literal(4) } },
+    .send_buffer = .fromRaw(96 << 10),
+    .receive_buffer = .fromRaw(96 << 10),
+};
+
+const Setting = enum { none, before, after };
+
+/// A client connection as `setting` makes it: plain, its options set by
+/// `net.connect` before the connect, or by `net.setOptions` after std's.
+fn connectAs(io: Io, address: *const Io.net.IpAddress, setting: Setting) !Io.net.Stream {
+    return switch (setting) {
+        .none => (try reactor.net.connect(io, address, .{})).stream,
+        .before => (try reactor.net.connect(io, address, .{ .socket = bench_options })).stream,
+        .after => after: {
+            const stream = try address.connect(io, .{ .mode = .stream });
+            errdefer stream.close(io);
+            try reactor.net.setOptions(stream.socket, bench_options);
+            break :after stream;
+        },
+    };
+}
+
+fn connectOptions(r: Report, io: Io, c: Config) !void {
+    const n: usize = if (c.smoke) 100 else 20_000;
+    inline for (.{ .{ Setting.none, "connect, accept and close" }, .{ Setting.before, "with options, set before" }, .{ Setting.after, "with options, set after" } }) |row| {
+        var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true, .kernel_backlog = 1024 });
+        defer server.deinit(io);
+        const t0 = now(io);
+        var acceptor = try io.concurrent(acceptLoop, .{ io, &server, n });
+        for (0..n) |_| {
+            const stream = try connectAs(io, &server.socket.address, row[0]);
+            var byte: [1]u8 = undefined;
+            var data: [1][]u8 = .{&byte};
+            // glint-ignore: Z026 -- the server closed first, so the read ends in end of stream or a reset, and either is the end this wants
+            _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
+            stream.close(io);
+        }
+        try acceptor.await(io);
+        try r.line("connect-options", row[1], @as(f64, @floatFromInt(n)) / (nsBetween(t0, now(io)) / std.time.ns_per_s), "conn/s");
+    }
 }
 
 fn resolves(r: Report, io: Io, c: Config) !void {

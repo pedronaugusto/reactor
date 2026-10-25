@@ -190,7 +190,14 @@ counted by `reactor.fallbacks()`.
   waiting for a slot as a `std.Io` slot does; `Canceled` only when it never
   started.
 - **`Signals`**: signals and console control events, to several listeners.
-- **`net`**: `connect` with a timeout, a bounded `resolve`, `abort`,
+- **`net`**: socket options (`SocketOptions`: `nodelay`, keepalive and its
+  idle, interval and count, the send and receive buffers, the traffic
+  class), set by `connect` and `listen` before they connect and listen,
+  when the buffers fix the window scale, or by `setOptions` on a socket
+  already made; a refused option is returned by name, never passed over.
+  `connect` binds a local address (`reuse_address` for a fixed port) or an
+  interface, and makes a socket with no local end asked for unbound until
+  it connects, so its port is picked per destination. Then `connect` with a timeout, a bounded `resolve`, `abort`,
   per-operation `Deadlines`, a `Receiver` whose idle connections hold no
   buffer, and `message`: a stream socket's sends and receives with their
   control data (POSIX), the kernel's own answers kept as their own errors

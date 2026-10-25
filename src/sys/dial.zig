@@ -1,5 +1,6 @@
 //! The raw calls around a bound connection. Network policy stays in the
-//! caller; these only bind an interface and finish a nonblocking connect.
+//! caller; these only bind, bind an interface and finish a nonblocking
+//! connect.
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -39,23 +40,19 @@ fn option(io: Io, socket: net.Socket.Handle, level: i32, code: u32, bytes: []con
     };
 }
 
-/// Changes only O_NONBLOCK, preserving all other status flags.
-pub fn nonblocking(socket: net.Socket.Handle, enabled: bool) Error!void {
-    if (builtin.os.tag == .windows) return;
-    const old = while (true) {
-        const result = posix.system.fcntl(socket, posix.F.GETFL, @as(usize, 0));
-        switch (posix.errno(result)) {
-            .SUCCESS => break result,
-            .INTR => continue,
-            else => return error.Unexpected,
-        }
-    };
-    const bit: usize = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
-    const flags = if (enabled) @as(usize, @intCast(old)) | bit else @as(usize, @intCast(old)) & ~bit;
-    while (true) switch (posix.errno(posix.system.fcntl(socket, posix.F.SETFL, flags))) {
+/// Binds the socket's own end to `address`, its refusals as a connect
+/// names them: a port taken, or none free, is `AddressUnavailable`.
+pub fn bind(socket: net.Socket.Handle, address: *const net.IpAddress) Error!void {
+    var storage: Io.Threaded.PosixAddress = undefined;
+    const len = Io.Threaded.addressToPosix(address, &storage);
+    while (true) switch (posix.errno(posix.system.bind(socket, &storage.any, len))) {
         .SUCCESS => return,
         .INTR => continue,
-        else => return error.Unexpected,
+        .ACCES, .PERM => return error.AccessDenied,
+        .ADDRINUSE, .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |err| return posix.unexpectedErrno(err),
     };
 }
 

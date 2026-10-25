@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Socket options: `net.SocketOptions` (`nodelay`, `keepalive` as `.off` or on with its idle time, interval and probe count, `send_buffer`, `receive_buffer`, `traffic_class`), on `net.ConnectOptions.socket` and on the new `net.listen`, both setting them on the socket they make before it connects or listens, which is when the buffers count; `net.setOptions` sets them on a socket already made, and on Apple's systems makes it raise no `SIGPIPE` on a write to a closed peer, as every socket reactor makes (an accepted one does not inherit it from its listener). A refused option is returned by name (`OptionUnsupported`, `AccessDenied`), the socket closed; Windows has no traffic class to set and says so. `net.ConnectOptions.reuse_address` shares a fixed local port (`SO_REUSEADDR`, and `SO_REUSEPORT` on POSIX), set before the bind.
+
+### Changed
+
+- A connect given a local address, an interface or an option makes and binds its socket itself, so what has to come first does; on POSIX one with no local address asked for is not bound before it connects, where it was bound to port 0 first, which takes a port unique across every destination.
+
 ## [0.8.3] - 2026-10-25
 
 ### Fixed

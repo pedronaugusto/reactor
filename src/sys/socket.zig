@@ -147,6 +147,33 @@ pub fn listenIp(address: *const net.IpAddress, options: net.IpAddress.ListenOpti
     return .{ .handle = handle, .address = bound };
 }
 
+/// Binds the stream socket `fd` to `address` and starts it listening,
+/// `backlog` connections held by the kernel; POSIX. Returns the address
+/// bound. The errors are std's, as its `netListenIp` names them.
+pub fn bindListen(fd: Handle, address: *const net.IpAddress, backlog: u31) net.IpAddress.ListenError!net.IpAddress {
+    if (comptime is_windows) unreachable; // unreachable: AFD listens by `afd.bind` and `afd.listen`
+    var storage: Threaded.PosixAddress = undefined;
+    const len = Threaded.addressToPosix(address, &storage);
+    while (true) switch (posix.errno(posix.system.bind(fd, &storage.any, len))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        .ACCES, .PERM => return error.AccessDenied,
+        .ADDRINUSE => return error.AddressInUse,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .NOBUFS, .NOMEM => return error.SystemResources,
+        else => |err| return posix.unexpectedErrno(err),
+    };
+    while (true) switch (posix.errno(posix.system.listen(fd, backlog))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        .ADDRINUSE => return error.AddressInUse,
+        .OPNOTSUPP => return error.SocketModeUnsupported,
+        else => |err| return posix.unexpectedErrno(err),
+    };
+    return localAddress(fd);
+}
+
 /// A socket bound to `address`, on Windows, made as std 0.17's `netBindIp`
 /// makes it with the bind's refusals named.
 pub fn bindIp(address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {

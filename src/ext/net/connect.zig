@@ -7,6 +7,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const dial = @import("../../sys/dial.zig");
+const sys_socket = @import("../../sys/socket.zig");
+const afd = @import("../../sys/afd.zig");
+const options_file = @import("options.zig");
 const unix_windows = @import("../../sys/unix_windows.zig");
 const Loop = @import("../../Loop.zig");
 const Scheduler = @import("../../Scheduler.zig");
@@ -24,8 +27,16 @@ pub const Options = struct {
     timeout: Io.Timeout = .none,
     /// Bind the local endpoint before connecting.
     local_address: ?net.IpAddress = null,
+    /// With `local_address`: let its port be shared (`SO_REUSEADDR`, and
+    /// `SO_REUSEPORT` on POSIX, as std's `ListenOptions.reuse_address`),
+    /// set before the bind, so a fixed port held in `TIME_WAIT` binds.
+    reuse_address: bool = false,
     /// Restrict outgoing traffic to this interface.
     interface: net.Interface = .none,
+    /// Socket options, set before the connect, so the buffers fix the
+    /// window scale its first segment carries. A refused one fails the
+    /// connect, named.
+    socket: options_file.Options = .{},
 };
 
 pub const Connected = struct {
@@ -45,7 +56,7 @@ fn onTask(core: *Core) bool {
 }
 
 pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
-    if (options.local_address != null or !options.interface.isNone()) return bound(io, address, options);
+    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.any()) return made(io, address, options);
     const plain: net.IpAddress.ConnectOptions = .{ .mode = options.mode, .protocol = options.protocol };
     if (options.timeout == .none) return .{ .stream = try address.connect(io, plain) };
     if (native.runtimeOf(io)) |core| if (onTask(core)) {
@@ -102,25 +113,33 @@ pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.Conn
     return .{ .socket = .{ .handle = handle, .address = .{ .ip4 = .loopback(0) } } };
 }
 
-fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
-    const local = options.local_address orelse switch (address.*) {
-        .ip4 => net.IpAddress{ .ip4 = .unspecified(0) },
-        .ip6 => net.IpAddress{ .ip6 = .unspecified(0) },
-    };
-    if (@as(net.IpAddress.Family, local) != @as(net.IpAddress.Family, address.*)) return error.AddressFamilyUnsupported;
-    const socket = local.bind(io, .{ .mode = options.mode, .protocol = options.protocol }) catch |err| return switch (err) {
-        error.AddressInUse => error.AddressUnavailable,
-        else => |e| e,
-    };
+/// The runtime `io` is, when the caller is one of its tasks and it has a
+/// backend: its connect is the backend's.
+fn runtimeTask(io: Io) ?*Core {
+    const core = native.runtimeOf(io) orelse return null;
+    const entered = native.enter();
+    defer native.leave(entered);
+    return if (native.taskRuntime(core) and core.backendKind() != null) core else null;
+}
+
+/// A connection on a socket reactor makes itself, for what has to come
+/// before the connect: the options, the bind and the interface.
+fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
+    if (options.local_address) |local| if (@as(net.IpAddress.Family, local) != @as(net.IpAddress.Family, address.*)) return error.AddressFamilyUnsupported;
+    const core = runtimeTask(io);
+    // A readiness backend connects in non-blocking mode, as any other `Io`
+    // does here: a socket made in it is spared the switch there and back,
+    // as the runtime's own connect makes it (`netConnectIp`).
+    const start: sys_socket.Start = if (core) |c| (if (c.backendKind() == .epoll or c.backendKind() == .kqueue) .nonblocking else .blocking) else .nonblocking;
+    const socket: net.Socket = .{ .handle = try open(address, options, start), .address = address.* };
     errdefer socket.close(io);
     try dial.interface(io, socket.handle, address.*, options.interface);
-    if (native.runtimeOf(io)) |core| native: {
+    if (core) |c| {
         const entered = native.enter();
         defer native.leave(entered);
-        if (!native.taskRuntime(core) or core.backendKind() == null) break :native;
         const p = Scheduler.processor().?;
-        var op: Loop.Op = .{ .backend = .{ .kind = .{ .connect = .{ .socket = socket.handle, .address = .{ .ip = address.* } } } } };
-        perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .connect = .{ .socket = socket.handle, .address = .{ .ip = address.* }, .nonblocking = start == .nonblocking } } } };
+        perform.run(&c.scheduler, &op, .{ .deadline = perform.deadline(p, options.timeout) }) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             error.Timeout => error.Timeout,
             error.SystemResources => error.SystemResources,
@@ -131,6 +150,9 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
                 break :narrow error.Unexpected;
             },
         };
+        // Where a send ignores `MSG_DONTWAIT` (Darwin) a readiness loop
+        // writes only to sockets in non-blocking mode: it stays so.
+        if (start == .nonblocking and sys_socket.send_honors_dontwait) try sys_socket.setBlocking(socket.handle);
         return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } };
     }
     if (builtin.os.tag == .windows) {
@@ -140,12 +162,12 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
         defer while (race.cancel()) |_| {};
         race.concurrent(.connected, dial.windowsConnect, .{ io, socket.handle, address }) catch {
             try dial.windowsConnect(io, socket.handle, address);
-            return .{ .stream = .{ .socket = socket }, .timeout_enforced = options.timeout == .none };
+            return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }, .timeout_enforced = options.timeout == .none };
         };
         if (options.timeout != .none) race.concurrent(.expired, Io.Timeout.sleep, .{ options.timeout.toDeadline(io), io }) catch {
             const outcome = try race.await();
             try outcome.connected;
-            return .{ .stream = .{ .socket = socket }, .timeout_enforced = false };
+            return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }, .timeout_enforced = false };
         };
         switch (try race.await()) {
             .connected => |result| try result,
@@ -159,7 +181,6 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
             },
         }
     } else {
-        try dial.nonblocking(socket.handle, true);
         if (!try dial.start(socket.handle, address)) {
             wait.wait(io, .{ .writable = socket.handle }, options.timeout) catch |err| return switch (err) {
                 error.Canceled => error.Canceled,
@@ -168,7 +189,49 @@ fn bound(io: Io, address: *const net.IpAddress, options: Options) Error!Connecte
             };
             try dial.finish(socket.handle);
         }
-        try dial.nonblocking(socket.handle, false);
+        try sys_socket.setBlocking(socket.handle);
     }
     return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } };
+}
+
+/// A socket for a connection to `peer`, its options set and its local end
+/// bound as `options` ask, not yet connected. On POSIX a socket with no
+/// local end asked for is not bound: a bind to port 0 takes a port unique
+/// across every destination, and many connections run the ephemeral range
+/// out, where a connect picks its port per destination. AFD binds a socket
+/// before it connects, as std binds it.
+fn open(peer: *const net.IpAddress, options: Options, start: sys_socket.Start) Error!net.Socket.Handle {
+    const family = Io.Threaded.posixAddressFamily(peer);
+    if (builtin.os.tag == .windows) if (options.local_address) |*local| {
+        const handle = try afd.open(family, options.mode, options.protocol);
+        errdefer sys_socket.close(handle);
+        try prepare(handle, peer.*, options);
+        _ = afd.bind(handle, local, .Active) catch |err| return switch (err) {
+            error.AddressInUse => error.AddressUnavailable,
+            else => |e| e,
+        };
+        return handle;
+    };
+    const handle = try sys_socket.open(family, options.mode, options.protocol, start);
+    errdefer sys_socket.close(handle);
+    try prepare(handle, peer.*, options);
+    if (builtin.os.tag != .windows) if (options.local_address) |*local| try dial.bind(handle, local);
+    return handle;
+}
+
+/// What is set before the bind: the port's sharing and the options.
+fn prepare(handle: net.Socket.Handle, peer: net.IpAddress, options: Options) Error!void {
+    if (options.reuse_address) try options_file.reuse(handle);
+    try options_file.apply(handle, peer, options.socket);
+}
+
+test "a socket made for its options alone is not bound before its connect" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // AFD binds every socket before it connects
+    const peer: net.IpAddress = .{ .ip4 = .loopback(9) };
+    const handle = try open(&peer, .{ .socket = .{ .nodelay = true } }, .blocking);
+    defer sys_socket.close(handle);
+    try std.testing.expectEqual(@as(u16, 0), (try sys_socket.localAddress(handle)).getPort());
+    const bound = try open(&peer, .{ .socket = .{ .nodelay = true }, .local_address = .{ .ip4 = .loopback(0) } }, .blocking);
+    defer sys_socket.close(bound);
+    try std.testing.expect((try sys_socket.localAddress(bound)).getPort() != 0);
 }
