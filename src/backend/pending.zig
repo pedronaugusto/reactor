@@ -1,9 +1,9 @@
 //! A batch's operation while the kernel holds it. It lives in the batch's
 //! own storage, as a `Pending` entry whose `userdata` keeps the operation
 //! itself, packed, so that an operation a timeout cancelled can go back to
-//! `submitted` whole. The kernel identifies it by a token: the batch's
-//! address and the operation's index, with three low bits left for the
-//! backend's own tags.
+//! `submitted` whole. A backend names it by a token: the batch, and the
+//! operation's index in it. A backend that must hand the kernel an integer
+//! keeps the token in a table of its own and hands it the key.
 const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,23 +18,27 @@ const is_windows = builtin.os.tag == .windows;
 pub const max_operations = 1 << 16;
 
 /// Where a completion belongs: a batch and an index in its storage.
-pub const Token = enum(u64) {
-    _,
+pub const Token = struct {
+    /// Private: read through `batch`.
+    owner: *Io.Batch,
+    /// Private: read through `index`.
+    at: u32,
 
     pub fn of(b: *Io.Batch, at: u32) Token {
         assert(at < max_operations);
-        const address: u64 = @intFromPtr(b); // safe: packed into a token, unpacked by `batch`
-        assert(address & 7 == 0);
-        assert(address >> 48 == 0);
-        return @fromBackingInt(@intCast((address >> 3) << 19 | @as(u64, at) << 3));
+        return .{ .owner = b, .at = at };
     }
 
     pub fn batch(t: Token) *Io.Batch {
-        return @ptrFromInt((@backingInt(t) >> 19) << 3);
+        return t.owner;
     }
 
     pub fn index(t: Token) u32 {
-        return @intCast((@backingInt(t) >> 3) & (max_operations - 1));
+        return t.at;
+    }
+
+    pub fn eql(a: Token, b: Token) bool {
+        return a.owner == b.owner and a.at == b.at;
     }
 
     pub fn pending(t: Token) *Pending {
@@ -81,11 +85,11 @@ const Packed = if (is_windows) extern union {
 };
 
 fn packedOf(p: *Pending) *Packed {
-    return @ptrCast(&p.userdata); // safe: `Packed` fits in, and is no more aligned than, the userdata words
+    return @ptrCast(&p.userdata); // aegis: boundary: std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
 }
 
 fn packedOfConst(p: *const Pending) *const Packed {
-    return @ptrCast(&p.userdata); // safe: `Packed` fits in, and is no more aligned than, the userdata words
+    return @ptrCast(&p.userdata); // aegis: boundary: std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
 }
 
 /// Keeps `operation` in `p`. A splat beyond 2^32 - 1 is clamped: the

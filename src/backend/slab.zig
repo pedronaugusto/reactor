@@ -76,6 +76,16 @@ pub fn Slab(comptime T: type, comptime Generation: type) type {
             return true;
         }
 
+        /// The key of the first value `matches` takes, or null: a search
+        /// of every slot, for what is looked up rarely.
+        pub fn find(s: *const Self, context: anytype, comptime matches: fn (@TypeOf(context), T) bool) ?Key {
+            for (s.slots, 0..) |slot, i| {
+                const value = slot.value orelse continue;
+                if (matches(context, value)) return .{ .index = @intCast(i), .generation = slot.generation };
+            }
+            return null;
+        }
+
         /// Slots taken.
         pub fn count(s: *const Self) u32 {
             var n: u32 = 0;

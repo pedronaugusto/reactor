@@ -84,6 +84,8 @@ const Request = scratch.Status;
 /// no room for a status block beside the operation it keeps.
 const Slot = struct {
     status: Request = .{ .owner = .batch },
+    /// Its place in the backend's slots, kept in the batch's own word.
+    index: u32,
     owner: *Iocp,
     token: pending.Token = undefined,
     target: Handle = undefined,
@@ -141,7 +143,7 @@ pub fn init(gpa: Allocator, options: Options) InitError!Iocp {
     var i = b.slots.len;
     while (i > 0) {
         i -= 1;
-        b.slots[i] = .{ .owner = undefined, .next = b.free };
+        b.slots[i] = .{ .owner = undefined, .index = @intCast(i), .next = b.free };
         b.free = &b.slots[i];
     }
     return b;
@@ -542,8 +544,8 @@ pub fn submitPending(b: *Iocp, token: pending.Token, operation: Io.Operation) er
     if (!b.bindHandle(handle)) return error.Unexpected;
     const slot = b.free orelse return error.SystemResources;
     b.free = slot.next;
-    slot.* = .{ .owner = b, .token = token, .target = handle };
-    pending.backendWord(token.pending()).* = @intFromPtr(slot); // safe: read back as the slot by `cancelPending`
+    slot.* = .{ .owner = b, .index = slot.index, .token = token, .target = handle };
+    pending.backendWord(token.pending()).* = slot.index;
     const context: *anyopaque = &slot.status;
     const status = switch (operation) {
         .net_read => |r| status: {
@@ -590,8 +592,7 @@ pub fn submitPending(b: *Iocp, token: pending.Token, operation: Io.Operation) er
 }
 
 pub fn cancelPending(b: *Iocp, token: pending.Token) void {
-    _ = b;
-    const slot: *Slot = @ptrFromInt(pending.backendWord(token.pending()).*);
+    const slot = &b.slots[pending.backendWord(token.pending()).*];
     sys.cancel(slot.target, &slot.status.iosb);
 }
 

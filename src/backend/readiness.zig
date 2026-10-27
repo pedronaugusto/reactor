@@ -484,7 +484,7 @@ pub fn Readiness(comptime Poller: type) type {
             const list = &self.records.at(index).waiters[@backingInt(direction)];
             var it = list.head;
             while (it) |w| : (it = w.next) {
-                if (w.owner == .operation or Entry.of(w).token != token) continue;
+                if (w.owner == .operation or !Entry.of(w).token.eql(token)) continue;
                 list.remove(w);
                 Entry.of(w).outcome = .canceled;
                 return self.finish(w);

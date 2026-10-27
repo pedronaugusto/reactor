@@ -99,7 +99,7 @@ fn submitPending(context: *anyopaque, token: pending.Token, operation: Io.Operat
 
 fn cancelPending(context: *anyopaque, token: pending.Token) void {
     const f = of(context);
-    for (f.batch.items) |*e| if (e.token == token) {
+    for (f.batch.items) |*e| if (e.token.eql(token)) {
         e.canceled = true;
     };
 }

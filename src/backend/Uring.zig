@@ -100,6 +100,8 @@ pub const Target = union(enum) {
     listener: *Accept.Slot,
     /// A message this ring sent to another: the ring it went to.
     message: *Uring,
+    /// A batch's operation.
+    batch: pending.Token,
 };
 
 const Targets = slab.Slab(Target, u29);
@@ -135,20 +137,8 @@ pub const Key = packed struct(u64) {
     }
 };
 
-/// A batch operation's `user_data`: its token, whose low three bits are
-/// clear, under `tag`.
-fn tokenData(token: pending.Token, tag: Tag) u64 {
-    const word: u64 = @backingInt(token);
-    assert(word & 7 == 0);
-    return word | @backingInt(tag);
-}
-
 fn tagOf(user_data: u64) Tag {
     return Key.of(user_data).tag;
-}
-
-fn tokenOf(user_data: u64) pending.Token {
-    return @fromBackingInt(@intCast(user_data & ~@as(u64, 7)));
 }
 
 /// `target` in the ring's table under `tag`: the `user_data` that names
@@ -678,11 +668,13 @@ fn readinessOnly(operation: Io.Operation) ?u32 {
 }
 
 pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) error{ SystemResources, Unexpected }!void {
+    const ready = readinessOnly(operation);
+    const data = u.register(if (ready == null) .batch else .batch_ready, .{ .batch = token }) orelse return error.SystemResources;
     u.active += 1;
     const sqe = u.entry();
-    if (readinessOnly(operation)) |events| {
+    if (ready) |events| {
         sqe.prep_poll_add(socketOf(operation), events);
-        sqe.user_data = tokenData(token, .batch_ready);
+        sqe.user_data = data;
         return;
     }
     switch (operation) {
@@ -692,7 +684,7 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
         .net_write => |w| sqe.prep_send(w.socket_handle, firstChunk(w.header, w.data, w.splat), posix.MSG.NOSIGNAL),
         else => unreachable, // unreachable: the rest go by readiness, device control never pends
     }
-    sqe.user_data = tokenData(token, .batch);
+    sqe.user_data = data;
     switch (operation) {
         .file_read_streaming, .file_write_streaming => u.files.use(&u.ring, sqe),
         else => {},
@@ -700,9 +692,9 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
 }
 
 pub fn cancelPending(u: *Uring, token: pending.Token) void {
-    const tag: Tag = if (readinessOnly(pending.unpack(token.pending()))) |_| .batch_ready else .batch;
+    const data = u.keyOf(token) orelse return;
     const sqe = u.entry();
-    sqe.prep_cancel(tokenData(token, tag), 0);
+    sqe.prep_cancel(data, 0);
     sqe.flags |= linux.IOSQE_CQE_SKIP_SUCCESS;
     sqe.user_data = Key.ignored;
 }
@@ -815,13 +807,13 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             u.settle(o, sink);
         },
         .batch => {
+            const token = u.batchOf(ud) orelse return;
             u.active -= 1;
-            const token = tokenOf(ud);
             sink.completePending(token, results.ofPending(token.pending().tag, cqe));
         },
         .batch_ready => {
+            const token = u.batchOf(ud) orelse return;
             u.active -= 1;
-            const token = tokenOf(ud);
             if (cqe.err() == .CANCELED) return sink.completePending(token, .canceled);
             const operation = pending.unpack(token.pending());
             if (results.attempt(operation)) |result| return sink.completePending(token, .{ .result = result });
@@ -863,6 +855,27 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             }
         },
     }
+}
+
+/// The batch operation `data` names, its one completion come: its entry is
+/// freed. Null when it names nothing now or something else.
+fn batchOf(u: *Uring, data: u64) ?pending.Token {
+    const target = u.lookup(data) orelse return null;
+    if (target != .batch) return null;
+    u.release(data);
+    return target.batch;
+}
+
+/// The key under which the ring holds `token`'s operation, or null when it
+/// holds none: a cancel is rare, so the table is searched for it.
+fn keyOf(u: *Uring, token: pending.Token) ?u64 {
+    const found = u.targets.find(token, struct {
+        fn holds(wanted: pending.Token, target: Target) bool {
+            return target == .batch and target.batch.eql(wanted);
+        }
+    }.holds) orelse return null;
+    const tag: Tag = if (readinessOnly(pending.unpack(token.pending())) == null) .batch else .batch_ready;
+    return @bitCast(Key{ .tag = tag, .generation = found.generation, .index = found.index });
 }
 
 /// The operation `data` names, or null when it names nothing now or names
