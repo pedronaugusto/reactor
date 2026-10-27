@@ -31,6 +31,7 @@ const scratch = @import("uring/scratch.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const timeline = @import("../clock.zig");
+const kernel_time = @import("kernel_time.zig");
 const Receive = @import("uring/Receive.zig");
 const Accept = @import("uring/Accept.zig");
 const Buffers = @import("uring/Buffers.zig");
@@ -496,7 +497,7 @@ fn queue(u: *Uring, o: *op.Op) error{SystemResources}!void {
         .timer => |deadline| {
             o.state.storage.scratch = .{ .io_uring = .{ .timespec = undefined } };
             const ts = &o.state.storage.scratch.io_uring.timespec;
-            ts.* = timespecOf(deadline.raw.nanoseconds);
+            ts.* = timespecOf(kernel_time.of(deadline.raw));
             const clock_flag: u32 = switch (deadline.clock) {
                 .real => linux.IORING_TIMEOUT_REALTIME,
                 .boot => linux.IORING_TIMEOUT_BOOTTIME,
@@ -526,7 +527,7 @@ fn queue(u: *Uring, o: *op.Op) error{SystemResources}!void {
         const primary = &u.ring.sq.sqes[(u.ring.sq.sqe_tail -% 1) & u.ring.sq.mask];
         primary.flags |= linux.IOSQE_IO_LINK;
         const at = o.linked;
-        o.state.uring.timespec = timespecOf(at.ns);
+        o.state.uring.timespec = timespecOf(at.at);
         o.state.uring.timeout_pending = true;
         const sqe = u.entry();
         sqe.prep_link_timeout(&o.state.uring.timespec, linux.IORING_TIMEOUT_ABS | @as(u32, switch (at.clock) {
@@ -1036,9 +1037,10 @@ fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.soc
     return @intCast(@offsetOf(posix.sockaddr.un, "path") + n + 1);
 }
 
-fn timespecOf(ns: i96) linux.kernel_timespec {
-    const clamped: i96 = @max(ns, 0);
-    return .{ .sec = @intCast(@divFloor(clamped, std.time.ns_per_s)), .nsec = @intCast(@mod(clamped, std.time.ns_per_s)) };
+/// `at` as an absolute `timespec` on its clock.
+fn timespecOf(at: kernel_time.KernelTime) linux.kernel_timespec {
+    const parts = timeline.parts(kernel_time.sinceZero(at));
+    return .{ .sec = @intCast(parts.sec), .nsec = parts.nsec };
 }
 
 /// Only the source owner calls this. Failed messages fall back when their

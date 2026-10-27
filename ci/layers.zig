@@ -37,6 +37,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/op.zig",
         "src/backend/pending.zig",
         "src/backend/slab.zig",
+        "src/backend/kernel_time.zig",
         "src/backend/Raised.zig",
         "src/backend/Uring.zig",
         "src/backend/uring/results.zig",

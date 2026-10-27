@@ -4,6 +4,7 @@
 //! shift). All of it is sized at `init`; a record is freed when its
 //! descriptor closes or, idle, to make room.
 const std = @import("std");
+const closes = @import("closes.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -85,7 +86,7 @@ pub fn Records(comptime Waiter: type) type {
             /// the kernel queued for an earlier one carry the old value.
             generation: u32 = 0,
             /// The descriptor's close epoch when it was registered.
-            epoch: u32 = 0,
+            epoch: closes.Epoch = .fromRaw(0),
             registered: Directions = .{},
             /// The ways the descriptor may be ready: cleared when a call
             /// finds it is not (`EAGAIN`, or a short stream read or write,
@@ -185,7 +186,8 @@ pub fn Records(comptime Waiter: type) type {
         /// Frees record `index`, which has nobody waiting.
         pub fn remove(t: *Self, index: u32) void {
             const r = &t.records[index];
-            assert(r.in_use and r.idle());
+            assert(r.in_use);
+            assert(r.idle());
             const mask = t.slots.len - 1;
             var i = t.home(r.fd);
             while (t.slots[i] != index + 1) i = (i + 1) & mask;

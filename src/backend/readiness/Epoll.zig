@@ -13,6 +13,7 @@ const linux = std.os.linux;
 const readiness = @import("../readiness.zig");
 const Wait = @import("../wait.zig").Wait;
 const timeline = @import("../../clock.zig");
+const kernel_time = @import("../kernel_time.zig");
 
 const Epoll = @This();
 
@@ -200,7 +201,7 @@ pub fn handle(e: *const Epoll) linux.fd_t {
 
 /// `clock`'s one timer, armed for `deadline` (nanoseconds on that clock),
 /// or disarmed.
-pub fn armClock(e: *Epoll, clock: readiness.Clock, deadline: ?i96) readiness.SubmitError!void {
+pub fn armClock(e: *Epoll, clock: readiness.Clock, deadline: ?kernel_time.KernelTime) readiness.SubmitError!void {
     const i = @backingInt(clock);
     const fd = e.clock_fds[i] orelse blk: {
         if (deadline == null) return;
@@ -215,13 +216,12 @@ pub fn armClock(e: *Epoll, clock: readiness.Clock, deadline: ?i96) readiness.Sub
         e.clock_fds[i] = fd;
         break :blk fd;
     };
-    const at: i96 = @max(deadline orelse 0, 0);
-    // A deadline of zero disarms: one already past fires at the first
-    // nanosecond instead.
-    const value: i96 = if (deadline == null) 0 else @max(at, 1);
+    // A deadline of zero disarms: one at the clock's zero fires at its
+    // first nanosecond instead.
+    const value: timeline.Parts = if (deadline) |at| timeline.parts(kernel_time.sinceZero(if (at.compare(.fromRaw(1)) == .lt) .fromRaw(1) else at)) else .{ .sec = 0, .nsec = 0 };
     const spec: linux.itimerspec = .{
         .it_interval = .{ .sec = 0, .nsec = 0 },
-        .it_value = .{ .sec = @intCast(@divFloor(value, std.time.ns_per_s)), .nsec = @intCast(@mod(value, std.time.ns_per_s)) },
+        .it_value = .{ .sec = @intCast(value.sec), .nsec = value.nsec },
     };
     const flags: u32 = timer_abstime | if (clock == .real) timer_cancel_on_set else 0;
     switch (errno(linux.timerfd_settime(fd, @bitCast(flags), &spec, null))) {

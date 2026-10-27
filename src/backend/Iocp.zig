@@ -42,6 +42,7 @@ const op = @import("op.zig");
 const pending = @import("pending.zig");
 const Wait = @import("wait.zig").Wait;
 const timeline = @import("../clock.zig");
+const kernel_time = @import("kernel_time.zig");
 const Notifications = @import("iocp/Notifications.zig");
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
@@ -68,6 +69,10 @@ pub const Entry = sys.Entry;
 pub fn key() usize {
     return @intFromPtr(&key_anchor); // safe: an address used as a number nobody else can have
 }
+
+/// From 1601, where Windows' clock starts, to 1970, where the real clock's
+/// zero is.
+const windows_epoch: timeline.Span = .fromRaw(11_644_473_600 * 1_000_000_000);
 
 /// The APC context of a `wake`'s entry, and of the precise timer's: no
 /// status block's address, which is aligned, is either.
@@ -369,13 +374,12 @@ fn submitTimer(b: *Iocp, o: *op.Op, deadline: Io.Clock.Timestamp, context: ?*any
     errdefer sys.close(timer);
     const packet = try sys.createWaitPacket();
     errdefer sys.close(packet);
+    const at = kernel_time.of(deadline.raw);
     const due: i64 = switch (deadline.clock) {
         // 100 ns since 1601: the timer follows changes to the clock.
-        .real => @intCast(std.math.clamp(@divTrunc(deadline.raw.nanoseconds - std.time.epoch.windows * std.time.ns_per_s, 100), 1, std.math.maxInt(i64))),
-        else => due: {
-            const now = deadline.clock.now(system()).nanoseconds;
-            break :due -@as(i64, @intCast(std.math.clamp(@divTrunc(deadline.raw.nanoseconds - now + 99, 100), 1, std.math.maxInt(i64))));
-        },
+        .real => @intCast(std.math.clamp(@divTrunc(kernel_time.sinceZero(at).saturatingAdd(windows_epoch).raw(), 100), 1, std.math.maxInt(i64))),
+        // Relative, rounded up: never early.
+        else => -@as(i64, @intCast(std.math.clamp(hectoNanoseconds(kernel_time.until(kernel_time.now(deadline.clock, system()), at)), 1, std.math.maxInt(i64)))),
     };
     try sys.setTimer(timer, due);
     try sys.armWaitPacket(packet, b.port, timer, key(), @intFromPtr(context)); // safe: the context, as a number

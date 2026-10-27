@@ -23,6 +23,7 @@ const readiness = @import("../readiness.zig");
 const calls = @import("calls.zig");
 const Wait = @import("../wait.zig").Wait;
 const timeline = @import("../../clock.zig");
+const kernel_time = @import("../kernel_time.zig");
 
 const Kqueue = @This();
 
@@ -282,7 +283,7 @@ pub fn handle(k: *const Kqueue) posix.fd_t {
 
 /// `clock`'s one timer, armed for `deadline` (nanoseconds on that clock),
 /// or disarmed.
-pub fn armClock(k: *Kqueue, clock: readiness.Clock, deadline: ?i96) readiness.SubmitError!void {
+pub fn armClock(k: *Kqueue, clock: readiness.Clock, deadline: ?kernel_time.KernelTime) readiness.SubmitError!void {
     const i = @backingInt(clock);
     const ident = clock_ident[i];
     const at = deadline orelse {
@@ -290,13 +291,13 @@ pub fn armClock(k: *Kqueue, clock: readiness.Clock, deadline: ?i96) readiness.Su
         k.clock_armed[i] = false;
         return;
     };
-    const fflags: u32, const data: i96 = switch (clock) {
-        .real => if (absolute) |flag| .{ c.NOTE.NSECONDS | flag | critical, at } else .{ c.NOTE.NSECONDS | critical, at - now(.real) },
+    const fflags: u32, const data: timeline.Span = switch (clock) {
+        .real => if (absolute) |flag| .{ c.NOTE.NSECONDS | flag | critical, kernel_time.sinceZero(at) } else .{ c.NOTE.NSECONDS | critical, kernel_time.until(now(.real), at) },
         // Relative, on a clock that counts across sleep where the system
         // has one: the boot clock's meaning.
-        .boot => .{ c.NOTE.NSECONDS | continuous | critical, at - now(.boot) },
+        .boot => .{ c.NOTE.NSECONDS | continuous | critical, kernel_time.until(now(.boot), at) },
     };
-    const clamped: i64 = @intCast(std.math.clamp(data, 0, std.math.maxInt(i64)));
+    const clamped: i64 = std.math.cast(i64, data.raw()) orelse std.math.maxInt(i64);
     k.queue(change(ident, c.EVFILT.TIMER, c.EV.ADD | c.EV.ONESHOT, fflags, clamped, 0));
     k.clock_armed[i] = true;
 }
@@ -306,10 +307,10 @@ pub fn clockFired(k: *Kqueue, clock: readiness.Clock) void {
     k.clock_armed[@backingInt(clock)] = false;
 }
 
-fn now(clock: readiness.Clock) i96 {
+fn now(clock: readiness.Clock) kernel_time.KernelTime {
     const io_clock: std.Io.Clock = switch (clock) {
         .real => .real,
         .boot => .boot,
     };
-    return io_clock.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds;
+    return kernel_time.now(io_clock, std.Io.Threaded.global_single_threaded.io());
 }

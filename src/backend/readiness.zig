@@ -39,6 +39,8 @@ const calls = @import("readiness/calls.zig");
 const socket = @import("../sys/socket.zig");
 const closes = @import("readiness/closes.zig");
 const records_ = @import("readiness/records.zig");
+const kernel_time = @import("kernel_time.zig");
+const KernelTime = kernel_time.KernelTime;
 
 pub const Waiter = @import("readiness/Waiter.zig");
 pub const Direction = records_.Direction;
@@ -184,7 +186,7 @@ pub fn Readiness(comptime Poller: type) type {
         done: Fifo = .{},
         timers: [2]List = .{ .{}, .{} },
         /// The deadline each clock's kernel timer is armed for.
-        armed: [2]?i96 = .{ null, null },
+        armed: [2]?KernelTime = .{ null, null },
         /// A wake event taken by a pump outside `poll` (one that made room
         /// for a change, or asked a write's room): the next poll returns
         /// without waiting, as the wake asked.
@@ -310,11 +312,11 @@ pub fn Readiness(comptime Poller: type) type {
                         else => unreachable, // unreachable: the loop keeps every other clock on its wheel
                     };
                     w.clock = clock;
-                    w.deadline = deadline.raw.nanoseconds;
+                    w.deadline = kernel_time.of(deadline.raw);
                     w.place = .timer;
                     self.timers[@backingInt(clock)].append(w);
                     const armed = self.armed[@backingInt(clock)];
-                    if (armed == null or w.deadline < armed.?) self.arm(clock, w.deadline) catch |err| {
+                    if (armed == null or w.deadline.compare(armed.?) == .lt) self.arm(clock, w.deadline) catch |err| {
                         self.timers[@backingInt(clock)].remove(w);
                         w.place = .none;
                         return err;
@@ -651,7 +653,7 @@ pub fn Readiness(comptime Poller: type) type {
             _ = try self.pump(.nowait);
         }
 
-        fn arm(self: *Self, clock: Clock, deadline: ?i96) SubmitError!void {
+        fn arm(self: *Self, clock: Clock, deadline: ?KernelTime) SubmitError!void {
             try self.room();
             try self.poller.armClock(clock, deadline);
             self.armed[@backingInt(clock)] = deadline;
@@ -789,17 +791,17 @@ pub fn Readiness(comptime Poller: type) type {
                 .real => .real,
                 .boot => .boot,
             };
-            const time = io_clock.now(Io.Threaded.global_single_threaded.io()).nanoseconds;
+            const time = kernel_time.now(io_clock, Io.Threaded.global_single_threaded.io());
             const list = &self.timers[@backingInt(clock)];
-            var earliest: ?i96 = null;
+            var earliest: ?KernelTime = null;
             var it = list.head;
             while (it) |w| {
                 it = w.next;
-                if (w.deadline <= time) {
+                if (w.deadline.compare(time) != .gt) {
                     list.remove(w);
                     _ = self.act(w, -1, .fired, 0);
                     self.finish(w);
-                } else if (earliest == null or w.deadline < earliest.?) earliest = w.deadline;
+                } else if (earliest == null or w.deadline.compare(earliest.?) == .lt) earliest = w.deadline;
             }
             self.arm(clock, earliest) catch {
                 // No room for the kernel timer now: the next poll's events

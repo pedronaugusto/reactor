@@ -3,6 +3,7 @@
 const Waiter = @This();
 
 const records = @import("records.zig");
+const KernelTime = @import("../kernel_time.zig").KernelTime;
 const Direction = records.Direction;
 
 prev: ?*Waiter = null,
@@ -18,8 +19,8 @@ how: How = .call,
 /// A connect that put its socket in non-blocking mode puts it back.
 restore: bool = false,
 clock: Clock = .real,
-/// A timer's deadline on its clock, in nanoseconds.
-deadline: i96 = 0,
+/// A timer's deadline on its clock.
+deadline: KernelTime = .fromRaw(0),
 
 pub const Place = enum(u2) { none, record, timer, done };
 

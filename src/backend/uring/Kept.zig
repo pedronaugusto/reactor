@@ -18,20 +18,39 @@
 const Kept = @This();
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 const Word = usize;
 const word_bits = @bitSizeOf(Word);
 
-words: []std.atomic.Value(Word),
+/// A word of the set: one bit per descriptor number.
+const Bits = enum(Word) {
+    none = 0,
+    _,
+
+    fn with(b: Bits, bit: Word) Bits {
+        return @fromBackingInt(@backingInt(b) | bit);
+    }
+
+    fn without(b: Bits, bit: Word) Bits {
+        return @fromBackingInt(@backingInt(b) & ~bit);
+    }
+
+    fn has(b: Bits, bit: Word) bool {
+        return @backingInt(b) & bit != 0;
+    }
+};
+
+words: []aegis.Atomic(Bits),
 
 /// The most descriptor numbers kept: past a million the bits cost more
 /// than the slots save.
 const max_numbers = 1 << 20;
 
 pub fn init(gpa: Allocator) Allocator.Error!Kept {
-    const words = try gpa.alloc(std.atomic.Value(Word), (numbers() + word_bits - 1) / word_bits);
-    for (words) |*w| w.* = .init(0);
+    const words = try gpa.alloc(aegis.Atomic(Bits), (numbers() + word_bits - 1) / word_bits);
+    for (words) |*w| w.* = .init(.none);
     return .{ .words = words };
 }
 
@@ -50,18 +69,22 @@ fn numbers() usize {
 /// `fd` is open, and its owner closes it through the owner's own close.
 pub fn record(k: *Kept, fd: std.posix.fd_t) void {
     const at = k.place(fd) orelse return;
-    _ = k.words[at.word].fetchOr(at.bit, .release);
+    const cell = &k.words[at.word];
+    var seen = cell.load(.monotonic);
+    while (cell.cmpxchgWeak(seen, seen.with(at.bit), .release, .monotonic)) |found| seen = found;
 }
 
 /// `fd` is being closed by its owner: no slot may stand for it after.
 pub fn forget(k: *Kept, fd: std.posix.fd_t) void {
     const at = k.place(fd) orelse return;
-    _ = k.words[at.word].fetchAnd(~at.bit, .release);
+    const cell = &k.words[at.word];
+    var seen = cell.load(.monotonic);
+    while (cell.cmpxchgWeak(seen, seen.without(at.bit), .release, .monotonic)) |found| seen = found;
 }
 
 pub fn contains(k: *const Kept, fd: std.posix.fd_t) bool {
     const at = k.place(fd) orelse return false;
-    return k.words[at.word].load(.acquire) & at.bit != 0;
+    return k.words[at.word].load(.acquire).has(at.bit);
 }
 
 fn place(k: *const Kept, fd: std.posix.fd_t) ?struct { word: usize, bit: Word } {

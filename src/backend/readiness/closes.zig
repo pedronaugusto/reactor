@@ -10,11 +10,16 @@
 //! loop is seen by every loop. Descriptors share a slot when their numbers
 //! do modulo its size, which only makes a loop register one again.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
+
+/// How many times descriptors of a slot have closed: compared, never
+/// counted on, so it wraps.
+pub const Epoch = aegis.units.Count(struct {}, u32);
 
 const slots = 4096;
 
-var epochs: [slots]std.atomic.Value(u32) = @splat(.init(0));
+var epochs: [slots]aegis.Atomic(Epoch) = @splat(.init(.fromRaw(0)));
 
 fn slot(fd: Io.File.Handle) usize {
     const key: u64 = switch (@typeInfo(Io.File.Handle)) {
@@ -26,10 +31,10 @@ fn slot(fd: Io.File.Handle) usize {
 
 /// Before `fd` is closed: every loop's record of it becomes stale.
 pub fn bump(fd: Io.File.Handle) void {
-    _ = epochs[slot(fd)].fetchAdd(1, .release);
+    _ = epochs[slot(fd)].fetchAddWrapping(.fromRaw(1), .release);
 }
 
 /// The epoch a registration of `fd` made now belongs to.
-pub fn epoch(fd: Io.File.Handle) u32 {
+pub fn epoch(fd: Io.File.Handle) Epoch {
     return epochs[slot(fd)].load(.acquire);
 }

@@ -8,6 +8,7 @@ const Wheel = @import("../Wheel.zig");
 const uring = @import("uring/scratch.zig");
 const iocp = @import("iocp/scratch.zig");
 const Waiter = @import("readiness/Waiter.zig");
+const kernel_time = @import("kernel_time.zig");
 
 /// An operation as its backend sees it: what to do, its result, the
 /// loop's and the backend's state while it is under way, and its linked
@@ -27,14 +28,14 @@ pub const Op = struct {
 /// A deadline in the operation's own bytes: sixteen of them, where an
 /// optional timestamp would take forty-eight in every operation.
 pub const Linked = struct {
-    /// Nanoseconds on `clock`, saturating; read only when `set`.
-    ns: i64 = 0,
+    /// The deadline on `clock`; read only when `set`.
+    at: kernel_time.KernelTime = .fromRaw(0),
     clock: Io.Clock = .awake,
     set: bool = false,
 
     pub fn of(at: ?Io.Clock.Timestamp) Linked {
         const t = at orelse return .{};
-        return .{ .ns = std.math.lossyCast(i64, t.raw.nanoseconds), .clock = t.clock, .set = true };
+        return .{ .at = kernel_time.of(t.raw), .clock = t.clock, .set = true };
     }
 };
 
