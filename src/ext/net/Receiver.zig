@@ -145,9 +145,7 @@ pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
             const p = Scheduler.processor().?;
             r.native_state = .{ .receiver = r, .owner = p, .group = &groups.items[p.index], .io = io };
             const state = &r.native_state.?;
-            var held = state.mailbox.acquireUncancelable(Native.system());
-            held.value().request = .{ .socket = r.socket, .group = state.group.id, .context = state, .complete = Native.completed };
-            held.deinit(Native.system());
+            state.request = .{ .socket = r.socket, .group = state.group.id, .complete = Native.completed };
         }
         return r.native_state.?.next(io, timeout.toDeadline(io));
     };
@@ -207,10 +205,9 @@ fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8, deadline: Io.Timeout
     return r.data_len;
 }
 
-/// What the receiver's lock guards: the kernel request, what it has
-/// delivered and not yet been taken, and the command that serves it.
+/// What the receiver's lock guards: what the kernel request has delivered
+/// and not yet been taken, and the command that serves it.
 const Mailbox = struct {
-    request: Receive = undefined,
     command_queued: bool = false,
     closed: bool = false,
     eof: bool = false,
@@ -226,6 +223,9 @@ const Native = struct {
     group: *Groups.Group,
     io: Io,
     mailbox: aegis.BlockingGuarded(Mailbox) = .init(.{}),
+    /// The kernel request: the owner's alone, armed, canceled and completed
+    /// on its ring's thread.
+    request: Receive = undefined,
     ready: Io.Event = .unset,
     ended: Io.Event = .unset,
     command: Scheduler.Errand = .{ .run = commandRun },
@@ -254,20 +254,25 @@ const Native = struct {
         mailbox.command_queued = false;
         const closing = mailbox.closed;
         if (closing) {
-            mailbox.request.cancel(state.group.ring);
-        } else if (!mailbox.request.active and !mailbox.eof) {
+            state.request.cancel(state.group.ring);
+        } else if (!state.request.active and !mailbox.eof) {
             mailbox.failure = null;
             state.ended.reset();
             state.owner.hold(state.receiver.socket);
-            mailbox.request.arm(state.group.ring);
+            state.request.arm(state.group.ring) catch {
+                // No room in the ring's table: the reader is told so.
+                state.owner.release(state.receiver.socket);
+                mailbox.failure = error.SystemResources;
+                state.ready.set(state.io);
+            };
         }
-        const ended = closing and !mailbox.request.active;
+        const ended = closing and !state.request.active;
         held.deinit(system());
         if (ended) state.ended.set(state.io);
     }
 
-    fn completed(context: *anyopaque, cqe: std.os.linux.io_uring_cqe) void {
-        const state: *Native = @ptrCast(@alignCast(context)); // safe: the receive request retained this native state
+    fn completed(request: *Receive, cqe: std.os.linux.io_uring_cqe) void {
+        const state: *Native = @fieldParentPtr("request", request);
         const pool = state.receiver.pool;
         var held = state.mailbox.acquireUncancelable(system());
         const mailbox = held.value();

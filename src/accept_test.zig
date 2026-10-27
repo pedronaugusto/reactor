@@ -4,6 +4,7 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 const Runtime = @import("Runtime.zig");
+const Uring = @import("backend/Uring.zig");
 const Accept = @import("backend/uring/Accept.zig");
 const Loop = @import("Loop.zig");
 const op = @import("backend/op.zig");
@@ -21,6 +22,11 @@ const Harness = struct {
     }
     pub fn complete(h: *Harness, _: *op.Op) void {
         h.completed += 1;
+    }
+    pub const Key = Uring.Key;
+    /// Every accept slot under one key: no completion here is looked up.
+    pub fn register(_: *Harness, tag: Uring.Tag, _: Uring.Target) ?u64 {
+        return @bitCast(Key{ .tag = tag, .generation = 1 });
     }
 };
 

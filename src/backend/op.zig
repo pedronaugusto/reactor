@@ -181,6 +181,9 @@ pub const Raw = union(enum) {
 pub const RawResult = union(enum) { uring: i32, windows: std.os.windows.IO_STATUS_BLOCK };
 
 pub const UringState = struct {
+    /// Its `user_data` while the ring holds it: the key of its entry in the
+    /// ring's table.
+    key: u64 = 0,
     timeout_pending: bool = false,
     notification_pending: bool = false,
     notification_seen: bool = false,

@@ -9,8 +9,11 @@
 //! signals on every completion, registered only when asked for, since it
 //! costs a signal per completion.
 //!
-//! A completion's `user_data` is an operation's address, or a batch token,
-//! with a tag in its three low bits.
+//! A completion's `user_data` is a `Key`: a tag in its three low bits, and
+//! the key of what it names in the ring's table (`targets`), never an
+//! address. A completion whose key names nothing now (freed since, or never
+//! given) is refused and counted (`targets.stale`), not followed. A batch
+//! operation's is its token, an integer the batch's table checks.
 const Uring = @This();
 
 const std = @import("std");
@@ -36,6 +39,7 @@ pub const Kept = @import("uring/Kept.zig");
 const Allocator = std.mem.Allocator;
 const BufferRing = @import("../sys/BufferRing.zig");
 const results = @import("uring/results.zig");
+const slab = @import("slab.zig");
 
 pub const Features = packed struct(u7) {
     accept_ahead: bool = false,
@@ -59,7 +63,11 @@ pub const Options = struct {
     sqpoll: ?op.SqPoll = null,
     zero_copy_min: ?aegis.units.Bytes(usize) = null,
     registered_pools: u16 = 64,
+    /// Operations under way at once (the loop's bound), and batch entries
+    /// waiting.
     pending_bound: u32 = 1024,
+    /// Multishot receives and messages to other rings under way at once.
+    persistent: u32 = 64,
     /// The descriptors fixed-file slots may be made for; null: none.
     kept: ?*const Kept = null,
 };
@@ -69,7 +77,7 @@ pub const InitError = error{ BackendUnavailable, SystemResources, Unexpected };
 /// What an operation keeps while the kernel holds it.
 pub const Scratch = scratch.Scratch;
 
-const Tag = enum(u3) {
+pub const Tag = enum(u3) {
     /// An operation's completion: the address of its `Op`.
     op = 0,
     /// A batch operation's result: a token.
@@ -85,16 +93,88 @@ const Tag = enum(u3) {
     auxiliary = 7,
 };
 
-fn userData(address: u64, tag: Tag) u64 {
-    assert(address & 7 == 0);
-    return address | @backingInt(tag);
+/// What a completion's key names.
+pub const Target = union(enum) {
+    op: *op.Op,
+    receiver: *Receive,
+    listener: *Accept.Slot,
+    /// A message this ring sent to another: the ring it went to.
+    message: *Uring,
+};
+
+const Targets = slab.Slab(Target, u29);
+
+/// A completion's `user_data`: its tag, and the key of what it names.
+pub const Key = packed struct(u64) {
+    tag: Tag,
+    generation: u29 = 0,
+    index: u32 = 0,
+
+    /// A completion that names nothing: a cancel's acknowledgement.
+    pub const ignored: u64 = @bitCast(Key{ .tag = .ignore });
+    /// The completion a message from another ring arrives as.
+    pub const message_received: u64 = @bitCast(Key{ .tag = .auxiliary });
+
+    fn of(data: u64) Key {
+        return @bitCast(data);
+    }
+
+    fn slot(k: Key) Targets.Key {
+        return .{ .index = k.index, .generation = k.generation };
+    }
+
+    /// Whether it names something: zero is no generation's.
+    fn names(k: Key) bool {
+        return k.generation != 0;
+    }
+
+    fn retagged(data: u64, tag: Tag) u64 {
+        var k = of(data);
+        k.tag = tag;
+        return @bitCast(k);
+    }
+};
+
+/// A batch operation's `user_data`: its token, whose low three bits are
+/// clear, under `tag`.
+fn tokenData(token: pending.Token, tag: Tag) u64 {
+    const word: u64 = @backingInt(token);
+    assert(word & 7 == 0);
+    return word | @backingInt(tag);
 }
 
 fn tagOf(user_data: u64) Tag {
-    return @fromBackingInt(@intCast(@as(u3, @truncate(user_data))));
+    return Key.of(user_data).tag;
+}
+
+fn tokenOf(user_data: u64) pending.Token {
+    return @fromBackingInt(@intCast(user_data & ~@as(u64, 7)));
+}
+
+/// `target` in the ring's table under `tag`: the `user_data` that names
+/// it. Null when the table is full.
+pub fn register(u: *Uring, tag: Tag, target: Target) ?u64 {
+    const key = u.targets.put(target) orelse return null;
+    return @bitCast(Key{ .tag = tag, .generation = key.generation, .index = key.index });
+}
+
+/// What `data` names, or null, counted, when it names nothing now.
+fn lookup(u: *Uring, data: u64) ?Target {
+    const key = Key.of(data);
+    return u.targets.get(key.slot()) orelse {
+        std.log.debug("reactor: a completion naming nothing of this ring's refused (tag {t})", .{key.tag});
+        return null;
+    };
+}
+
+/// The table's entry for `data` freed: its last completion has come.
+pub fn release(u: *Uring, data: u64) void {
+    _ = u.targets.remove(Key.of(data).slot());
 }
 
 ring: linux.IoUring,
+/// What every completion's key names (`register`).
+targets: Targets,
 zero_copy_min: ?usize,
 /// The last buffer group id issued (`nextGroup`), shared by every ring.
 groups: aegis.Atomic(BufferRing.Id) = .init(.fromRaw(0)),
@@ -145,8 +225,12 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
         .wake_fd = undefined,
         .enabled = !options.disabled,
         .deferred = try gpa.alloc(linux.io_uring_cqe, options.pending_bound),
+        .targets = undefined,
     };
     errdefer gpa.free(u.deferred);
+    // Every operation, every accept a listener keeps armed, and the rest.
+    u.targets = try .init(gpa, options.pending_bound +| options.entries *| Accept.bound +| options.persistent);
+    errdefer u.targets.deinit(gpa);
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
     u.probe();
@@ -234,6 +318,7 @@ pub fn deinit(u: *Uring, gpa: Allocator) void {
     u.drainListeners();
     u.accepts.deinit(gpa);
     gpa.free(u.deferred);
+    u.targets.deinit(gpa);
     u.files.deinit(gpa);
     u.buffers.deinit(gpa);
     if (u.notify_fd) |fd| _ = linux.close(fd);
@@ -265,11 +350,12 @@ pub fn drainListeners(u: *Uring) void {
         const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // unreachable: the ring remains valid until the terminal completions
         for (cqes[0..count]) |cqe| switch (tagOf(cqe.user_data)) {
             .listener => {
-                const slot: *Accept.Slot = @ptrFromInt(cqe.user_data & ~@as(u64, 7)); // safe: a live table entry owns this token
-                u.accepts.drain(slot, cqe.res);
+                const target = u.lookup(cqe.user_data) orelse continue;
+                u.release(cqe.user_data);
+                u.accepts.drain(target.listener, cqe.res);
             },
             .wake, .ignore => {},
-            .auxiliary => if (cqe.user_data & ~@as(u64, 7) != 0) std.debug.panic("reactor: an operation outlived its owner", .{}),
+            .auxiliary => if (Key.of(cqe.user_data).names()) std.debug.panic("reactor: an operation outlived its owner", .{}),
             else => std.debug.panic("reactor: an operation outlived its owner", .{}),
         };
     }
@@ -330,7 +416,7 @@ pub fn submit(u: *Uring, o: *op.Op) error{ SystemResources, Unexpected }!bool {
         o.result = .{ .io = result };
         return true;
     };
-    u.queue(o);
+    try u.queue(o);
     return false;
 }
 
@@ -351,7 +437,10 @@ fn sendsNow(u: *const Uring, w: Io.Operation.NetWrite) bool {
 }
 
 /// Queues `o` on the ring; its completion comes back through `poll`.
-fn queue(u: *Uring, o: *op.Op) void {
+/// `SystemResources` when the ring's table has no room for it.
+fn queue(u: *Uring, o: *op.Op) error{SystemResources}!void {
+    // An accept a listener's armed requests answer is not the ring's.
+    if (o.kind == .accept and u.accepts.submit(u, o)) return;
     // The kernel's linked timeout is two more entries and a timer in the
     // kernel for each operation, and most operations finish before their
     // deadline: a read under a deadline lost 60% of its rate on a two-thread
@@ -361,7 +450,8 @@ fn queue(u: *Uring, o: *op.Op) void {
     // alone is linked.
     const linked = u.features.linked_timeout and o.linked.set and o.kind == .connect;
     if (linked) u.reserveEntries(2);
-    const ud = userData(@intFromPtr(o), .op); // safe: read back as the `Op` in `complete`
+    const ud = u.register(.op, .{ .op = o }) orelse return error.SystemResources;
+    o.state.uring.key = ud;
     switch (o.kind) {
         .raw => |raw| switch (raw) {
             .uring => |request| {
@@ -372,10 +462,7 @@ fn queue(u: *Uring, o: *op.Op) void {
             .windows => unreachable, // unreachable: only uring requests reach Linux
         },
         .io => |*operation| u.submitIo(o, operation, ud),
-        .accept => {
-            if (u.accepts.submit(u, o)) return;
-            u.submitSingleAccept(o);
-        },
+        .accept => u.submitSingleAccept(o),
         .connect => |c| {
             o.state.storage.scratch = .{ .io_uring = .{ .address = undefined } };
             const a = &o.state.storage.scratch.io_uring.address;
@@ -457,7 +544,7 @@ fn queue(u: *Uring, o: *op.Op) void {
             .boot => linux.IORING_TIMEOUT_BOOTTIME,
             else => 0,
         }));
-        sqe.user_data = userData(@intFromPtr(o), .auxiliary); // safe: retained until primary and timeout complete
+        sqe.user_data = Key.retagged(ud, .auxiliary);
     }
     u.active += 1;
 }
@@ -472,14 +559,15 @@ fn reserveEntries(u: *Uring, count: u32) void {
     }
 }
 
-/// A kernel without multishot support uses ordinary accept requests.
-pub fn submitSingleAccept(u: *Uring, o: *op.Op) void {
+/// A kernel without multishot support uses ordinary accept requests; `o`
+/// is in the ring's table already.
+fn submitSingleAccept(u: *Uring, o: *op.Op) void {
     o.state.storage.scratch = .{ .io_uring = .{ .address = undefined } };
     const a = &o.state.storage.scratch.io_uring.address;
     a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
     const sqe = u.entry();
     sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // aegis: boundary: the kernel writes a socket address here
-    sqe.user_data = userData(@intFromPtr(o), .op); // safe: this operation's own token
+    sqe.user_data = o.state.uring.key;
 }
 
 /// The most one read or write moves: Linux's own cap.
@@ -559,7 +647,7 @@ fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
         cancel_sqe.prep_cancel_fd(fd, linux.IORING_ASYNC_CANCEL_ALL);
         // Hard-linked: the close runs whatever the cancel found.
         cancel_sqe.flags |= linux.IOSQE_IO_HARDLINK;
-        cancel_sqe.user_data = userData(0, .ignore);
+        cancel_sqe.user_data = Key.ignored;
     }
     const sqe = u.entry();
     sqe.prep_close(fd);
@@ -569,9 +657,9 @@ fn submitClose(u: *Uring, fd: linux.fd_t, ud: u64) void {
 pub fn cancel(u: *Uring, o: *op.Op) void {
     if (o.kind == .accept and u.accepts.cancel(o)) return;
     const sqe = u.entry();
-    sqe.prep_cancel(userData(@intFromPtr(o), .op), 0); // safe: the operation's own user data
+    sqe.prep_cancel(o.state.uring.key, 0);
     sqe.flags |= linux.IOSQE_CQE_SKIP_SUCCESS;
-    sqe.user_data = userData(0, .ignore);
+    sqe.user_data = Key.ignored;
 }
 
 // Batches.
@@ -594,7 +682,7 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
     const sqe = u.entry();
     if (readinessOnly(operation)) |events| {
         sqe.prep_poll_add(socketOf(operation), events);
-        sqe.user_data = userData(@backingInt(token), .batch_ready);
+        sqe.user_data = tokenData(token, .batch_ready);
         return;
     }
     switch (operation) {
@@ -604,7 +692,7 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
         .net_write => |w| sqe.prep_send(w.socket_handle, firstChunk(w.header, w.data, w.splat), posix.MSG.NOSIGNAL),
         else => unreachable, // unreachable: the rest go by readiness, device control never pends
     }
-    sqe.user_data = userData(@backingInt(token), .batch);
+    sqe.user_data = tokenData(token, .batch);
     switch (operation) {
         .file_read_streaming, .file_write_streaming => u.files.use(&u.ring, sqe),
         else => {},
@@ -614,9 +702,9 @@ pub fn submitPending(u: *Uring, token: pending.Token, operation: Io.Operation) e
 pub fn cancelPending(u: *Uring, token: pending.Token) void {
     const tag: Tag = if (readinessOnly(pending.unpack(token.pending()))) |_| .batch_ready else .batch;
     const sqe = u.entry();
-    sqe.prep_cancel(userData(@backingInt(token), tag), 0);
+    sqe.prep_cancel(tokenData(token, tag), 0);
     sqe.flags |= linux.IOSQE_CQE_SKIP_SUCCESS;
-    sqe.user_data = userData(0, .ignore);
+    sqe.user_data = Key.ignored;
 }
 
 fn socketOf(operation: Io.Operation) linux.fd_t {
@@ -712,29 +800,28 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     }
     switch (tag) {
         .op => {
-            const o: *op.Op = @ptrFromInt(ud); // safe: submit retains this op through every completion
+            const o = u.opOf(ud) orelse return;
             o.state.uring.completed(cqe);
             u.settle(o, sink);
         },
         .auxiliary => {
-            const address = ud & ~@as(u64, 7);
-            if (address == 0) {
+            if (!Key.of(ud).names()) {
                 u.message_pending.clear();
                 return sink.notified();
             }
-            const o: *op.Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
+            const o = u.opOf(ud) orelse return;
             o.state.uring.timeout_pending = false;
             if (cqe.err() == .TIME) o.state.uring.timed_out = true;
             u.settle(o, sink);
         },
         .batch => {
             u.active -= 1;
-            const token: pending.Token = @fromBackingInt(@intCast(ud & ~@as(u64, 7)));
+            const token = tokenOf(ud);
             sink.completePending(token, results.ofPending(token.pending().tag, cqe));
         },
         .batch_ready => {
             u.active -= 1;
-            const token: pending.Token = @fromBackingInt(@intCast(ud & ~@as(u64, 7)));
+            const token = tokenOf(ud);
             if (cqe.err() == .CANCELED) return sink.completePending(token, .canceled);
             const operation = pending.unpack(token.pending());
             if (results.attempt(operation)) |result| return sink.completePending(token, .{ .result = result });
@@ -747,27 +834,52 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
         },
         .receiver => {
-            if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.active -= 1;
-            const r: *Receive = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the receiver owns this record through the terminal completion
-            r.deliver(cqe);
+            const target = u.lookup(ud) orelse return;
+            if (target != .receiver) return;
+            if (cqe.flags & linux.IORING_CQE_F_MORE == 0) {
+                u.active -= 1;
+                u.release(ud);
+            }
+            target.receiver.deliver(cqe);
             // A receiver wakes tasks without completing a Loop.Op.
             sink.notified();
         },
         .listener => {
-            const r: *Accept.Slot = @ptrFromInt(ud & ~@as(u64, 7)); // safe: the table owns this record through the terminal completion
-            u.accepts.complete(u, r, cqe, sink);
+            const target = u.lookup(ud) orelse return;
+            if (target != .listener) return;
+            // An accept's one completion.
+            u.release(ud);
+            u.accepts.complete(u, target.listener, cqe, sink);
         },
-        .ignore => if (cqe.res < 0 and ud & ~@as(u64, 7) != 0) {
-            const target: *Uring = @ptrFromInt(ud & ~@as(u64, 7)); // safe: runtimes retain every ring until workers stop
-            target.message_pending.clear();
-            target.wake();
+        .ignore => if (Key.of(ud).names()) {
+            // A message to another ring: its one completion. One that
+            // failed leaves the other ring to be woken by its eventfd.
+            const target = u.lookup(ud) orelse return;
+            if (target != .message) return;
+            u.release(ud);
+            if (cqe.res < 0) {
+                target.message.message_pending.clear();
+                target.message.wake();
+            }
         },
     }
+}
+
+/// The operation `data` names, or null when it names nothing now or names
+/// something else.
+fn opOf(u: *Uring, data: u64) ?*op.Op {
+    const target = u.lookup(data) orelse return null;
+    return switch (target) {
+        .op => |o| o,
+        else => null,
+    };
 }
 
 fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
     const ownership = &o.state.uring;
     if (!ownership.ready()) return;
+    // Every completion of it has come: its key names nothing from here.
+    u.release(ownership.key);
     const primary = ownership.primary;
     if (ownership.fixed_buffer) |index| {
         u.buffers.release(index);
@@ -777,7 +889,7 @@ fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
         if (o.kind == .io and o.kind.io == .net_write) {
             o.state.uring = .{ .use_copy = true };
             u.active -= 1;
-            u.queue(o);
+            u.queue(o) catch unreachable; // unreachable: its own entry was freed just above
             return;
         }
     }
@@ -807,7 +919,7 @@ fn armWake(u: *Uring) void {
     const sqe = u.entry();
     sqe.prep_poll_add(u.wake_fd, linux.POLL.IN);
     sqe.len = linux.IORING_POLL_ADD_MULTI;
-    sqe.user_data = userData(0, .wake);
+    sqe.user_data = @bitCast(Key{ .tag = .wake });
     u.wake_armed = true;
 }
 
@@ -924,8 +1036,12 @@ fn timespecOf(ns: i96) linux.kernel_timespec {
 pub fn messageWake(source: *Uring, target: *Uring) bool {
     if (!source.features.msg_ring) return false;
     if (target.message_pending.raise()) return true;
+    const data = source.register(.ignore, .{ .message = target }) orelse {
+        target.message_pending.clear();
+        return false;
+    };
     const sqe = source.entry();
-    sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = userData(0, .auxiliary), .len = 0, .user_data = userData(@intFromPtr(target), .ignore) }); // safe: target outlives source polling and worker shutdown
+    sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = Key.message_received, .len = 0, .user_data = data });
     // A refused submission stays queued for the source's next poll.
     source.enter(.nowait) catch return true;
     return true;

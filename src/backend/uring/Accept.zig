@@ -17,6 +17,8 @@ pub const bound = 8;
 pub const Slot = struct {
     record: *Record = undefined,
     active: bool = false,
+    /// Its `user_data` while armed: the key of its entry in the ring's table.
+    key: u64 = 0,
     address: Io.Threaded.PosixAddress = undefined,
     address_len: posix.socklen_t = @sizeOf(Io.Threaded.PosixAddress),
 };
@@ -164,10 +166,12 @@ fn arm(_: *Accept, u: anytype, r: *Record) void {
     for (&r.slots) |*slot| {
         if (r.count + r.pending >= r.ahead) break;
         if (slot.active) continue;
-        slot.* = .{ .record = r, .active = true };
+        // No room in the ring's table: fewer accepts are armed ahead.
+        const key = u.register(.listener, .{ .listener = slot }) orelse break;
+        slot.* = .{ .record = r, .active = true, .key = key };
         const sqe = u.entry();
         sqe.prep_accept(r.fd, &slot.address.any, &slot.address_len, linux.SOCK.CLOEXEC);
-        sqe.user_data = @intFromPtr(slot) | 5; // safe: decoded as this persistent accept slot
+        sqe.user_data = key;
         r.pending += 1;
     }
     r.armed = r.pending != 0;
@@ -237,8 +241,8 @@ fn stop(u: anytype, r: *Record) void {
     for (&r.slots) |*slot| {
         if (!slot.active) continue;
         const sqe = u.entry();
-        sqe.prep_cancel(@intFromPtr(slot) | 5, 0); // safe: this accept slot's own completion token
-        sqe.user_data = 4; // ignored cancellation acknowledgement
+        sqe.prep_cancel(slot.key, 0);
+        sqe.user_data = @TypeOf(u.*).Key.ignored;
     }
 }
 

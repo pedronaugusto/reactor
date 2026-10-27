@@ -33,5 +33,6 @@ test {
     _ = @import("accept_test.zig");
     _ = @import("files_test.zig");
     _ = @import("backend/uring/Kept.zig");
+    _ = @import("backend/slab.zig");
     _ = @import("uring_ext_test.zig");
 }

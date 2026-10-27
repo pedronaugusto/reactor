@@ -493,10 +493,10 @@ test "a native receive alone returns from a loop waiting for a completion" {
     const BufferRing = @import("sys/BufferRing.zig");
     const Receive = @import("backend/uring/Receive.zig");
     const Observed = struct {
-        const Self = @This();
+        request: Receive,
         count: u32 = 0,
-        fn complete(context: *anyopaque, _: linux.io_uring_cqe) void {
-            const observed: *Self = @ptrCast(@alignCast(context)); // safe: this request retains the local counter
+        fn complete(request: *Receive, _: linux.io_uring_cqe) void {
+            const observed: *@This() = @fieldParentPtr("request", request);
             observed.count += 1;
         }
     };
@@ -519,9 +519,9 @@ test "a native receive alone returns from a loop waiting for a completion" {
     linux.IoUring.buf_ring_init(buffers.br);
     linux.IoUring.buf_ring_add(buffers.br, &bytes, 0, 1, 0);
     linux.IoUring.buf_ring_advance(buffers.br, 1);
-    var observed: Observed = .{};
-    var request: Receive = .{ .socket = sockets[0], .group = .fromRaw(1), .context = &observed, .complete = Observed.complete };
-    request.arm(ring);
+    var observed: Observed = .{ .request = .{ .socket = sockets[0], .group = .fromRaw(1), .complete = Observed.complete } };
+    const request = &observed.request;
+    try request.arm(ring);
     defer {
         request.cancel(ring);
         while (request.active) _ = loop.run(.nowait) catch unreachable; // unreachable: this live ring accepts its cancel
@@ -552,4 +552,41 @@ test "provided buffer pools register before startup and during worker adoption" 
         try testing.expect(before.groups != null);
         try testing.expectEqual(@as(usize, 4), during.groups.?.items.len);
     }
+}
+
+test "a completion whose key names nothing of the ring's is refused, counted, and never followed" {
+    if (builtin.os.tag != .linux or !supported) return error.SkipZigTest;
+    const Loop = @import("Loop.zig");
+    const Uring = @import("backend/Uring.zig");
+    const op = @import("backend/op.zig");
+    var loop: Loop = undefined;
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer loop.deinit(testing.allocator);
+    const ring = loop.backend.io_uring;
+    // A sink that a refused completion never reaches.
+    const Unreached = struct {
+        pub fn complete(_: @This(), _: *op.Op) void {
+            @panic("a forged completion reached its operation");
+        }
+        pub fn completePending(_: @This(), _: anytype, _: anytype) void {
+            @panic("a forged completion reached a batch");
+        }
+        pub fn notified(_: @This()) void {
+            @panic("a forged completion woke the loop");
+        }
+    };
+    const forged = [_]Uring.Key{
+        // A slot the table has, under a generation it never gave.
+        .{ .tag = .op, .generation = 7, .index = 3 },
+        // A slot past the table's end.
+        .{ .tag = .listener, .generation = 1, .index = 1_000_000 },
+        .{ .tag = .receiver, .generation = 2, .index = 0 },
+        .{ .tag = .auxiliary, .generation = 5, .index = 1 },
+    };
+    const before = ring.targets.stale;
+    for (forged) |key| ring.complete(.{ .user_data = @bitCast(key), .res = 0, .flags = 0 }, Unreached{});
+    try testing.expectEqual(before + forged.len, ring.targets.stale);
 }

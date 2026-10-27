@@ -4,6 +4,9 @@
 //! or that names a slot the backend never filled, is refused rather than
 //! followed, so a stale or forged completion cannot reach memory.
 //!
+//! Generations start at one and pass over zero as they wrap, so a key of
+//! all zeros names no slot: a word that carries no key is told apart.
+//!
 //! The table is sized at `init` and never grows: a backend's operations in
 //! flight are bounded already, and a full table is that bound reached.
 const std = @import("std");
@@ -27,7 +30,7 @@ pub fn Slab(comptime T: type, comptime Generation: type) type {
         };
 
         const Slot = struct {
-            generation: Generation = 0,
+            generation: Generation = 1,
             value: ?T = null,
             next_free: ?u32 = null,
         };
@@ -67,7 +70,8 @@ pub fn Slab(comptime T: type, comptime Generation: type) type {
         pub fn remove(s: *Self, key: Key) bool {
             _ = s.get(key) orelse return false;
             const slot = &s.slots[key.index];
-            slot.* = .{ .generation = slot.generation +% 1, .next_free = s.free };
+            const next = slot.generation +% 1;
+            slot.* = .{ .generation = if (next == 0) 1 else next, .next_free = s.free };
             s.free = key.index;
             return true;
         }
@@ -111,8 +115,11 @@ test "a key finds its value until its slot is freed, and never after, though the
 test "a key no slot has, or a slot never filled, is refused and counted" {
     var s: Slab(u32, u16) = try .init(testing.allocator, 4);
     defer s.deinit(testing.allocator);
-    try testing.expect(s.get(.{ .index = 9, .generation = 0 }) == null);
-    try testing.expect(s.get(.{ .index = 3, .generation = 0 }) == null);
-    try testing.expectEqual(@as(u64, 2), s.stale);
-    try testing.expectEqual(@as(u32, 0), s.count());
+    try testing.expect(s.get(.{ .index = 9, .generation = 1 }) == null);
+    try testing.expect(s.get(.{ .index = 3, .generation = 1 }) == null);
+    // A key of zeros names no slot, whatever the table holds.
+    _ = s.put(5).?;
+    try testing.expect(s.get(.{ .index = 0, .generation = 0 }) == null);
+    try testing.expectEqual(@as(u64, 3), s.stale);
+    try testing.expectEqual(@as(u32, 1), s.count());
 }
