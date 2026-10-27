@@ -183,7 +183,7 @@ pub const Processor = struct {
     lease: std.atomic.Value(u32) = .init(0),
     /// The seat of the thread holding the processor, which the monitor
     /// reads to see whether it is lent.
-    owner: std.atomic.Value(?*Seat) = .init(null),
+    owner: aegis.Atomic(?*Seat) = .init(null),
 
     /// The inboxes and flags other threads touch. Every wake reads the flags
     /// and every remote push writes an inbox, so the owner's own state must
@@ -836,6 +836,10 @@ listeners: aegis.Guarded(void) = .init({}),
 /// an operation on it.
 holders: [descriptor_slots]aegis.Atomic(Holders) = @splat(.init(.none)),
 stopping: Raised = .{},
+/// What a future of this scheduler's holds as its awaiter once it is done
+/// (`Task.awaiter`): its address alone says so, and nothing reads or writes
+/// the record.
+finished: Task.Awaiter = .{ .task = null },
 
 /// The thread that built the runtime: the root runs there alone.
 home_thread: std.Thread.Id,

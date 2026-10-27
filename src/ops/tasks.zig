@@ -69,8 +69,7 @@ fn futureEntry(t: *Task) noreturn {
 /// Off the ended task's stack: tell its awaiter, if it has one yet.
 fn futureDone(t: *Task) void {
     const s = schedulerOf(t);
-    const old = t.awaiter.swap(Task.finished, .acq_rel);
-    if (old != 0) wakeAwaiter(s, @ptrFromInt(old)); // safe: only `await` stores, and it stores an `*Awaiter`
+    if (t.awaiter.swap(&s.finished, .acq_rel)) |a| wakeAwaiter(s, a);
 }
 
 fn wakeAwaiter(s: *Scheduler, a: *Task.Awaiter) void {
@@ -88,20 +87,21 @@ const Awaiting = struct {
 fn registerAwaiter(after: *Scheduler.After, waiter: *Task) void {
     const a = &(@as(*Awaiting, @fieldParentPtr("after", after))).awaiter;
     const future = a.target.?;
-    const old = future.awaiter.swap(@intFromPtr(a), .acq_rel); // safe: read back by `futureDone`
-    if (old == Task.finished) schedulerOf(waiter).ready(waiter, .woken);
+    const s = schedulerOf(waiter);
+    if (future.awaiter.swap(a, .acq_rel) == &s.finished) s.ready(waiter, .woken);
 }
 
 /// Waits for `t` to end, copies its result and gives its stack back.
 pub fn await(s: *Scheduler, t: *Task, result: []u8) void {
-    if (t.awaiter.load(.acquire) != Task.finished) {
+    const finished = &s.finished;
+    if (t.awaiter.load(.acquire) != finished) {
         var w: Awaiting = .{ .awaiter = .{ .task = Scheduler.current(), .target = t } };
         const a = &w.awaiter;
         if (a.task != null) {
             Scheduler.park(&w.after);
         } else {
-            const old = t.awaiter.swap(@intFromPtr(a), .acq_rel); // safe: read back by `futureDone`
-            if (old != Task.finished) {
+            const old = t.awaiter.swap(a, .acq_rel);
+            if (old != finished) {
                 const sys = Scheduler.system();
                 while (a.done.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &a.done.raw, 0);
             }

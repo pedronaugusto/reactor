@@ -73,9 +73,9 @@ wait: ?*Hook = null,
 /// While it waits on or drains a batch: where that batch's completions
 /// find it (ops/batch.zig).
 batch_wait: ?*BatchWait = null,
-/// Futures: 0 while running, `finished` once done, else the `*Awaiter`
-/// waiting for it.
-awaiter: std.atomic.Value(usize) = .init(0),
+/// Futures: null while running, its scheduler's `finished` once done, else
+/// the awaiter waiting for it.
+awaiter: aegis.Atomic(?*Awaiter) = .init(null),
 /// Group members: the group, and their links among its listed members
 /// (`listGroupMember`), guarded by the group's lock.
 group: ?*Io.Group = null,
@@ -118,8 +118,6 @@ pub const Start = union(enum) {
     future: *const fn (context: *const anyopaque, result: *anyopaque) void,
     member: *const fn (context: *const anyopaque) void,
 };
-
-pub const finished: usize = 1;
 
 /// A number of cancel requests for a task's waits.
 pub const CancelMessages = aegis.units.Count(Hook, u32);
