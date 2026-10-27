@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-27
+
 ### Fixed
 
 - Windows: a task's switch no longer ends the process at a page edge. shuttle's switch set the next stack's bounds in the thread information block, then made calls on the stack it was leaving; a call that first touched that stack's guard page raised a guard page violation no handler took, and the process ended with no message. A runtime switches from task stacks to a scheduler stack below them, so a task that parked at such a depth crashed the program, in Debug builds where those calls are made (uplink's HTTP/2 server tests on IOCP). shuttle 0.3.4 exchanges the bounds as the stack pointer moves; it pins aegis 0.1.17, which reactor takes with it.
