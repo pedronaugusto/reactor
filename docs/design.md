@@ -172,6 +172,30 @@ promise on a platform, the extension makes the call itself through
 | --- | --- | --- |
 | `net.connectUnix` | `Io.Threaded`'s Windows unix connect (Zig 0.17) drives AFD itself, and the system refuses it: the AF_UNIX endpoint will not open in a process that has not used AF_UNIX through Winsock, its unnamed bind fails once a listener is at the path (`INVALID_PARAMETER`), and every status but resources is `Unexpected`. | On Windows over any `Io` but a runtime, it connects through Winsock (`sys/unix_windows.zig`: `socket` and `connect` with the path as given), as Git for Windows and every Winsock program do; Winsock is started once for the process and left running. `WSAECONNREFUSED` (nothing listening, or no socket at the path) is `ConnectionRefused`, `WSAENETDOWN` (a directory missing on the way) `FileNotFound`. The handle is a socket std's streams read, write and close. A runtime, and every other system, connects by `UnixAddress.connect`. |
 
+## Named pipes
+
+A named pipe is Windows' door to a local daemon, as a Unix socket is
+elsewhere, and the same handle model carries it: `net.connectPipe` and
+`net.listenPipe` open every handle for overlapped calls and hand it over
+as an `Io.File` with `nonblocking` set, so a runtime finishes its reads,
+writes and the listen (`FSCTL_PIPE_LISTEN`, a device control the port
+already takes) on its port, and std waits on them itself. Nothing is
+added to a backend. A connect to a busy pipe tries again after a short
+cancelable sleep until its timeout, as Go's winio does: the free instance
+it waits for is made by the server's next accept, which no event names.
+A listener keeps one instance waiting and makes the next as each client
+is accepted, so a client between accepts finds one; it takes its
+security descriptor from the caller and has no default, since a pipe is
+a door into the server, and refuses clients of other machines.
+
+A pipe's deadlines are kept where each operation carries its own, on a
+runtime. Elsewhere `Deadlines.add` refuses a pipe's watch and its
+operations run unbounded, said rather than guessed at: std's own wait on
+an overlapped call ends only as the call does, and a cancel from outside
+reaches it as a state it does not expect. `pipe.readPipeWithin` is the
+bounded wait for bytes a connection's idle check needs, on a runtime;
+elsewhere it says `unbounded`.
+
 ## Workers
 
 A runtime started without `workers` runs the logical CPUs less one, and on Darwin a quarter of them. The kernel's loopback path there costs more per message with more threads in it (a thread for each socket plateaus at ~165k 64-byte round trips a second however many there are; system time per message on 15 workers was twice that on 4), so tasks that talk to each other through sockets run faster on a few workers, while arithmetic-only tasks scale to every CPU. The quarter is measured on one machine (Apple M3 Max, 16 CPUs): 2 to 4 workers were best for sockets, 15 for arithmetic.

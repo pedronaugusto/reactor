@@ -31,6 +31,12 @@ pub const resolve = resolve_file.resolve;
 pub const max_addresses = resolve_file.max_addresses;
 pub const literal = resolve_file.literal;
 
+/// Windows named pipes: a client's connect, a server's listener.
+pub const pipe = @import("net/pipe.zig");
+pub const connectPipe = pipe.connectPipe;
+pub const listenPipe = pipe.listenPipe;
+pub const PipeListener = pipe.PipeListener;
+
 pub const abort = @import("net/abort.zig").abort;
 pub const Deadlines = @import("net/Deadlines.zig");
 pub const Receiver = @import("net/Receiver.zig");

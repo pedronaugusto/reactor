@@ -48,18 +48,41 @@ const unarmed: clock.Awake = .fromRaw(0);
 /// What an `Awake` of zero is armed as: the first nanosecond.
 const soonest: clock.Awake = .fromRaw(1);
 
-/// One socket's operation deadline.
+/// One socket's or named pipe's operation deadline.
 pub const Watch = struct {
     /// Its place among the watched; not to be touched.
     node: std.DoublyLinkedList.Node = .{},
-    socket: Io.net.Socket.Handle,
+    target: Target,
     /// The armed operation's deadline; `unarmed` when none is.
     deadline: aegis.Atomic(clock.Awake) = .init(unarmed),
     /// Set once a deadline fired and the socket was aborted.
     fired: std.atomic.Value(bool) = .init(false),
 
+    /// What the operations are on.
+    pub const Target = union(enum) {
+        socket: Io.net.Socket.Handle,
+        /// A named pipe, Windows': its deadlines are kept on a runtime,
+        /// where each operation carries its own. No other `Io` can end
+        /// one of its operations from outside, so `add` refuses it there.
+        pipe: Io.File,
+    };
+
     pub fn init(socket: Io.net.Socket.Handle) Watch {
-        return .{ .socket = socket };
+        return .{ .target = .{ .socket = socket } };
+    }
+
+    pub fn initPipe(pipe: Io.File) Watch {
+        return .{ .target = .{ .pipe = pipe } };
+    }
+
+    /// Ends what is under way on the target and after: a socket's
+    /// operations by `abort`; a pipe's operation was ended by its own
+    /// deadline, and `fired` refuses the ones after it.
+    fn end(w: *const Watch, io: Io) void {
+        switch (w.target) {
+            .socket => |socket| abort(io, socket),
+            .pipe => {},
+        }
     }
 };
 
@@ -101,10 +124,14 @@ pub fn deinit(d: *Deadlines, io: Io) void {
     d.* = undefined;
 }
 
-/// Watches `w`. False when this `Io` has no task to keep deadlines with:
-/// `w` is not added, and operations on it run unbounded.
+/// Watches `w`. False when this `Io` has no task to keep deadlines with,
+/// or `w` is a pipe's off a runtime: `w` is not added, and operations on
+/// it run unbounded.
 pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
     if (native.runtimeOf(io) != null) return true;
+    // std's own wait on an overlapped call cannot be ended from outside:
+    // a cancel it did not ask for is a state it does not expect.
+    if (w.target == .pipe) return false;
     var held = d.watching.acquireUncancelable(io);
     defer held.deinit(io);
     const watching = held.value();
@@ -117,7 +144,7 @@ pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
 /// returns, nothing touches `w` or its socket.
 pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
     assert(w.deadline.load(.monotonic).eql(unarmed));
-    if (native.runtimeOf(io) != null) return;
+    if (native.runtimeOf(io) != null or w.target == .pipe) return;
     var held = d.watching.acquireUncancelable(io);
     defer held.deinit(io);
     held.value().watches.remove(&w.node);
@@ -138,11 +165,13 @@ pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadli
             error.ConcurrencyUnavailable => io.operate(operation),
             error.Timeout => {
                 w.fired.store(true, .release);
-                abort(io, w.socket);
+                w.end(io);
                 return error.Timeout;
             },
         };
     }
+    // A pipe's operation off a runtime runs unbounded, as `add` said.
+    if (w.target == .pipe) return io.operate(operation);
     d.arm(io, w, deadline);
     const result = io.operate(operation);
     d.disarm(w);
@@ -210,6 +239,6 @@ fn scan(d: *Deadlines, io: Io) void {
         const deadline = w.deadline.load(.acquire);
         if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.load(.acquire)) continue;
         w.fired.store(true, .release);
-        abort(io, w.socket);
+        w.end(io);
     }
 }
