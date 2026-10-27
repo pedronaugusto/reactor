@@ -123,7 +123,7 @@ fn openWindows(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.
         error.Unexpected => error.Unexpected,
     };
     const unspecified: net.IpAddress = if (family == ws2_32.AF.INET6) .{ .ip6 = .unspecified(0) } else .{ .ip4 = .unspecified(0) };
-    _ = afd.bind(handle, &unspecified, .Active) catch |err| return switch (err) {
+    _ = afd.bind(handle, &unspecified, .of(&unspecified, false)) catch |err| return switch (err) {
         error.AccessDenied => error.AccessDenied,
         // Any port taken: what POSIX names a connect that finds no free
         // local port.
@@ -142,7 +142,7 @@ pub fn listenIp(address: *const net.IpAddress, options: net.IpAddress.ListenOpti
     const handle = try afd.open(Threaded.posixAddressFamily(address), options.mode, options.protocol);
     errdefer close(handle);
     if (options.reuse_address) try afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.REUSEADDR, @as(u32, 1));
-    const bound = try afd.bind(handle, address, .Passive);
+    const bound = try afd.bind(handle, address, .of(address, options.reuse_address));
     try afd.listen(handle, options.kernel_backlog);
     return .{ .handle = handle, .address = bound };
 }
@@ -180,7 +180,7 @@ pub fn bindIp(address: *const net.IpAddress, options: net.IpAddress.BindOptions)
     if (comptime !is_windows) unreachable; // unreachable: elsewhere the slot is std's, whose errors are named
     const handle = try afd.open(Threaded.posixAddressFamily(address), options.mode, options.protocol);
     errdefer close(handle);
-    const bound = try afd.bind(handle, address, .Active);
+    const bound = try afd.bind(handle, address, .of(address, false));
     if (options.allow_broadcast) try afd.setOption(handle, ws2_32.SOL.SOCKET, ws2_32.SO.BROADCAST, @as(u32, 1));
     return .{ .handle = handle, .address = bound };
 }
@@ -204,10 +204,11 @@ pub fn openUnix(address: *const net.UnixAddress, start: Start) OpenUnixError!Han
     if (!address.isAbstract()) {
         var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
         const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
-        afd.option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes) catch |err| return switch (err) {
-            error.SystemResources => error.SystemResources,
-            error.Unexpected => error.Unexpected,
-        };
+        switch (afd.option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes).status) {
+            .SUCCESS => {},
+            .INSUFFICIENT_RESOURCES => return error.SystemResources,
+            else => |status| return windows.unexpectedStatus(status),
+        }
     }
     afd.bindUnixUnnamed(handle) catch |err| return switch (err) {
         error.SystemResources => error.SystemResources,

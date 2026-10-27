@@ -72,29 +72,88 @@ pub fn open(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.Pro
 /// entry for it. Should the driver ever pend one, the call waits for the
 /// status block, which the system writes when it is done.
 pub fn control(handle: Handle, code: windows.CTL_CODE, in: []const u8, out: []u8) Status {
+    return answered(handle, code, in, out).status;
+}
+
+/// What a control call answered: its status, and how many bytes of the
+/// output buffer it wrote.
+pub const Answer = struct { status: Status, len: usize };
+
+fn answered(handle: Handle, code: windows.CTL_CODE, in: []const u8, out: []u8) Answer {
     var iosb: windows.IO_STATUS_BLOCK = .{ .u = .{ .Status = .PENDING }, .Information = 0 };
     const status = windows.ntdll.NtDeviceIoControlFile(handle, null, null, null, &iosb, code, if (in.len > 0) in.ptr else null, @intCast(in.len), if (out.len > 0) out.ptr else null, @intCast(out.len));
-    if (status != .PENDING) return status;
+    if (status != .PENDING) return .{ .status = status, .len = iosb.Information };
     const status_word: *const u32 = @ptrCast(&iosb.u.Status); // safe: the status is a 32-bit word the kernel writes
     while (@atomicLoad(u32, status_word, .acquire) == @backingInt(Status.PENDING)) _ = windows.ntdll.NtYieldExecution();
-    return iosb.u.Status;
+    return .{ .status = iosb.u.Status, .len = iosb.Information };
+}
+
+/// AFD's `SOCKOPT` call, which the transport answers. A set reads `value`.
+/// A get answers in the call's output buffer, not at the info's value
+/// pointer (with none, `BUFFER_TOO_SMALL`), and a boolean in one byte: so
+/// `value` is that buffer too, and the answer says how much of it was
+/// written. Options AFD keeps itself (`SO_SNDBUF`) are not the
+/// transport's: `NOT_SUPPORTED` here, `information` there.
+pub fn option(handle: Handle, mode: windows.AFD.SOCKOPT_INFO.Mode, level: i32, name: u32, value: []u8) Answer {
+    const info: windows.AFD.SOCKOPT_INFO = .{ .mode = mode, .level = level, .optname = name, .optval = value.ptr, .optlen = value.len };
+    return answered(handle, windows.IOCTL.AFD.SOCKOPT, std.mem.asBytes(&info), if (mode == .get) value else &.{});
 }
 
 /// Sets a socket option, as `setsockopt` would.
 pub fn setOption(handle: Handle, level: i32, name: u32, value: anytype) error{ SystemResources, Unexpected }!void {
     var v = value;
-    return option(handle, .set, level, name, std.mem.asBytes(&v));
-}
-
-/// A socket option call, its value as bytes.
-pub fn option(handle: Handle, mode: windows.AFD.SOCKOPT_INFO.Mode, level: i32, name: u32, value: []u8) error{ SystemResources, Unexpected }!void {
-    const info: windows.AFD.SOCKOPT_INFO = .{ .mode = mode, .level = level, .optname = name, .optval = value.ptr, .optlen = value.len };
-    return switch (control(handle, windows.IOCTL.AFD.SOCKOPT, std.mem.asBytes(&info), &.{})) {
+    return switch (option(handle, .set, level, name, std.mem.asBytes(&v)).status) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,
         else => |status| windows.unexpectedStatus(status),
     };
 }
+
+/// Sets one of AFD's own settings, such as the send buffer
+/// (`SEND_WINDOW_SIZE`, Winsock's `SO_SNDBUF`).
+pub fn setInformation(handle: Handle, kind: windows.AFD.INFORMATION.TYPE, value: u32) Status {
+    var info: windows.AFD.INFORMATION = .{ .InformationType = kind, .Information = .{ .LargeInteger = 0 } };
+    info.Information.Ulong = value;
+    return control(handle, windows.IOCTL.AFD.SET_INFORMATION, std.mem.asBytes(&info), &.{});
+}
+
+/// Reads one of AFD's own settings into `value`.
+pub fn getInformation(handle: Handle, kind: windows.AFD.INFORMATION.TYPE, value: *u32) Status {
+    const query: windows.AFD.INFORMATION = .{ .InformationType = kind, .Information = .{ .LargeInteger = 0 } };
+    var info: windows.AFD.INFORMATION = query;
+    const status = control(handle, windows.IOCTL.AFD.GET_INFORMATION, std.mem.asBytes(&query), std.mem.asBytes(&info));
+    value.* = info.Information.Ulong;
+    return status;
+}
+
+/// How a bind shares its port with later binds: the first word of AFD's
+/// bind, which std 0.17 calls a mode (its `Passive` is `reuse`, its
+/// `Active` `wildcard`). A later bind of a port held `reuse` is let
+/// through when it reuses too; one held any other way refuses it
+/// (`SHARING_VIOLATION`, or `ACCESS_DENIED` for a bind that asked to
+/// reuse). Winsock's `SO_EXCLUSIVEADDRUSE` is `exclusive` here: as an
+/// option AFD takes it and does nothing.
+pub const Share = enum(u32) {
+    unique = 0,
+    reuse = 1,
+    wildcard = 2,
+    exclusive = 3,
+
+    /// The share Winsock gives a bind of `address`: `wildcard` for an
+    /// unspecified address at port 0 (an end for a connect), `reuse` when
+    /// the caller asked for `SO_REUSEADDR`, `unique` otherwise.
+    pub fn of(address: *const net.IpAddress, reuse: bool) Share {
+        if (address.getPort() == 0 and isUnspecified(address)) return .wildcard;
+        return if (reuse) .reuse else .unique;
+    }
+
+    fn isUnspecified(address: *const net.IpAddress) bool {
+        return switch (address.*) {
+            .ip4 => |a| std.mem.allEqual(u8, &a.bytes, 0),
+            .ip6 => |a| std.mem.allEqual(u8, &a.bytes, 0),
+        };
+    }
+};
 
 pub const BindError = error{ AccessDenied, AddressInUse, AddressUnavailable, SystemResources, Unexpected };
 
@@ -105,9 +164,9 @@ pub const BindError = error{ AccessDenied, AddressInUse, AddressUnavailable, Sys
 /// `AccessDenied`, the sharing statuses (`WSAEADDRINUSE`) `AddressInUse`,
 /// `INVALID_ADDRESS_COMPONENT` (`WSAEADDRNOTAVAIL`: an address that is not
 /// this machine's) `AddressUnavailable`.
-pub fn bind(handle: Handle, address: *const net.IpAddress, mode: windows.AFD.BIND_INFO.MODE) BindError!net.IpAddress {
-    const Storage = extern struct { info: windows.AFD.BIND_INFO, address: Threaded.PosixAddress };
-    var storage: Storage = .{ .info = .{ .Mode = mode }, .address = undefined };
+pub fn bind(handle: Handle, address: *const net.IpAddress, share: Share) BindError!net.IpAddress {
+    const Storage = extern struct { share: Share, address: Threaded.PosixAddress };
+    var storage: Storage = .{ .share = share, .address = undefined };
     const len = Threaded.addressToPosix(address, &storage.address);
     const in = std.mem.asBytes(&storage)[0 .. @offsetOf(Storage, "address") + len];
     return switch (control(handle, windows.IOCTL.AFD.BIND, in, std.mem.asBytes(&storage.address)[0..len])) {
@@ -133,8 +192,8 @@ pub fn listen(handle: Handle, backlog: u31) error{ SystemResources, Unexpected }
 
 /// The Unix socket bound to no path, as std binds one before connecting.
 pub fn bindUnixUnnamed(handle: Handle) error{ SystemResources, Unexpected }!void {
-    const Storage = extern struct { info: windows.AFD.BIND_INFO, address: ws2_32.sockaddr.un };
-    var storage: Storage = .{ .info = .{ .Mode = .Unix }, .address = .{ .path = @splat(0) } };
+    const Storage = extern struct { share: Share, address: ws2_32.sockaddr.un };
+    var storage: Storage = .{ .share = .unique, .address = .{ .path = @splat(0) } };
     return switch (control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address))) {
         .SUCCESS => {},
         .INSUFFICIENT_RESOURCES => error.SystemResources,

@@ -59,7 +59,14 @@ fn onTask(core: *Core) bool {
 }
 
 pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
-    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.beforeConnect()) return made(io, address, options);
+    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.beforeConnect()) {
+        const connected = try made(io, address, options);
+        if (options.socket.connected().any()) options_file.apply(connected.stream.socket.handle, address.*, options.socket.connected()) catch |err| {
+            connected.stream.close(io);
+            return err;
+        };
+        return connected;
+    }
     const connected = try throughIo(io, address, options);
     if (options.socket.any()) options_file.setOptions(connected.stream.socket, options.socket) catch |err| {
         connected.stream.close(io);
@@ -220,7 +227,7 @@ fn open(peer: *const net.IpAddress, options: Options, start: sys_socket.Start) E
         const handle = try afd.open(family, options.mode, options.protocol);
         errdefer sys_socket.close(handle);
         try prepare(handle, peer.*, options);
-        _ = afd.bind(handle, local, .Active) catch |err| return switch (err) {
+        _ = afd.bind(handle, local, .of(local, options.reuse_address)) catch |err| return switch (err) {
             error.AddressInUse => error.AddressUnavailable,
             else => |e| e,
         };
@@ -236,7 +243,7 @@ fn open(peer: *const net.IpAddress, options: Options, start: sys_socket.Start) E
 /// What is set before the bind: the port's sharing and the options.
 fn prepare(handle: net.Socket.Handle, peer: net.IpAddress, options: Options) Error!void {
     if (options.reuse_address) try options_file.reuse(handle);
-    try options_file.apply(handle, peer, options.socket);
+    try options_file.apply(handle, peer, options.socket.unconnected());
 }
 
 test "a socket made for its options alone is not bound before its connect" {

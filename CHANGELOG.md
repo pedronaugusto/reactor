@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows: a listener that did not ask for `reuse_address` keeps its port. AFD's bind begins with how the port is shared, which std 0.17 calls a mode: its "passive" listener bind is a sharing one, so a later bind asking to reuse the port took it. reactor binds as Winsock does: sharing only when asked, a connect's own end as a wildcard (`afd.Share`). A reusing bind over a port held otherwise is `AccessDenied`, an ordinary one `AddressInUse`.
+- Windows socket options read back: AFD answers a get in the call's output buffer, a boolean in one byte, where reactor passed none and every read failed (`BUFFER_TOO_SMALL`). `send_buffer` is AFD's own send window, which is what Winsock's `SO_SNDBUF` is; asked of the transport it was refused, and so was every connect or listen that asked for one. AFD keeps it only on a connected socket (one set earlier, or on a listener, is taken and dropped), so on Windows a connect sets it once connected, as Winsock does, and a listen asking for it is `OptionUnsupported`: `setOptions` gives an accepted socket its own (`net.send_buffer_when_connected`). Proved on the windows-latest and windows-11-arm runners, where these tests had failed since 0.8.3 and 0.8.4.
+
 ## [0.8.5] - 2026-10-25
 
 ### Changed

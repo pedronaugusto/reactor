@@ -195,6 +195,8 @@ counted by `reactor.fallbacks()`.
   class), set by `connect` and `listen` before they connect and listen,
   when the buffers fix the window scale, or by `setOptions` on a socket
   already made; a refused option is returned by name, never passed over.
+  Windows keeps a send buffer only on a connected socket, so there
+  `connect` sets it once connected and `listen` refuses one.
   `connect` binds a local address (`reuse_address` for a fixed port) or an
   interface, and makes a socket with no local end asked for unbound until
   it connects, so its port is picked per destination. Then `connect` with a timeout, a bounded `resolve`, `abort`,

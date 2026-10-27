@@ -217,9 +217,6 @@ test "a cancelled accept loses no connection: the next accept takes it" {
     try testing.expectEqual(@as(usize, 1), try readOne(io, accepted.socket.handle, &buffer));
 }
 
-/// `SO_EXCLUSIVEADDRUSE`, which std's options cannot ask for: `~SO_REUSEADDR`.
-const exclusive_address_use: u32 = ~@as(u32, std.os.windows.ws2_32.SO.REUSEADDR);
-
 test "a listen or a bind the system refuses is named: a port held exclusively, an address not this machine's" {
     // AFD's calls exist only there.
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -229,11 +226,10 @@ test "a listen or a bind the system refuses is named: a port held exclusively, a
     const io = r.io();
     const ws2_32 = std.os.windows.ws2_32;
     // The holder listens with the port to itself, as a service guarding
-    // its port does.
+    // its port with `SO_EXCLUSIVEADDRUSE` does: Winsock binds it so.
     const holder = try afd.open(ws2_32.AF.INET, .stream, .tcp);
     defer sys_socket.close(holder);
-    try afd.setOption(holder, ws2_32.SOL.SOCKET, exclusive_address_use, @as(u32, 1));
-    const held = try afd.bind(holder, &.{ .ip4 = .loopback(0) }, .Passive);
+    const held = try afd.bind(holder, &.{ .ip4 = .loopback(0) }, .exclusive);
     try afd.listen(holder, 1);
     // std 0.17 reports this one `Unexpected`.
     try testing.expectError(error.AccessDenied, held.listen(io, .{ .reuse_address = true }));
@@ -248,6 +244,25 @@ test "a listen or a bind the system refuses is named: a port held exclusively, a
     defer stream.close(io);
     var accepted = try server.accept(io);
     accepted.close(io);
+}
+
+test "a listener shares its port only when it asked to, as Winsock's binds do" {
+    // AFD's calls exist only there.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    var r: Runtime = undefined;
+    try runtime(&r, 1);
+    defer r.deinit();
+    const io = r.io();
+    // std 0.17 binds every listener sharing its port, so a second bind
+    // asking to reuse it took a listener's port from it.
+    var alone = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
+    defer alone.deinit(io);
+    try testing.expectError(error.AccessDenied, alone.socket.address.listen(io, .{ .reuse_address = true }));
+    try testing.expectError(error.AddressInUse, alone.socket.address.listen(io, .{}));
+    var shared = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer shared.deinit(io);
+    var again = try shared.socket.address.listen(io, .{ .reuse_address = true });
+    again.deinit(io);
 }
 
 test "a datagram socket connects, which names its own end" {

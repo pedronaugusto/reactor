@@ -19,8 +19,12 @@ pub const Handle = net.Socket.Handle;
 /// (`AccessDenied`).
 pub const Error = error{ OptionUnsupported, AccessDenied, SystemResources, Unexpected };
 
-/// An option as the system names it: its level and its number.
+/// An option as the system names it: its level and its number. On
+/// Windows the level `afd_own` names one of AFD's own settings, by its
+/// information class: the transport has no such option.
 pub const Option = struct { level: i32, name: u32 };
+
+const afd_own: i32 = -1;
 
 /// The options reactor sets, as this system names them; null where it has
 /// none.
@@ -31,7 +35,9 @@ pub const keepalive: ?Option = if (is_windows) .{ .level = ws2_32.SOL.SOCKET, .n
 pub const keep_idle: ?Option = if (is_windows) .{ .level = ws2_32.IPPROTO.TCP, .name = ws2_32.TCP.KEEPALIVE } else if (posixHas("TCP", "KEEPIDLE")) .{ .level = posix.IPPROTO.TCP, .name = posix.TCP.KEEPIDLE } else if (builtin.os.tag.isDarwin()) .{ .level = posix.IPPROTO.TCP, .name = posix.TCP.KEEPALIVE } else null;
 pub const keep_interval: ?Option = if (is_windows) .{ .level = ws2_32.IPPROTO.TCP, .name = ws2_32.TCP.KEEPINTVL } else if (posixHas("TCP", "KEEPINTVL")) .{ .level = posix.IPPROTO.TCP, .name = posix.TCP.KEEPINTVL } else null;
 pub const keep_count: ?Option = if (is_windows) .{ .level = ws2_32.IPPROTO.TCP, .name = ws2_32.TCP.KEEPCNT } else if (posixHas("TCP", "KEEPCNT")) .{ .level = posix.IPPROTO.TCP, .name = posix.TCP.KEEPCNT } else null;
-pub const send_buffer: ?Option = if (is_windows) .{ .level = ws2_32.SOL.SOCKET, .name = ws2_32.SO.SNDBUF } else if (posixHas("SO", "SNDBUF")) .{ .level = posix.SOL.SOCKET, .name = posix.SO.SNDBUF } else null;
+/// Windows keeps the send buffer in AFD, not the transport: Winsock's
+/// `SO_SNDBUF` is AFD's `SEND_WINDOW_SIZE`.
+pub const send_buffer: ?Option = if (is_windows) .{ .level = afd_own, .name = @backingInt(windows.AFD.INFORMATION.TYPE.SEND_WINDOW_SIZE) } else if (posixHas("SO", "SNDBUF")) .{ .level = posix.SOL.SOCKET, .name = posix.SO.SNDBUF } else null;
 pub const receive_buffer: ?Option = if (is_windows) .{ .level = ws2_32.SOL.SOCKET, .name = ws2_32.SO.RCVBUF } else if (posixHas("SO", "RCVBUF")) .{ .level = posix.SOL.SOCKET, .name = posix.SO.RCVBUF } else null;
 /// IPv4's type of service. Windows accepts `IP_TOS` and ignores it (its QoS
 /// is the qWAVE API), so it has none here.
@@ -60,7 +66,8 @@ pub fn set(handle: Handle, option: ?Option, value: c_int) Error!void {
     const o = option orelse return error.OptionUnsupported;
     if (is_windows) {
         var v: u32 = @bitCast(value);
-        return control(handle, .set, o, std.mem.asBytes(&v));
+        if (o.level == afd_own) return refusal(afd.setInformation(handle, @fromBackingInt(@intCast(o.name)), v));
+        return refusal(afd.option(handle, .set, o.level, o.name, std.mem.asBytes(&v)).status);
     }
     const bytes = std.mem.asBytes(&value);
     while (true) switch (posix.errno(posix.system.setsockopt(handle, o.level, o.name, bytes.ptr, @intCast(bytes.len)))) {
@@ -77,8 +84,15 @@ pub fn set(handle: Handle, option: ?Option, value: c_int) Error!void {
 pub fn get(handle: Handle, option: ?Option) Error!c_int {
     const o = option orelse return error.OptionUnsupported;
     if (is_windows) {
+        // Zeroed: a boolean is answered in its first byte alone.
         var v: u32 = 0;
-        try control(handle, .get, o, std.mem.asBytes(&v));
+        if (o.level == afd_own) {
+            try refusal(afd.getInformation(handle, @fromBackingInt(@intCast(o.name)), &v));
+        } else {
+            const answer = afd.option(handle, .get, o.level, o.name, std.mem.asBytes(&v));
+            try refusal(answer.status);
+            if (answer.len == 0 or answer.len > @sizeOf(u32)) return error.Unexpected;
+        }
         return @bitCast(v);
     }
     var value: c_int = 0;
@@ -92,16 +106,15 @@ pub fn get(handle: Handle, option: ?Option) Error!c_int {
     };
 }
 
-fn control(handle: Handle, mode: windows.AFD.SOCKOPT_INFO.Mode, o: Option, value: []u8) Error!void {
+fn refusal(status: windows.NTSTATUS) Error!void {
     if (comptime !is_windows) unreachable; // unreachable: AFD is Windows only
-    const info: windows.AFD.SOCKOPT_INFO = .{ .mode = mode, .level = o.level, .optname = o.name, .optval = value.ptr, .optlen = value.len };
-    return switch (afd.control(handle, windows.IOCTL.AFD.SOCKOPT, std.mem.asBytes(&info), &.{})) {
+    return switch (status) {
         .SUCCESS => {},
         // WSAENOPROTOOPT and WSAEINVAL: an option this system lacks, or a
         // value it refuses.
         .NOT_SUPPORTED, .INVALID_PARAMETER, .INVALID_DEVICE_REQUEST => error.OptionUnsupported,
         .ACCESS_DENIED => error.AccessDenied,
         .INSUFFICIENT_RESOURCES, .NO_MEMORY => error.SystemResources,
-        else => |status| windows.unexpectedStatus(status),
+        else => |other| windows.unexpectedStatus(other),
     };
 }

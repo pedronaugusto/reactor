@@ -33,15 +33,16 @@ const asked: net.SocketOptions = .{
     .traffic_class = if (builtin.os.tag == .windows) null else 0x20,
 };
 
-/// What `asked` reads back as on `handle`. A buffer reads back at least
-/// its size: Linux doubles it.
-fn expectAsked(handle: Io.net.Socket.Handle) !void {
+/// What `asked` reads back as on `handle`, all but the send buffer on a
+/// Windows listener, which has none of its own (`net.send_buffer_when_connected`).
+/// A buffer reads back at least its size: Linux doubles it.
+fn expectAsked(handle: Io.net.Socket.Handle, role: enum { listener, connection }) !void {
     try testing.expect(try sys.get(handle, sys.nodelay) != 0);
     try testing.expect(try sys.get(handle, sys.keepalive) != 0);
     try testing.expectEqual(@as(c_int, 30), try sys.get(handle, sys.keep_idle));
     try testing.expectEqual(@as(c_int, 5), try sys.get(handle, sys.keep_interval));
     try testing.expectEqual(@as(c_int, 4), try sys.get(handle, sys.keep_count));
-    try testing.expect(try sys.get(handle, sys.send_buffer) >= 96 << 10);
+    if (role == .connection or !net.send_buffer_when_connected) try testing.expect(try sys.get(handle, sys.send_buffer) >= 96 << 10);
     try testing.expect(try sys.get(handle, sys.receive_buffer) >= 96 << 10);
     if (builtin.os.tag != .windows) try testing.expectEqual(@as(c_int, 0x20), try sys.get(handle, sys.tos));
 }
@@ -49,18 +50,25 @@ fn expectAsked(handle: Io.net.Socket.Handle) !void {
 /// A connect and a listen with every option, each read back; an accepted
 /// connection given its own by `setOptions`.
 fn everyOption(io: Io) !void {
-    var server = try net.listen(io, &.{ .ip4 = .loopback(0) }, .{ .reuse_address = true, .socket = asked });
+    // Windows drops a listener's send buffer, so asking for one is refused.
+    var listener_asks = asked;
+    if (net.send_buffer_when_connected) {
+        try testing.expectError(error.OptionUnsupported, net.listen(io, &.{ .ip4 = .loopback(0) }, .{ .socket = asked }));
+        listener_asks.send_buffer = null;
+    }
+    var server = try net.listen(io, &.{ .ip4 = .loopback(0) }, .{ .reuse_address = true, .socket = listener_asks });
     defer server.deinit(io);
-    try expectAsked(server.socket.handle);
+    try expectAsked(server.socket.handle, .listener);
     const connected = try net.connect(io, &server.socket.address, .{ .socket = asked, .timeout = ms(5000) });
     defer connected.stream.close(io);
-    try expectAsked(connected.stream.socket.handle);
+    try expectAsked(connected.stream.socket.handle, .connection);
     try testing.expect(connected.stream.socket.address.getPort() != 0);
     const accepted = try server.accept(io);
     defer accepted.close(io);
-    try net.setOptions(accepted.socket, .{ .nodelay = false, .keepalive = .off });
+    try net.setOptions(accepted.socket, .{ .nodelay = false, .keepalive = .off, .send_buffer = .fromRaw(96 << 10) });
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.nodelay));
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.keepalive));
+    try testing.expect(try sys.get(accepted.socket.handle, sys.send_buffer) >= 96 << 10);
 }
 
 test "a connect and a listen set every option before they connect and listen, on Threaded" {
