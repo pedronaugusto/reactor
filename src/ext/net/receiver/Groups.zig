@@ -55,9 +55,7 @@ pub fn init(gpa: Allocator, io: Io, memory: []u8, length: aegis.units.Bytes(u32)
         const ring = p.loop.backend.io_uring;
         const count: u32 = @intCast((buffers - first) / (groups.len - made));
         const entries = BufferRing.Entries.fromRaw(@intCast(std.math.ceilPowerOfTwoAssert(u32, @max(2, count)))); // safe: `buffers` is at most 32,768
-        const issued = ring.next_group.fetchAdd(1, .monotonic);
-        if (issued > std.math.maxInt(u16)) return error.SystemResources;
-        const id = BufferRing.Id.fromRaw(@intCast(issued)); // safe: checked against u16 above
+        const id = try ring.nextGroup();
         const registration = register(io, p, entries, id) catch |err| switch (err) {
             error.Unsupported => return null,
             error.SystemResources => return error.SystemResources,

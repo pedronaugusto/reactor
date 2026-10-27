@@ -402,7 +402,7 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expect(target.backend.io_uring.ring.cq.head.* != head);
-    try testing.expect(!target.backend.io_uring.wake_pending.load(.acquire));
+    try testing.expect(!target.backend.io_uring.wake_pending.raised());
     // A failed source CQE must clear coalescing and use the retained
     // target's eventfd. The message is submitted at once, so aim it at a
     // descriptor that is not a ring.
@@ -412,15 +412,15 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
     target.backend.io_uring.ring.fd = target_fd;
     for (0..100) |_| {
         _ = try source.run(.nowait);
-        if (target.backend.io_uring.wake_pending.load(.acquire)) break;
+        if (target.backend.io_uring.wake_pending.raised()) break;
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
-    try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
-    try testing.expect(!target.backend.io_uring.message_pending.load(.acquire));
+    try testing.expect(target.backend.io_uring.wake_pending.raised());
+    try testing.expect(!target.backend.io_uring.message_pending.raised());
     _ = try target.run(.nowait);
     source.backend.io_uring.features.msg_ring = false;
     loop_internal.wakeFrom(&target, &source);
-    try testing.expect(target.backend.io_uring.wake_pending.load(.acquire));
+    try testing.expect(target.backend.io_uring.wake_pending.raised());
     _ = try target.run(.nowait);
     _ = try source.run(.nowait);
 }

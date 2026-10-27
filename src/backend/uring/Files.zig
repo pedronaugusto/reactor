@@ -10,19 +10,21 @@ const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Kept = @import("Kept.zig");
+const descriptors = @import("descriptors.zig");
+const Descriptor = descriptors.Descriptor;
 
-slots: []std.atomic.Value(linux.fd_t),
+slots: []descriptors.Cell,
 registered: []bool,
 enabled: bool,
 /// The descriptors a slot may be made for; none without it.
 kept: ?*const Kept,
 
 pub fn init(gpa: Allocator, ring: *linux.IoUring, count: u32, wanted: bool, kept: ?*const Kept) Allocator.Error!Files {
-    const slots = try gpa.alloc(std.atomic.Value(linux.fd_t), count);
+    const slots = try gpa.alloc(descriptors.Cell, count);
     errdefer gpa.free(slots);
     const registered = try gpa.alloc(bool, count);
     @memset(registered, false);
-    for (slots) |*slot| slot.* = .init(-1);
+    for (slots) |*slot| slot.* = .init(.empty);
     var enabled = wanted;
     if (wanted) ring.register_files_sparse(count) catch {
         enabled = false;
@@ -40,8 +42,8 @@ pub fn contains(f: *const Files, fd: linux.fd_t) bool {
     const start = @as(u32, @bitCast(fd)) % f.slots.len;
     for (0..@min(8, f.slots.len)) |offset| {
         const found = f.slots[(start + offset) % f.slots.len].load(.acquire);
-        if (found == -1) return false;
-        if (found == fd) return true;
+        if (found == .empty) return false;
+        if (found == Descriptor.of(fd)) return true;
     }
     return false;
 }
@@ -56,25 +58,25 @@ pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
         const i = (start + offset) % f.slots.len;
         const slot = &f.slots[i];
         const fd = slot.load(.monotonic);
-        if (fd == sqe.fd) {
+        if (fd == Descriptor.of(sqe.fd)) {
             if (!f.registered[i]) return;
             sqe.fd = @intCast(i);
             sqe.flags |= linux.IOSQE_FIXED_FILE;
             return;
         }
-        if (fd < 0 and vacant == null) vacant = @intCast(i);
-        if (fd == -1) break;
+        if (!fd.named() and vacant == null) vacant = @intCast(i);
+        if (fd == .empty) break;
     }
     const index = vacant orelse return;
     const fd = sqe.fd;
     if (!regular(fd)) {
         f.registered[index] = false;
-        f.slots[index].store(fd, .release);
+        f.slots[index].store(.of(fd), .release);
         return;
     }
     ring.register_files_update(index, &.{fd}) catch return;
     f.registered[index] = true;
-    f.slots[index].store(fd, .release);
+    f.slots[index].store(.of(fd), .release);
     sqe.fd = @intCast(index);
     sqe.flags |= linux.IOSQE_FIXED_FILE;
 }
@@ -88,13 +90,14 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
         const i = (start + offset) % f.slots.len;
         const slot = &f.slots[i];
         const found = slot.load(.monotonic);
-        if (found == -1) return;
-        if (found != fd) continue;
+        if (found == .empty) return;
+        if (found != Descriptor.of(fd)) continue;
         if (!f.registered[i]) {
-            slot.store(-2, .release); // tombstone: a later colliding file remains reachable
+            slot.store(.tombstone, .release);
             return;
         }
         u.consumePublished();
+        // aegis: boundary: the ring's head is the kernel's to move, in memory it shares with the ring's owner
         var head = @atomicLoad(u32, u.ring.sq.head, .acquire);
         while (head != u.ring.sq.sqe_tail) : (head +%= 1) {
             const sqe = &u.ring.sq.sqes[head & u.ring.sq.mask];
@@ -103,7 +106,7 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
             sqe.flags &= ~@as(u8, linux.IOSQE_FIXED_FILE);
         }
         u.ring.register_files_update(@intCast(i), &.{-1}) catch |err| std.debug.panic("reactor: removing a fixed file failed: {t}", .{err});
-        slot.store(-2, .release); // tombstone: a later colliding file remains reachable
+        slot.store(.tombstone, .release);
         return;
     }
 }

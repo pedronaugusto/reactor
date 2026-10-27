@@ -14,6 +14,7 @@
 const Uring = @This();
 
 const std = @import("std");
+const Raised = @import("Raised.zig");
 const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -33,6 +34,7 @@ const Buffers = @import("uring/Buffers.zig");
 const Files = @import("uring/Files.zig");
 pub const Kept = @import("uring/Kept.zig");
 const Allocator = std.mem.Allocator;
+const BufferRing = @import("../sys/BufferRing.zig");
 const results = @import("uring/results.zig");
 
 pub const Features = packed struct(u7) {
@@ -94,7 +96,8 @@ fn tagOf(user_data: u64) Tag {
 
 ring: linux.IoUring,
 zero_copy_min: ?usize,
-next_group: std.atomic.Value(u32) = .init(1),
+/// The last buffer group id issued (`nextGroup`), shared by every ring.
+groups: aegis.Atomic(BufferRing.Id) = .init(.fromRaw(0)),
 accepts: Accept,
 /// Requests that a descriptor-wide cancellation could end, excluding
 /// listener slots (which close cancels individually) and the wake poll.
@@ -109,9 +112,9 @@ wake_armed: bool = false,
 wake_buffer: u64 = 0,
 /// Set by `wake` until the ring has read the eventfd: later wakes skip
 /// the write.
-wake_pending: std.atomic.Value(bool) = .init(false),
+wake_pending: Raised = .{},
 /// One queued ring message is enough until its target consumes it.
-message_pending: std.atomic.Value(bool) = .init(false),
+message_pending: Raised = .{},
 notify_fd: ?linux.fd_t = null,
 enabled: bool,
 /// The kernel flags the ring when completions wait to be run.
@@ -239,6 +242,16 @@ pub fn deinit(u: *Uring, gpa: Allocator) void {
     u.* = undefined;
 }
 
+/// A buffer group id no ring has been given: issued once each, from 1.
+/// `SystemResources` once the kernel's sixteen bits are spent.
+pub fn nextGroup(u: *Uring) error{SystemResources}!BufferRing.Id {
+    var last = u.groups.load(.monotonic);
+    while (true) {
+        const next = last.successor() catch return error.SystemResources;
+        last = u.groups.cmpxchgWeak(last, next, .monotonic, .monotonic) orelse return next;
+    }
+}
+
 /// Persistent listeners are reaped on the ring's owner before it exits.
 pub fn drainListeners(u: *Uring) void {
     for (u.accepts.records) |*r| if (r.fd != -1) u.accepts.close(u, r.fd);
@@ -302,6 +315,7 @@ fn drainPressure(u: *Uring) void {
 pub fn consumePublished(u: *Uring) void {
     if (u.ring.flags & linux.IORING_SETUP_SQPOLL == 0) return;
     const tail = u.ring.sq.sqe_head;
+    // aegis: boundary: the ring's head is the kernel's to move, in memory it shares with the ring's owner
     while (@atomicLoad(u32, u.ring.sq.head, .acquire) != tail) {
         u.enter(.nowait) catch |err| std.debug.panic("reactor: SQPOLL submission failed: {t}", .{err});
         if (u.ring.cq_ready() == u.ring.cq.cqes.len) u.drainPressure();
@@ -371,7 +385,7 @@ fn queue(u: *Uring, o: *op.Op) void {
                 .unix => |unix| unixToPosix(unix, &a.storage.unix),
             };
             const sqe = u.entry();
-            sqe.prep_connect(c.socket, @ptrCast(&a.storage), a.len); // safe: the storage is a socket address of the length given
+            sqe.prep_connect(c.socket, @ptrCast(&a.storage), a.len); // aegis: boundary: the storage is a socket address of the length given
             sqe.user_data = ud;
         },
         .read_at => |r| {
@@ -464,7 +478,7 @@ pub fn submitSingleAccept(u: *Uring, o: *op.Op) void {
     const a = &o.state.storage.scratch.io_uring.address;
     a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
     const sqe = u.entry();
-    sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // safe: the kernel writes a socket address here
+    sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // aegis: boundary: the kernel writes a socket address here
     sqe.user_data = userData(@intFromPtr(o), .op); // safe: this operation's own token
 }
 
@@ -502,8 +516,8 @@ fn submitIo(u: *Uring, o: *op.Op, operation: *const Io.Operation, ud: u64) void 
                 const bytes = @as([*]const u8, m.iovecs[0].base)[0..m.iovecs[0].len];
                 if (!o.state.uring.use_copy and u.features.zero_copy and bytes.len >= (u.zero_copy_min orelse std.math.maxInt(usize))) sqe.prep_send_zc(w.socket_handle, bytes, posix.MSG.NOSIGNAL, 0) else sqe.prep_send(w.socket_handle, bytes, posix.MSG.NOSIGNAL);
             } else {
-                m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // safe: the kernel only reads what a send gives it
-                sqe.prep_sendmsg(w.socket_handle, @ptrCast(&m.header), posix.MSG.NOSIGNAL); // safe: msghdr and msghdr_const share their layout
+                m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // aegis: boundary: the kernel only reads what a send gives it
+                sqe.prep_sendmsg(w.socket_handle, @ptrCast(&m.header), posix.MSG.NOSIGNAL); // aegis: boundary: msghdr and msghdr_const share their layout
             }
         },
         .net_receive => |r| {
@@ -518,9 +532,9 @@ fn submitIo(u: *Uring, o: *op.Op, operation: *const Io.Operation, ud: u64) void 
             o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.storage.scratch.io_uring.message;
             const message = &s.messages[0];
-            m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len }; // safe: the kernel only reads what a send gives it
-            m.header = .{ .name = &m.address.any, .namelen = Threaded.addressToPosix(message.address, &m.address), .iov = &m.iovecs, .iovlen = 1, .control = if (message.control.len == 0) null else @constCast(message.control.ptr), .controllen = @intCast(message.control.len), .flags = 0 }; // safe: the kernel only reads what a send gives it
-            sqe.prep_sendmsg(s.socket_handle, @ptrCast(&m.header), results.sendFlags(s.flags)); // safe: msghdr and msghdr_const share their layout
+            m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len }; // aegis: boundary: the kernel only reads what a send gives it
+            m.header = .{ .name = &m.address.any, .namelen = Threaded.addressToPosix(message.address, &m.address), .iov = &m.iovecs, .iovlen = 1, .control = if (message.control.len == 0) null else @constCast(message.control.ptr), .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary: the kernel only reads what a send gives it
+            sqe.prep_sendmsg(s.socket_handle, @ptrCast(&m.header), results.sendFlags(s.flags)); // aegis: boundary: msghdr and msghdr_const share their layout
         },
         .device_io_control => unreachable, // unreachable: device control runs borrowed
     }
@@ -679,6 +693,7 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
 }
 
 fn pendingInKernel(u: *Uring) bool {
+    // aegis: boundary: the ring's flags are the kernel's to set, in memory it shares with the ring's owner
     const flags = @atomicLoad(u32, u.ring.sq.flags, .acquire);
     if (flags & linux.IORING_SQ_CQ_OVERFLOW != 0) return true;
     if (u.taskrun_flag) return flags & linux.IORING_SQ_TASKRUN != 0;
@@ -704,7 +719,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         .auxiliary => {
             const address = ud & ~@as(u64, 7);
             if (address == 0) {
-                u.message_pending.store(false, .release);
+                u.message_pending.clear();
                 return sink.notified();
             }
             const o: *op.Op = @ptrFromInt(address); // safe: the linked timer shares the op's retained lifetime
@@ -727,8 +742,8 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             u.submitPending(token, operation) catch sink.completePending(token, .{ .result = results.failure(operation) });
         },
         .wake => {
-            _ = linux.read(u.wake_fd, @ptrCast(&u.wake_buffer), 8); // safe: eight bytes, as an eventfd reads
-            u.wake_pending.store(false, .release);
+            _ = linux.read(u.wake_fd, @ptrCast(&u.wake_buffer), 8); // aegis: boundary: eight bytes, as an eventfd reads
+            u.wake_pending.clear();
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
         },
         .receiver => {
@@ -744,7 +759,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         },
         .ignore => if (cqe.res < 0 and ud & ~@as(u64, 7) != 0) {
             const target: *Uring = @ptrFromInt(ud & ~@as(u64, 7)); // safe: runtimes retain every ring until workers stop
-            target.message_pending.store(false, .release);
+            target.message_pending.clear();
             target.wake();
         },
     }
@@ -798,9 +813,9 @@ fn armWake(u: *Uring) void {
 
 /// From any thread: ends a waiting `poll`.
 pub fn wake(u: *Uring) void {
-    if (u.wake_pending.swap(true, .acq_rel)) return;
+    if (u.wake_pending.raise()) return;
     const one: u64 = 1;
-    _ = linux.write(u.wake_fd, @ptrCast(&one), 8); // safe: eight bytes, as an eventfd is written
+    _ = linux.write(u.wake_fd, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
 }
 
 /// An eventfd the kernel signals on every completion, for a host's poller.
@@ -859,7 +874,7 @@ fn scatter(iovecs: []posix.iovec, splat_buffer: *[Threaded.splat_buffer_size]u8,
     const add = struct {
         fn f(v: []posix.iovec, count: *usize, bytes: []const u8) void {
             if (bytes.len == 0 or count.* == v.len) return;
-            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len }; // safe: the kernel only reads what a send gives it
+            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len }; // aegis: boundary: the kernel only reads what a send gives it
             count.* += 1;
         }
     }.f;
@@ -908,7 +923,7 @@ fn timespecOf(ns: i96) linux.kernel_timespec {
 /// sleeping target asleep with work waiting for it.
 pub fn messageWake(source: *Uring, target: *Uring) bool {
     if (!source.features.msg_ring) return false;
-    if (target.message_pending.swap(true, .acq_rel)) return true;
+    if (target.message_pending.raise()) return true;
     const sqe = source.entry();
     sqe.* = std.mem.zeroInit(linux.io_uring_sqe, .{ .opcode = .MSG_RING, .fd = target.ring.fd, .addr = 0, .off = userData(0, .auxiliary), .len = 0, .user_data = userData(@intFromPtr(target), .ignore) }); // safe: target outlives source polling and worker shutdown
     // A refused submission stays queued for the source's next poll.

@@ -6,6 +6,7 @@
 //! threads write an eventfd; `real` and `boot` timers are one absolute
 //! timerfd each.
 const std = @import("std");
+const Raised = @import("../Raised.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -33,7 +34,7 @@ const timer_cancel_on_set: u32 = 2;
 
 epfd: linux.fd_t,
 wake_fd: linux.fd_t,
-wake_pending: std.atomic.Value(bool) = .init(false),
+wake_pending: Raised = .{},
 /// One timerfd per clock, made when the clock's first timer is armed.
 clock_fds: [2]?linux.fd_t = .{ null, null },
 /// A timerfd a wait with a timeout waits on, made at the first.
@@ -181,16 +182,16 @@ pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
 
 /// From any thread: the next (or a waiting) call returns a wake event.
 pub fn wake(e: *Epoll) void {
-    if (e.wake_pending.swap(true, .acq_rel)) return;
+    if (e.wake_pending.raise()) return;
     const one: u64 = 1;
-    _ = linux.write(e.wake_fd, @ptrCast(&one), 8); // safe: eight bytes, as an eventfd is written
+    _ = linux.write(e.wake_fd, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
 }
 
 /// After a wake event: the next wake writes again.
 pub fn woken(e: *Epoll) void {
     var count: u64 = 0;
-    _ = linux.read(e.wake_fd, @ptrCast(&count), 8); // safe: eight bytes, as an eventfd reads
-    e.wake_pending.store(false, .release);
+    _ = linux.read(e.wake_fd, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as an eventfd reads
+    e.wake_pending.clear();
 }
 
 pub fn handle(e: *const Epoll) linux.fd_t {
@@ -234,5 +235,5 @@ pub fn armClock(e: *Epoll, clock: readiness.Clock, deadline: ?i96) readiness.Sub
 pub fn clockFired(e: *Epoll, clock: readiness.Clock) void {
     const fd = e.clock_fds[@backingInt(clock)] orelse return;
     var count: u64 = 0;
-    _ = linux.read(fd, @ptrCast(&count), 8); // safe: eight bytes, as a timerfd reads
+    _ = linux.read(fd, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as a timerfd reads
 }

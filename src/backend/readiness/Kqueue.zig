@@ -14,6 +14,7 @@
 //! with a timeout arms that timer and waits without one.
 const builtin = @import("builtin");
 const std = @import("std");
+const Raised = @import("../Raised.zig");
 const assert = std.debug.assert;
 const posix = std.posix;
 const c = std.c;
@@ -56,7 +57,7 @@ const critical: u32 = if (@hasDecl(c.NOTE, "CRITICAL")) c.NOTE.CRITICAL else 0;
 kq: posix.fd_t,
 changes: [max_events]Event = undefined,
 change_count: usize = 0,
-wake_pending: std.atomic.Value(bool) = .init(false),
+wake_pending: Raised = .{},
 /// Where the system has no `EVFILT_USER`: a pipe the waker writes.
 wake_pipe: if (has_user) void else [2]posix.fd_t,
 clock_armed: [2]bool = .{ false, false },
@@ -252,7 +253,7 @@ pub fn decode(e: *const Event) readiness.Decoded {
 
 /// From any thread: the next (or a waiting) call returns a wake event.
 pub fn wake(k: *Kqueue) void {
-    if (k.wake_pending.swap(true, .acq_rel)) return;
+    if (k.wake_pending.raise()) return;
     if (has_user) {
         const trigger = [1]Event{change(0, c.EVFILT.USER, 0, c.NOTE.TRIGGER, 0, wake_key)};
         // A kqueue that cannot take the trigger has no room left: the
@@ -272,7 +273,7 @@ pub fn woken(k: *Kqueue) void {
         var buffer: [64]u8 = undefined;
         while (c.read(k.wake_pipe[0], &buffer, buffer.len) > 0) {}
     }
-    k.wake_pending.store(false, .release);
+    k.wake_pending.clear();
 }
 
 pub fn handle(k: *const Kqueue) posix.fd_t {

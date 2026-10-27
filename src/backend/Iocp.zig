@@ -28,6 +28,7 @@
 const Iocp = @This();
 
 const std = @import("std");
+const Raised = @import("Raised.zig");
 const assert = std.debug.assert;
 const Io = std.Io;
 const net = Io.net;
@@ -121,7 +122,7 @@ timer_armed: bool = false,
 /// When the armed timer fires, on the awake clock (ns).
 timer_at: timeline.Awake = .fromRaw(0),
 /// Set by `wake` until its entry is taken: later wakes post nothing.
-wake_pending: std.atomic.Value(bool) = .init(false),
+wake_pending: Raised = .{},
 /// The port the handles this loop uses first are bound to, when not its
 /// own. Every loop's entries for a handle arrive on its port, and that
 /// port's loop passes them on: a runtime's home loop runs only while the
@@ -714,7 +715,7 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
             b.release(slot);
             sink.completePending(token, result);
         },
-        .wake => b.wake_pending.store(false, .release),
+        .wake => b.wake_pending.clear(),
         .timer => b.timer_armed = false,
     }
 }
@@ -728,8 +729,8 @@ fn forward(port: Handle, e: sys.Entry) void {
 
 /// From any thread: ends a waiting `poll`.
 pub fn wake(b: *Iocp) void {
-    if (b.wake_pending.swap(true, .acq_rel)) return;
-    sys.post(b.port, key(), contextOf(0, .wake), .SUCCESS, 0) catch b.wake_pending.store(false, .release);
+    if (b.wake_pending.raise()) return;
+    sys.post(b.port, key(), contextOf(0, .wake), .SUCCESS, 0) catch b.wake_pending.clear();
 }
 
 /// The port: what a host waits on, or its own.

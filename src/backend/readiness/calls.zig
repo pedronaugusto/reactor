@@ -131,7 +131,7 @@ fn writeTotal(data: []const []const u8, splat: usize) usize {
 pub fn isStream(fd: posix.fd_t) bool {
     var kind: i32 = 0;
     var len: posix.socklen_t = @sizeOf(i32);
-    const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, @ptrCast(&kind), &len); // safe: the option is an int, its length given
+    const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, @ptrCast(&kind), &len); // aegis: boundary: the option is an int, its length given
     return posix.errno(rc) == .SUCCESS and kind == posix.SOCK.STREAM;
 }
 
@@ -301,7 +301,7 @@ fn netReceive(r: Io.Operation.NetReceive) ?struct { ?net.Socket.ReceiveError, us
                 message.* = .{
                     .from = Threaded.addressFromPosix(&storage),
                     .data = r.data_buffer[0..@intCast(rc)],
-                    .control = if (msg.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..msg.controllen] else message.control, // safe: the caller's control buffer, as the kernel filled it
+                    .control = if (msg.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..msg.controllen] else message.control, // aegis: boundary: the caller's control buffer, as the kernel filled it
                     .flags = .{
                         .eor = msg.flags & posix.MSG.EOR != 0,
                         .trunc = msg.flags & posix.MSG.TRUNC != 0,
@@ -398,8 +398,8 @@ fn sendMany(fd: posix.fd_t, messages: []net.OutgoingMessage, flags: u32) (net.So
     var iovecs: [64]posix.iovec = undefined;
     const n = @min(messages.len, headers.len);
     for (messages[0..n], headers[0..n], addresses[0..n], iovecs[0..n]) |*m, *h, *a, *v| {
-        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len }; // safe: the kernel only reads what a send gives it
-        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined }; // safe: the kernel only reads what a send gives it
+        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len }; // aegis: boundary: the kernel only reads what a send gives it
+        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined }; // aegis: boundary: the kernel only reads what a send gives it
     }
     while (true) {
         const rc = posix.system.sendmmsg(fd, &headers, @intCast(n), flags);
@@ -559,7 +559,7 @@ pub fn connect(fd: posix.fd_t, address: op.Connect.Address) ?ConnectError!void {
         .ip => |*ip| Threaded.addressToPosix(ip, &storage.ip),
         .unix => |unix| unixToPosix(unix, &storage.unix),
     };
-    const rc = posix.system.connect(fd, @ptrCast(&storage), len); // safe: the storage is a socket address of the length given
+    const rc = posix.system.connect(fd, @ptrCast(&storage), len); // aegis: boundary: the storage is a socket address of the length given
     return switch (posix.errno(rc)) {
         .SUCCESS => {},
         // Interrupted, a connect goes on by itself.
@@ -573,7 +573,7 @@ pub fn connected(fd: posix.fd_t) ConnectError!void {
     var err: i32 = 0;
     var len: posix.socklen_t = @sizeOf(i32);
     while (true) {
-        const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&err), &len); // safe: the option is an int, its length given
+        const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&err), &len); // aegis: boundary: the option is an int, its length given
         switch (posix.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,

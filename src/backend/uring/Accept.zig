@@ -5,6 +5,8 @@
 const Accept = @This();
 const std = @import("std");
 const linux = std.os.linux;
+const Descriptor = @import("descriptors.zig").Descriptor;
+const Cell = @import("descriptors.zig").Cell;
 const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -35,7 +37,7 @@ pub const Record = struct {
 };
 
 records: []Record,
-descriptors: []std.atomic.Value(linux.fd_t),
+descriptors: []Cell,
 ready_head: ?*op.Op = null,
 ready_tail: ?*op.Op = null,
 enabled: bool,
@@ -44,9 +46,9 @@ pub fn init(gpa: Allocator, count: usize, enabled: bool) Allocator.Error!Accept 
     const records = try gpa.alloc(Record, count);
     errdefer gpa.free(records);
     @memset(records, .{});
-    const descriptors = try gpa.alloc(std.atomic.Value(linux.fd_t), count);
-    for (descriptors) |*fd| fd.* = .init(-1);
-    return .{ .records = records, .descriptors = descriptors, .enabled = enabled };
+    const cells = try gpa.alloc(Cell, count);
+    for (cells) |*cell| cell.* = .init(.empty);
+    return .{ .records = records, .descriptors = cells, .enabled = enabled };
 }
 
 pub fn deinit(a: *Accept, gpa: Allocator) void {
@@ -61,8 +63,8 @@ pub fn contains(a: *const Accept, fd: linux.fd_t) bool {
     const first = @as(u32, @bitCast(fd)) % a.records.len;
     for (0..@min(8, a.records.len)) |offset| {
         const found = a.descriptors[(first + offset) % a.records.len].load(.acquire);
-        if (found == -1) return false;
-        if (found == fd) return true;
+        if (found == .empty) return false;
+        if (found == Descriptor.of(fd)) return true;
     }
     return false;
 }
@@ -75,9 +77,9 @@ pub fn reserve(a: *Accept, fd: linux.fd_t) bool {
     for (0..@min(8, a.records.len)) |offset| {
         const descriptor = &a.descriptors[(first + offset) % a.records.len];
         const found = descriptor.load(.acquire);
-        if (found == fd) return true;
-        if (found >= 0) continue;
-        if (descriptor.cmpxchgStrong(found, fd, .acq_rel, .acquire) == null) return true;
+        if (found == Descriptor.of(fd)) return true;
+        if (found.named()) continue;
+        if (descriptor.cmpxchgStrong(found, .of(fd), .acq_rel, .acquire) == null) return true;
     }
     return false;
 }
@@ -87,7 +89,7 @@ fn index(a: *Accept, r: *Record) usize {
 }
 
 pub fn reset(a: *Accept, r: *Record) void {
-    a.descriptors[a.index(r)].store(-2, .release); // tombstone: a later colliding listener remains reachable
+    a.descriptors[a.index(r)].store(.tombstone, .release);
     r.* = .{};
 }
 
@@ -105,8 +107,8 @@ fn find(a: *Accept, fd: linux.fd_t) ?*Record {
     for (0..@min(8, a.records.len)) |offset| {
         const i = (first + offset) % a.records.len;
         const found = a.descriptors[i].load(.monotonic);
-        if (found == -1) return null;
-        if (found != fd) continue;
+        if (found == .empty) return null;
+        if (found != Descriptor.of(fd)) continue;
         const r = &a.records[i];
         if (r.fd == fd and !r.closing) return r;
     }
@@ -123,10 +125,10 @@ fn acquire(a: *Accept, fd: linux.fd_t) ?*Record {
         const descriptor = &a.descriptors[i];
         const reserved = descriptor.load(.acquire);
         if (pass == 0) {
-            if (reserved != fd) continue;
+            if (reserved != Descriptor.of(fd)) continue;
         } else {
-            if (reserved >= 0) continue;
-            if (descriptor.cmpxchgStrong(reserved, fd, .acq_rel, .acquire) != null) continue;
+            if (reserved.named()) continue;
+            if (descriptor.cmpxchgStrong(reserved, .of(fd), .acq_rel, .acquire) != null) continue;
         }
         r.* = .{ .fd = fd };
         return r;
@@ -220,7 +222,7 @@ pub fn close(a: *Accept, u: anytype, fd: linux.fd_t) void {
         const first = @as(u32, @bitCast(fd)) % a.records.len;
         for (0..@min(8, a.records.len)) |offset| {
             const i = (first + offset) % a.records.len;
-            if (a.records[i].fd == -1) _ = a.descriptors[i].cmpxchgStrong(fd, -2, .acq_rel, .acquire);
+            if (a.records[i].fd == -1) _ = a.descriptors[i].cmpxchgStrong(.of(fd), .tombstone, .acq_rel, .acquire);
         }
         return;
     };

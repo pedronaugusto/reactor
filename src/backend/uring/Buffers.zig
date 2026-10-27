@@ -44,7 +44,7 @@ pub fn unregister(b: *Buffers, ring: *linux.IoUring, index: u16) void {
     std.debug.assert(b.slots[index].users == 0);
     const Empty = extern struct { base: ?[*]u8 = null, length: usize = 0 };
     var empty: Empty = .{};
-    update(ring.fd, index, @ptrCast(&empty)) catch |err| std.debug.panic("reactor: unregistering a fixed buffer failed: {t}", .{err}); // safe: Empty has the iovec ABI, including its null base
+    update(ring.fd, index, @ptrCast(&empty)) catch |err| std.debug.panic("reactor: unregistering a fixed buffer failed: {t}", .{err}); // aegis: boundary: Empty has the iovec ABI, including its null base
     b.slots[index] = .{};
     b.registered -= 1;
 }

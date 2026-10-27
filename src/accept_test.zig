@@ -154,7 +154,7 @@ test "a reserved listener slot survives an earlier slot being released" {
     var table = try Accept.init(testing.allocator, 2, true);
     defer table.deinit(testing.allocator);
     table.records[0].fd = 4;
-    table.descriptors[0].store(4, .release);
+    table.descriptors[0].store(.of(4), .release);
     try testing.expect(table.reserve(6));
     table.reset(&table.records[0]);
     var h: Harness = .{};
