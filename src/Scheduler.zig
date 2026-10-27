@@ -1416,8 +1416,8 @@ pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std
 inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     var stack = taken;
     const top = stack.top;
-    const record: *Task = @ptrCast(@alignCast(stack.carve(@sizeOf(Task), .of(Task)) catch return s.refuse(stack))); // safe: carved for the record, aligned
-    const extra_at = @intFromPtr(stack.carve(extra, extra_align) catch return s.refuse(stack)); // safe: an address, for the caller's context and result
+    const record = stack.carve(Task) catch return s.refuse(stack);
+    const extra_at = @intFromPtr(stack.carveBytes(extra, extra_align) catch return s.refuse(stack)); // safe: an address, for the caller's context and result
     // A task whose record and context leave it less than half its stack
     // would rather wait for a larger one.
     if (stack.top - stack.bottom < (stack.end - stack.bottom) / 2) return s.refuse(stack);
