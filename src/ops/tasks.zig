@@ -63,12 +63,11 @@ const Layout = struct {
 
 fn futureEntry(t: *Task) noreturn {
     Scheduler.callOut(t, t.start.future, .{ t.context_bytes, t.result_bytes });
-    Scheduler.exit(.{ .func = futureDone, .context = t });
+    Scheduler.exit(futureDone);
 }
 
 /// Off the ended task's stack: tell its awaiter, if it has one yet.
-fn futureDone(context: *anyopaque, t: *Task) void {
-    _ = context;
+fn futureDone(t: *Task) void {
     const s = schedulerOf(t);
     const old = t.awaiter.swap(Task.finished, .acq_rel);
     if (old != 0) wakeAwaiter(s, @ptrFromInt(old)); // safe: only `await` stores, and it stores an `*Awaiter`
@@ -80,8 +79,14 @@ fn wakeAwaiter(s: *Scheduler, a: *Task.Awaiter) void {
     Scheduler.system().futexWake(u32, &a.done.raw, 1);
 }
 
-fn registerAwaiter(context: *anyopaque, waiter: *Task) void {
-    const a: *Task.Awaiter = @ptrCast(@alignCast(context)); // safe: `await` passed its awaiter
+/// An awaiter, and the work that registers it once its task is off its stack.
+const Awaiting = struct {
+    after: Scheduler.After = .{ .run = registerAwaiter },
+    awaiter: Task.Awaiter,
+};
+
+fn registerAwaiter(after: *Scheduler.After, waiter: *Task) void {
+    const a = &(@as(*Awaiting, @fieldParentPtr("after", after))).awaiter;
     const future = a.target.?;
     const old = future.awaiter.swap(@intFromPtr(a), .acq_rel); // safe: read back by `futureDone`
     if (old == Task.finished) schedulerOf(waiter).ready(waiter, .woken);
@@ -90,11 +95,12 @@ fn registerAwaiter(context: *anyopaque, waiter: *Task) void {
 /// Waits for `t` to end, copies its result and gives its stack back.
 pub fn await(s: *Scheduler, t: *Task, result: []u8) void {
     if (t.awaiter.load(.acquire) != Task.finished) {
-        var a: Task.Awaiter = .{ .task = Scheduler.current(), .target = t };
+        var w: Awaiting = .{ .awaiter = .{ .task = Scheduler.current(), .target = t } };
+        const a = &w.awaiter;
         if (a.task != null) {
-            Scheduler.park(.{ .func = registerAwaiter, .context = &a });
+            Scheduler.park(&w.after);
         } else {
-            const old = t.awaiter.swap(@intFromPtr(&a), .acq_rel); // safe: read back by `futureDone`
+            const old = t.awaiter.swap(@intFromPtr(a), .acq_rel); // safe: read back by `futureDone`
             if (old != Task.finished) {
                 const sys = Scheduler.system();
                 while (a.done.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &a.done.raw, 0);
@@ -137,13 +143,12 @@ pub fn groupConcurrent(s: *Scheduler, g: *Io.Group, context: []const u8, context
 
 fn memberEntry(t: *Task) noreturn {
     Scheduler.callOut(t, t.start.member, .{t.context_bytes});
-    Scheduler.exit(.{ .func = memberDone, .context = t });
+    Scheduler.exit(memberDone);
 }
 
 /// Off the ended member's stack: out of the group, the stack back, and the
 /// awaiter told if it was the last.
-fn memberDone(context: *anyopaque, t: *Task) void {
-    _ = context;
+fn memberDone(t: *Task) void {
     const p = processorOf(t);
     const s = p.scheduler;
     // Counted from before it leaves the group until its stack is back, so an
@@ -170,11 +175,15 @@ const GroupWait = struct {
     }
 };
 
-const Registration = struct { group: *Io.Group, awaiter: *Task.Awaiter };
+const Registration = struct {
+    after: Scheduler.After = .{ .run = registerGroupAwaiter },
+    group: *Io.Group,
+    awaiter: *Task.Awaiter,
+};
 
-fn registerGroupAwaiter(context: *anyopaque, t: *Task) void {
+fn registerGroupAwaiter(after: *Scheduler.After, t: *Task) void {
     _ = t;
-    const r: *Registration = @ptrCast(@alignCast(context)); // safe: `waitGroup` passed its registration
+    const r: *Registration = @fieldParentPtr("after", after);
     Task.awaitGroup(r.group, r.awaiter);
     Task.unlockGroup(r.group);
 }
@@ -221,7 +230,7 @@ fn waitGroup(g: *Io.Group, t: *Task) void {
     var a: Task.Awaiter = .{ .task = t };
     var r: Registration = .{ .group = g, .awaiter = &a };
     // The group stays locked until the task is off its stack.
-    Scheduler.park(.{ .func = registerGroupAwaiter, .context = &r });
+    Scheduler.park(&r.after);
 }
 
 fn waitGroupThread(g: *Io.Group) void {

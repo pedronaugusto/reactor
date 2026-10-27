@@ -318,7 +318,7 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
         if (other == me or !r.scheduler.holds(other.index, fd)) continue;
         var a: Abort = .{ .op = .{ .backend = .{ .kind = .{ .abort = fd } } }, .task = t, .scheduler = &r.scheduler, .target = other };
         if (t != null) {
-            Scheduler.park(.{ .func = Abort.send, .context = &a });
+            Scheduler.park(&a.after);
         } else {
             other.send(&a.errand);
             const system = Scheduler.system();
@@ -332,6 +332,7 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
 /// An abort of a descriptor's operations, run on the processor holding them.
 const Abort = struct {
     errand: Scheduler.Errand = .{ .run = start },
+    after: Scheduler.After = .{ .run = send },
     op: Loop.Op,
     task: ?*Task,
     finished: std.atomic.Value(u32) = .init(0),
@@ -339,22 +340,21 @@ const Abort = struct {
     target: *Processor = undefined,
 
     /// Off the closing task's stack: hand the abort to the processor.
-    fn send(context: *anyopaque, t: *Task) void {
+    fn send(after: *Scheduler.After, t: *Task) void {
         _ = t;
-        const a: *Abort = @ptrCast(@alignCast(context)); // safe: `abortElsewhere` passed its `Abort`
+        const a: *Abort = @alignCast(@fieldParentPtr("after", after)); // safe: the field belongs to this record
         a.target.send(&a.errand);
     }
 
     fn start(e: *Scheduler.Errand, p: *Processor) void {
         const a: *Abort = @alignCast(@fieldParentPtr("errand", e)); // safe: the field belongs to this record
         a.op.callback = done;
-        a.op.user_data = @intFromPtr(a); // safe: read back by `done` while the closing task waits
         p.loop.submit(&a.op) catch a.finish();
     }
 
     fn done(l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const a: *Abort = @ptrFromInt(o.user_data); // safe: `run` stored it
+        const a: *Abort = @alignCast(@fieldParentPtr("op", o)); // safe: the field belongs to this record
         a.finish();
     }
 

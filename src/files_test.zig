@@ -88,13 +88,16 @@ const Migration = struct {
 
     fn moveTo(target: *Scheduler.Processor) void {
         const Move = struct {
-            fn run(raw: *anyopaque, task: *Task) void {
-                const processor: *Scheduler.Processor = @ptrCast(@alignCast(raw)); // safe: the target passed to park
-                task.processor_loop = &processor.loop;
-                processor.pushRemote(task);
+            after: Scheduler.After = .{ .run = moveOver },
+            target: *Scheduler.Processor,
+            fn moveOver(after: *Scheduler.After, task: *Task) void {
+                const move: *@This() = @fieldParentPtr("after", after);
+                task.processor_loop = &move.target.loop;
+                move.target.pushRemote(task);
             }
         };
-        if (Scheduler.processor() != target) Scheduler.park(.{ .func = Move.run, .context = target });
+        var move: Move = .{ .target = target };
+        if (Scheduler.processor() != target) Scheduler.park(&move.after);
     }
 
     fn readOn(m: *Migration, file: std.Io.File, buffer: []u8) !void {

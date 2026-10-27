@@ -178,7 +178,7 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
     defer t.operation = previous;
     var request: RemoteAccept = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .op = o };
     try t.enterWait(&request.hook);
-    Scheduler.park(.{ .func = RemoteAccept.publish, .context = &request });
+    Scheduler.park(&request.after);
     Scheduler.leaveWait(t);
     if (request.failure) |err| {
         if (err == error.Canceled) return t.acknowledge();
@@ -189,6 +189,7 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
 
 const RemoteAccept = struct {
     errand: Scheduler.Errand = .{ .run = submit },
+    after: Scheduler.After = .{ .run = publish },
     hook: Task.Hook = .{ .cancel = cancel },
     message: Scheduler.CancelMessage,
     task: *Task,
@@ -199,8 +200,8 @@ const RemoteAccept = struct {
     requested: bool = false,
     failure: ?Error = null,
 
-    fn publish(raw: *anyopaque, _: *Task) void {
-        const request: *RemoteAccept = @ptrCast(@alignCast(raw)); // safe: accept parks this request
+    fn publish(after: *Scheduler.After, _: *Task) void {
+        const request: *RemoteAccept = @fieldParentPtr("after", after);
         request.processor.send(&request.errand);
     }
 

@@ -22,6 +22,7 @@ const Record = struct {
     notified: std.atomic.Value(bool) = .init(false),
     state: std.atomic.Value(State) = .init(.pending),
     hook: Task.Hook = .{ .cancel = cancel },
+    after: Scheduler.After = .{ .run = submit },
     job: Lanes.Job = .{ .run = run, .done = done, .lane = .lookup, .pending = .init(0) },
     scheduler: *Scheduler = undefined,
     task: *Task = undefined,
@@ -45,8 +46,8 @@ const Record = struct {
         if (r.state.cmpxchgStrong(.pending, .canceled, .seq_cst, .seq_cst) == null) r.notify();
     }
 
-    fn submit(context: *anyopaque, _: *Task) void {
-        const r: *Record = @ptrCast(@alignCast(context)); // safe: resolve passed its reserved record
+    fn submit(after: *Scheduler.After, _: *Task) void {
+        const r: *Record = @fieldParentPtr("after", after);
         r.published.store(true, .seq_cst);
         if (r.state.load(.seq_cst) == .canceled) r.notify();
         r.lanes.submit(&r.job);
@@ -128,7 +129,7 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     };
     r.finished.store(0, .release);
     r.job.pending.store(1, .monotonic);
-    Scheduler.park(.{ .func = Record.submit, .context = r });
+    Scheduler.park(&r.after);
     t.leaveWait();
     if (r.state.load(.acquire) == .canceled) return t.acknowledge();
     const result = try r.result;

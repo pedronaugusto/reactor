@@ -444,16 +444,19 @@ test "a socket close reports EOF while unrelated reads remain pending" {
 
 fn acceptOnProcessor(io: Io, server: *Io.net.Server, owner: *Scheduler.Processor, done: *Io.Event) !void {
     const Move = struct {
-        fn run(raw: *anyopaque, task: *Task) void {
-            const target: *Scheduler.Processor = @ptrCast(@alignCast(raw)); // safe: the target passed to park
-            task.processor_loop = &target.loop;
-            target.pushRemote(task);
+        after: Scheduler.After = .{ .run = moveOver },
+        target: *Scheduler.Processor,
+        fn moveOver(after: *Scheduler.After, task: *Task) void {
+            const move: *@This() = @fieldParentPtr("after", after);
+            task.processor_loop = &move.target.loop;
+            move.target.pushRemote(task);
         }
     };
+    var move: Move = .{ .target = owner };
     const task = Scheduler.current().?;
     task.pins += 1;
     defer task.pins -= 1;
-    if (Scheduler.processor() != owner) Scheduler.park(.{ .func = Move.run, .context = owner });
+    if (Scheduler.processor() != owner) Scheduler.park(&move.after);
     const stream = try server.accept(io);
     stream.close(io);
     done.set(io);

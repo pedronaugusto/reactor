@@ -260,13 +260,15 @@ pub fn start(c: *Core) StartError!void {
 pub fn run(c: *Core, mode: Loop.RunMode) void {
     assert(Scheduler.current() == &c.root);
     const Serve = struct {
-        fn after(context: *anyopaque, t: *Task) void {
-            const m: *const Loop.RunMode = @ptrCast(@alignCast(context)); // safe: `run` passed its mode
-            Scheduler.processorOf(t).?.serving = .{ .mode = m.* };
+        after: Scheduler.After = .{ .run = serveRoot },
+        mode: Loop.RunMode,
+        fn serveRoot(after: *Scheduler.After, t: *Task) void {
+            const serve: *@This() = @alignCast(@fieldParentPtr("after", after)); // safe: the field belongs to this record
+            Scheduler.processorOf(t).?.serving = .{ .mode = serve.mode };
         }
     };
-    var m = mode;
-    Scheduler.park(.{ .func = Serve.after, .context = &m });
+    var serve: Serve = .{ .mode = mode };
+    Scheduler.park(&serve.after);
     // Back to the host, which may now wait on the loop's handle: work
     // handed to the home processor from here on wakes the loop, and work
     // handed to it before this was set makes the handle ready now.

@@ -124,6 +124,7 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes:
         scheduler: *Scheduler,
         lanes: *Lanes,
         hook: Task.Hook = .{ .cancel = cancelHook },
+        after: Scheduler.After = .{ .run = submit },
 
         fn run(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the field belongs to this record
@@ -142,9 +143,9 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes:
         }
 
         /// Off the task's stack: hand the call to the lane.
-        fn submit(context: *anyopaque, task: *Task) void {
+        fn submit(after: *Scheduler.After, task: *Task) void {
             _ = task;
-            const c: *Self = @ptrCast(@alignCast(context)); // safe: `call` passed its `Call`
+            const c: *Self = @alignCast(@fieldParentPtr("after", after)); // safe: the field belongs to this record
             c.lanes.submit(&c.job);
         }
     };
@@ -168,7 +169,7 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes:
             lanes.retire(&c.job);
             return error.Canceled;
         };
-        Scheduler.park(.{ .func = Call.submit, .context = &c });
+        Scheduler.park(&c.after);
         t.leaveWait();
         // The executor lets go of the job's group just after the call returns.
         while (c.job.held()) Scheduler.yield();

@@ -40,6 +40,9 @@ pub const Errand = struct {
     run: *const fn (e: *Errand, p: *Processor) void,
 };
 
+/// Work to do once a parked task is off its stack (`Task.After`).
+pub const After = Task.After;
+
 /// A request that the processor holding a task's wait check the wait for a
 /// cancel. It lives in the wait's own record, in the waiting task's frame,
 /// and the task does not leave the wait (`leaveWait`) until the processor has
@@ -233,18 +236,12 @@ pub const Processor = struct {
         /// Back of the queue.
         yield,
         /// Parked; `after` (if any) runs now, off the task's stack.
-        park: ?After,
-        /// Ended; `after` runs now and releases what the task held.
-        exit: After,
+        park: ?*After,
+        /// Ended; `done` runs now and releases what the task held.
+        exit: *const fn (t: *Task) void,
         /// Its processor went to another thread while it sat in a blocking
         /// call: it runs on next wherever a processor takes it.
         relocate,
-    };
-
-    /// Work to do once a task is off its stack.
-    pub const After = struct {
-        func: *const fn (context: *anyopaque, t: *Task) void,
-        context: *anyopaque,
     };
 
     /// A run of the home processor on the root's behalf (`Runtime.run`).
@@ -575,8 +572,8 @@ pub const Processor = struct {
         if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
-            .park => |after| if (after) |a| a.func(a.context, t),
-            .exit => |a| a.func(a.context, t),
+            .park => |after| if (after) |a| a.run(a, t),
+            .exit => |done| done(t),
             .relocate => unreachable, // unreachable: handoff above takes it before
         }
     }
@@ -919,7 +916,7 @@ pub fn listenerOwner(s: *Scheduler, fd: Io.File.Handle, caller: *Processor) *Pro
 /// Suspends the running task. `after` runs on the scheduler once the
 /// task's stack is still: there it publishes the task to whoever will
 /// wake it (a futex bucket, a lane, an awaited future).
-pub fn park(after: ?Processor.After) void {
+pub fn park(after: ?*After) void {
     const own = seatNow();
     const p = own.held.?;
     const t = p.current.?;
@@ -941,12 +938,12 @@ pub fn yield() void {
     toScheduler(t, &own.context, &message);
 }
 
-/// Ends the running task: `after` runs once it is off its stack.
-pub fn exit(after: Processor.After) noreturn {
+/// Ends the running task: `done` runs once it is off its stack.
+pub fn exit(done: *const fn (t: *Task) void) noreturn {
     const own = seatNow();
     const p = own.held.?;
     const t = p.current.?;
-    var message: Processor.Message = .{ .processor = p, .action = .{ .exit = after } };
+    var message: Processor.Message = .{ .processor = p, .action = .{ .exit = done } };
     toScheduler(t, &own.context, &message);
     unreachable; // unreachable: nothing switches back to an ended task
 }

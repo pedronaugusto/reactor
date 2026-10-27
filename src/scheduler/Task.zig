@@ -124,6 +124,13 @@ pub const Hook = struct {
 
 /// Someone waiting for a future or a group: a task, or a thread outside the
 /// runtime.
+/// Work to do once a parked task is off its stack, kept in the record that
+/// does it, as a scheduler's errand is: `run` finds the record from it by
+/// `@fieldParentPtr`.
+pub const After = struct {
+    run: *const fn (after: *After, t: *Task) void,
+};
+
 pub const Awaiter = struct {
     task: ?*Task,
     /// The future awaited, for registering after the switch.
