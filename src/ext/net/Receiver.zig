@@ -27,16 +27,68 @@ native_state: if (builtin.os.tag == .linux) ?Native else void = if (builtin.os.t
 
 /// Buffers of one length, all allocated at `init`, taken and given back
 /// from any thread without a lock.
+/// A buffer's link: the next buffer's index (on a delivered chain) or that
+/// index plus one (on the free list), or `end`.
+const Link = enum(u32) {
+    end = std.math.maxInt(u32),
+    _,
+
+    fn of(value: u32) Link {
+        return @fromBackingInt(value);
+    }
+
+    fn raw(l: Link) u32 {
+        return @backingInt(l);
+    }
+};
+
+/// The free list's head: the first buffer's index plus one (zero, none),
+/// and a tag moved on at every change, so a head seen before is not taken
+/// for the same head after a take and a give (ABA).
+const Free = enum(u64) {
+    empty = 0,
+    _,
+
+    const Parts = packed struct(u64) { index_plus_one: u32, tag: u32 };
+
+    fn of(index_plus_one: u32, tag_: u32) Free {
+        return @fromBackingInt(@as(u64, @bitCast(Parts{ .index_plus_one = index_plus_one, .tag = tag_ })));
+    }
+
+    fn parts(f: Free) Parts {
+        return @bitCast(@backingInt(f));
+    }
+
+    fn firstPlusOne(f: Free) u32 {
+        return f.parts().index_plus_one;
+    }
+
+    fn first(f: Free) ?u32 {
+        const plus_one = f.firstPlusOne();
+        return if (plus_one == 0) null else plus_one - 1;
+    }
+
+    fn tag(f: Free) u32 {
+        return f.parts().tag;
+    }
+};
+
+/// Receivers using a pool.
+const Receivers = aegis.units.Count(Receiver, u32);
+
 pub const Pool = struct {
     memory: []u8,
     buffer_len: u32,
-    links: []u32,
+    /// Each buffer's next, on the free list (`Free`) or a receiver's
+    /// delivered chain: a cell, as a buffer's link is read by a taker
+    /// racing the giver.
+    links: []aegis.Atomic(Link),
     lengths: []u32,
     groups: if (builtin.os.tag == .linux) ?Groups else void = if (builtin.os.tag == .linux) null else {},
     fixed: if (builtin.os.tag == .linux) ?Registrations else void = if (builtin.os.tag == .linux) null else {},
     /// The free list's head: an index plus one, and a tag against ABA.
-    head: std.atomic.Value(u64) = .init(0),
-    receivers: std.atomic.Value(u32) = .init(0),
+    head: aegis.Atomic(Free) = .init(.empty),
+    receivers: aegis.Atomic(Receivers) = .init(.fromRaw(0)),
 
     pub const Options = struct {
         buffer_len: aegis.units.Bytes(u32) = .fromRaw(4096),
@@ -55,7 +107,7 @@ pub const Pool = struct {
         const size = length.mul(options.buffers) catch return error.OutOfMemory;
         const memory = try gpa.alloc(u8, size.raw());
         errdefer gpa.free(memory);
-        const links = try gpa.alloc(u32, options.buffers);
+        const links = try gpa.alloc(aegis.Atomic(Link), options.buffers);
         errdefer gpa.free(links);
         const lengths = try gpa.alloc(u32, options.buffers);
         errdefer gpa.free(lengths);
@@ -76,7 +128,7 @@ pub const Pool = struct {
 
     /// Every buffer given back; before the owning runtime stops.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
-        std.debug.assert(p.receivers.load(.acquire) == 0);
+        std.debug.assert(p.receivers.load(.acquire).eql(.fromRaw(0)));
         if (builtin.os.tag == .linux) {
             if (p.groups) |*groups| groups.deinit(gpa, io);
             if (p.fixed) |*fixed| fixed.deinit(gpa, io);
@@ -92,34 +144,28 @@ pub const Pool = struct {
         return p.memory[start..][0..p.buffer_len];
     }
 
-    const Free = packed struct(u64) { index_plus_one: u32, tag: u32 };
-
     fn take(p: *Pool) ?u32 {
         if (builtin.os.tag == .linux) if (p.groups != null) return null;
-        var raw = p.head.load(.acquire);
+        var head = p.head.load(.acquire);
         while (true) {
-            const f: Free = @bitCast(raw);
-            if (f.index_plus_one == 0) return null;
-            const index = f.index_plus_one - 1;
-            const next_free: Free = .{ .index_plus_one = @atomicLoad(u32, &p.links[index], .monotonic), .tag = f.tag +% 1 };
-            raw = p.head.cmpxchgWeak(raw, @bitCast(next_free), .acq_rel, .acquire) orelse return index;
+            const index = head.first() orelse return null;
+            const next_free = Free.of(p.links[index].load(.monotonic).raw(), head.tag() +% 1);
+            head = p.head.cmpxchgWeak(head, next_free, .acq_rel, .acquire) orelse return index;
         }
     }
 
     fn give(p: *Pool, index: u32) void {
-        var raw = p.head.load(.monotonic);
+        var head = p.head.load(.monotonic);
         while (true) {
-            const f: Free = @bitCast(raw);
-            @atomicStore(u32, &p.links[index], f.index_plus_one, .monotonic);
-            const first: Free = .{ .index_plus_one = index + 1, .tag = f.tag +% 1 };
-            raw = p.head.cmpxchgWeak(raw, @bitCast(first), .release, .monotonic) orelse return;
+            p.links[index].store(.of(head.firstPlusOne()), .monotonic);
+            head = p.head.cmpxchgWeak(head, Free.of(index + 1, head.tag() +% 1), .release, .monotonic) orelse return;
         }
     }
 };
 
 pub fn init(io: Io, pool: *Pool, socket: Io.net.Socket.Handle) Receiver {
     _ = io;
-    _ = pool.receivers.fetchAdd(1, .monotonic);
+    _ = pool.receivers.fetchAddWrapping(.fromRaw(1), .monotonic);
     return .{ .pool = pool, .socket = socket };
 }
 
@@ -127,7 +173,7 @@ pub fn init(io: Io, pool: *Pool, socket: Io.net.Socket.Handle) Receiver {
 pub fn deinit(r: *Receiver, io: Io) void {
     r.giveBack();
     if (builtin.os.tag == .linux) if (r.native_state) |*state| state.close(io);
-    _ = r.pool.receivers.fetchSub(1, .release);
+    _ = r.pool.receivers.fetchSubWrapping(.fromRaw(1), .release);
     r.* = undefined;
 }
 
@@ -210,6 +256,8 @@ fn read(io: Io, socket: Io.net.Socket.Handle, buffer: []u8, deadline: Io.Timeout
 const Mailbox = struct {
     command_queued: bool = false,
     closed: bool = false,
+    /// The request is over after a close: nothing more will be delivered.
+    ended: bool = false,
     eof: bool = false,
     failure: ?NextError = null,
     head: ?u32 = null,
@@ -226,8 +274,8 @@ const Native = struct {
     /// The kernel request: the owner's alone, armed, canceled and completed
     /// on its ring's thread.
     request: Receive = undefined,
-    ready: Io.Event = .unset,
-    ended: Io.Event = .unset,
+    /// Signaled whenever the mailbox gains something to take, or ends.
+    changed: aegis.Condition = .init(),
     command: Scheduler.Errand = .{ .run = commandRun },
 
     fn system() Io {
@@ -257,18 +305,20 @@ const Native = struct {
             state.request.cancel(state.group.ring);
         } else if (!state.request.active and !mailbox.eof) {
             mailbox.failure = null;
-            state.ended.reset();
+            mailbox.ended = false;
             state.owner.hold(state.receiver.socket);
             state.request.arm(state.group.ring) catch {
                 // No room in the ring's table: the reader is told so.
                 state.owner.release(state.receiver.socket);
                 mailbox.failure = error.SystemResources;
-                state.ready.set(state.io);
+                state.changed.broadcast(state.io);
             };
         }
-        const ended = closing and !state.request.active;
+        if (closing and !state.request.active) {
+            mailbox.ended = true;
+            state.changed.broadcast(state.io);
+        }
         held.deinit(system());
-        if (ended) state.ended.set(state.io);
     }
 
     fn completed(request: *Receive, cqe: std.os.linux.io_uring_cqe) void {
@@ -286,8 +336,8 @@ const Native = struct {
                 state.group.give(pool.memory, pool.buffer_len, local);
             } else {
                 pool.lengths[index] = @intCast(cqe.res);
-                pool.links[index] = std.math.maxInt(u32);
-                if (mailbox.tail) |tail| pool.links[tail] = index else mailbox.head = index;
+                pool.links[index].store(.end, .monotonic);
+                if (mailbox.tail) |tail| pool.links[tail].store(.of(index), .monotonic) else mailbox.head = index;
                 mailbox.tail = index;
             }
         }
@@ -298,61 +348,60 @@ const Native = struct {
             .CONNRESET => error.ConnectionResetByPeer,
             else => error.Unexpected,
         };
-        state.ready.set(state.io);
-        const ended = final and mailbox.closed and !mailbox.command_queued;
+        if (final and mailbox.closed and !mailbox.command_queued) mailbox.ended = true;
+        state.changed.broadcast(state.io);
         held.deinit(system());
-        if (ended) state.ended.set(state.io);
     }
 
-    fn take(state: *Native) NextError!?[]const u8 {
-        var held = state.mailbox.acquireUncancelable(system());
-        defer held.deinit(system());
-        const mailbox = held.value();
+    /// What the mailbox holds for the reader: a buffer, its end, or why
+    /// it failed; null when nothing yet. The mailbox's lock is held.
+    fn take(state: *Native, mailbox: *Mailbox) NextError!?[]const u8 {
         if (mailbox.head) |index| {
             const pool = state.receiver.pool;
-            const following = pool.links[index];
-            mailbox.head = if (following == std.math.maxInt(u32)) null else following;
-            if (mailbox.head == null) {
-                mailbox.tail = null;
-                state.ready.reset();
-            }
+            const following = pool.links[index].load(.monotonic);
+            mailbox.head = if (following == .end) null else following.raw();
+            if (mailbox.head == null) mailbox.tail = null;
             state.receiver.lent = index;
             return pool.buffer(index)[0..pool.lengths[index]];
         }
         if (mailbox.eof) return error.EndOfStream;
         if (mailbox.failure) |failure| {
             mailbox.failure = null;
-            state.ready.reset();
             return failure;
         }
-        state.ready.reset();
         return null;
     }
 
     fn next(state: *Native, io: Io, deadline: Io.Timeout) NextError![]const u8 {
-        if (try state.take()) |bytes| return bytes;
+        {
+            var held = state.mailbox.acquireUncancelable(system());
+            defer held.deinit(system());
+            if (try state.take(held.value())) |bytes| return bytes;
+        }
         state.send(false);
+        var held = state.mailbox.acquireUncancelable(system());
+        defer held.deinit(system());
         while (true) {
-            state.ready.waitTimeout(io, deadline) catch |err| {
-                if (try state.take()) |bytes| return bytes;
-                if (err == error.Canceled) return error.Canceled;
-                if (deadline.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) return error.Timeout;
-                continue;
+            if (try state.take(held.value())) |bytes| return bytes;
+            state.changed.wait(io, &held, deadline) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                error.Timeout => return try state.take(held.value()) orelse error.Timeout,
+                error.WaiterLimit => return error.SystemResources,
             };
-            if (try state.take()) |bytes| return bytes;
         }
     }
 
     fn close(state: *Native, io: Io) void {
         state.send(true);
-        state.ended.waitUncancelable(io);
         var held = state.mailbox.acquireUncancelable(system());
         defer held.deinit(system());
+        // One closer, and no deadline: it waits until the request is over.
+        while (!held.value().ended) state.changed.waitUncancelable(io, &held, .none) catch unreachable; // unreachable: one closer waits, with no deadline
         const mailbox = held.value();
         const pool = state.receiver.pool;
         while (mailbox.head) |index| {
-            const following = pool.links[index];
-            mailbox.head = if (following == std.math.maxInt(u32)) null else following;
+            const following = pool.links[index].load(.monotonic);
+            mailbox.head = if (following == .end) null else following.raw();
             state.group.give(pool.memory, pool.buffer_len, index - state.group.first);
         }
     }

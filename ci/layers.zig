@@ -112,6 +112,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/Job.zig",
         "src/ext/blocking.zig",
         "src/ext/Signals.zig",
+        "src/ext/Done.zig",
         "src/ext/net.zig",
         "src/ext/net/connect.zig",
         "src/ext/net/pipe.zig",

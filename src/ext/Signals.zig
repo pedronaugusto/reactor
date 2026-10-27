@@ -13,6 +13,7 @@ const Signals = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const posix = std.posix;
 const Io = std.Io;
 const windows = std.os.windows;
@@ -66,8 +67,8 @@ pub const StartError = error{ TooManyListeners, Unsupported } || Notify.OpenErro
 pub fn start(io: Io, which: []const Signal) StartError!Signals {
     _ = io;
     for (which) |s| if (number(s) == null) return error.Unsupported;
-    lock();
-    defer unlock();
+    var held = registry.acquireUncancelable(system());
+    defer held.deinit(system());
     const l = for (&listeners) |*l| {
         if (!l.used) break l;
     } else return error.TooManyListeners;
@@ -81,8 +82,8 @@ pub fn start(io: Io, which: []const Signal) StartError!Signals {
     it = set.iterator();
     while (it.next()) |s| {
         const first = count(s) == 0;
-        table[@backingInt(s)][freeSlot(s).?].store(l, .release);
-        if (first) install(s);
+        table[@backingInt(s)][freeSlot(s).?].store(.of(l), .release);
+        if (first) install(held.value(), s);
     }
     return .{ .listener = l };
 }
@@ -91,22 +92,24 @@ pub fn start(io: Io, which: []const Signal) StartError!Signals {
 /// handler back.
 pub fn stop(s: *Signals, io: Io) void {
     const l = s.listener;
-    lock();
-    var it = l.wanted.iterator();
-    while (it.next()) |sig| {
-        for (&table[@backingInt(sig)]) |*slot| if (slot.load(.acquire) == l) slot.store(null, .seq_cst);
-        if (count(sig) == 0) uninstall(sig);
+    {
+        var held = registry.acquireUncancelable(system());
+        defer held.deinit(system());
+        var it = l.wanted.iterator();
+        while (it.next()) |sig| {
+            for (&table[@backingInt(sig)]) |*slot| if (slot.load(.acquire) == Slot.of(l)) slot.store(.none, .seq_cst);
+            if (count(sig) == 0) uninstall(held.value(), sig);
+        }
+        // A handler running now may still hold `l`: wait for it to leave.
+        // Sequentially consistent with the handler's count and load, so that
+        // either it saw the slot empty or this sees it counted.
+        while (!in_handler.load(.seq_cst).eql(.fromRaw(0))) std.atomic.spinLoopHint();
     }
-    // A handler running now may still hold `l`: wait for it to leave.
-    // Sequentially consistent with the handler's count and load, so that
-    // either it saw the slot empty or this sees it counted.
-    while (in_handler.load(.seq_cst) != 0) std.atomic.spinLoopHint();
     // Keep the record reserved while the close may yield.
-    unlock();
     l.notify.close(io);
-    lock();
+    var held = registry.acquireUncancelable(system());
+    defer held.deinit(system());
     l.used = false;
-    unlock();
     s.* = undefined;
 }
 
@@ -144,44 +147,87 @@ const Listener = struct {
     /// The same kernel object as a member of a wait; see `wake`.
     wake: Wake = undefined,
     wanted: Set = .empty,
-    delivered: std.atomic.Value(u16) = .init(0),
+    delivered: aegis.Atomic(Delivered) = .init(.none),
 
     fn take(l: *Listener) ?Signal {
         var bits = l.delivered.load(.acquire);
-        while (bits != 0) {
-            const bit: u4 = @intCast(@ctz(bits));
-            bits = l.delivered.cmpxchgWeak(bits, bits & ~(@as(u16, 1) << bit), .acq_rel, .acquire) orelse return @fromBackingInt(bit);
+        while (bits.lowest()) |sig| {
+            bits = l.delivered.cmpxchgWeak(bits, bits.without(sig), .acq_rel, .acquire) orelse return sig;
         }
         return null;
     }
 };
 
-// The process-wide table: written under `mutex`, read by the handlers.
+/// The signals delivered to a listener and not yet taken, one bit each.
+const Delivered = enum(u16) {
+    none = 0,
+    _,
 
+    fn bit(s: Signal) u16 {
+        return @as(u16, 1) << @backingInt(s);
+    }
+
+    fn with(d: Delivered, s: Signal) Delivered {
+        return @fromBackingInt(@backingInt(d) | bit(s));
+    }
+
+    fn without(d: Delivered, s: Signal) Delivered {
+        return @fromBackingInt(@backingInt(d) & ~bit(s));
+    }
+
+    fn lowest(d: Delivered) ?Signal {
+        if (d == .none) return null;
+        return @fromBackingInt(@as(u4, @intCast(@ctz(@backingInt(d)))));
+    }
+};
+
+/// A slot of a signal's table: the listener's place in `listeners`, or none.
+const Slot = enum(u8) {
+    none = std.math.maxInt(u8),
+    _,
+
+    fn of(l: *const Listener) Slot {
+        return @fromBackingInt(@intCast(l - &listeners[0]));
+    }
+
+    fn listener(s: Slot) ?*Listener {
+        if (s == .none) return null;
+        return &listeners[@backingInt(s)];
+    }
+};
+
+/// Handlers running now.
+const Running = aegis.units.Count(Listener, u32);
+
+/// What only `start` and `stop` change, under the registry's lock.
+const Registry = struct {
+    console_handler: bool = false,
+    previous: [signal_count]if (is_windows) void else posix.Sigaction = undefined,
+};
+
+// The process-wide table: written under the registry's lock, read by the
+// handlers.
+
+// aegis: boundary: the listeners a signal handler reaches, which may take no lock: each is reserved and released under the registry's lock, and a handler reads only its notifier and its delivered bits
 var listeners: [max_listeners]Listener = @splat(.{});
-var table: [signal_count][max_per_signal]std.atomic.Value(?*Listener) = @splat(@splat(.init(null)));
-var previous: [signal_count]if (is_windows) void else posix.Sigaction = undefined;
-var in_handler: std.atomic.Value(u32) = .init(0);
-var console_handler = false;
-var mutex: Io.Mutex = .init;
+// aegis: boundary: what a signal handler reads to find its listeners, which may take no lock: atomic slots, written under the registry's lock
+var table: [signal_count][max_per_signal]aegis.Atomic(Slot) = @splat(@splat(.init(.none)));
+var in_handler: aegis.Atomic(Running) = .init(.fromRaw(0));
+var registry: aegis.BlockingGuarded(Registry) = .init(.{});
 
-fn lock() void {
-    mutex.lockUncancelable(Io.Threaded.global_single_threaded.io());
-}
-
-fn unlock() void {
-    mutex.unlock(Io.Threaded.global_single_threaded.io());
+fn system() Io {
+    return Io.Threaded.global_single_threaded.io();
 }
 
 fn freeSlot(s: Signal) ?usize {
-    for (&table[@backingInt(s)], 0..) |*slot, i| if (slot.load(.acquire) == null) return i;
+    for (&table[@backingInt(s)], 0..) |*slot, i| if (slot.load(.acquire) == .none) return i;
     return null;
 }
 
 fn count(s: Signal) usize {
     var n: usize = 0;
     for (&table[@backingInt(s)]) |*slot| {
-        if (slot.load(.acquire) != null) n += 1;
+        if (slot.load(.acquire) != .none) n += 1;
     }
     return n;
 }
@@ -189,11 +235,12 @@ fn count(s: Signal) usize {
 /// Tells every listener of `s`. Runs in a signal handler or the console's
 /// handler thread: atomics and one `write` per listener, nothing else.
 fn deliver(s: Signal) bool {
-    _ = in_handler.fetchAdd(1, .seq_cst);
-    defer _ = in_handler.fetchSub(1, .release);
+    _ = in_handler.fetchAddWrapping(.fromRaw(1), .seq_cst);
+    defer _ = in_handler.fetchSubWrapping(.fromRaw(1), .release);
     var told = false;
-    for (&table[@backingInt(s)]) |*slot| if (slot.load(.seq_cst)) |l| {
-        _ = l.delivered.fetchOr(@as(u16, 1) << @backingInt(s), .acq_rel);
+    for (&table[@backingInt(s)]) |*slot| if (slot.load(.seq_cst).listener()) |l| {
+        var bits = l.delivered.load(.acquire);
+        while (l.delivered.cmpxchgWeak(bits, bits.with(s), .acq_rel, .acquire)) |found| bits = found;
         l.notify.set();
         told = true;
     };
@@ -224,11 +271,11 @@ fn number(s: Signal) ?if (is_windows) windows.DWORD else posix.SIG {
     };
 }
 
-fn install(s: Signal) void {
+fn install(r: *Registry, s: Signal) void {
     if (is_windows) {
-        if (!console_handler) {
+        if (!r.console_handler) {
             _ = win32.SetConsoleCtrlHandler(consoleHandler, .TRUE);
-            console_handler = true;
+            r.console_handler = true;
         }
         return;
     }
@@ -237,17 +284,17 @@ fn install(s: Signal) void {
         .mask = posix.sigemptyset(),
         .flags = posix.SA.RESTART,
     };
-    posix.sigaction(number(s).?, &action, &previous[@backingInt(s)]);
+    posix.sigaction(number(s).?, &action, &r.previous[@backingInt(s)]);
 }
 
-fn uninstall(s: Signal) void {
+fn uninstall(r: *Registry, s: Signal) void {
     if (is_windows) {
         for (std.enums.values(Signal)) |other| if (count(other) != 0) return;
         _ = win32.SetConsoleCtrlHandler(consoleHandler, .FALSE);
-        console_handler = false;
+        r.console_handler = false;
         return;
     }
-    posix.sigaction(number(s).?, &previous[@backingInt(s)], null);
+    posix.sigaction(number(s).?, &r.previous[@backingInt(s)], null);
 }
 
 fn handler(sig: posix.SIG) callconv(.c) void {
