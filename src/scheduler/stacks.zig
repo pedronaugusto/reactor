@@ -79,8 +79,7 @@ fn lowest(stack: shuttle.Stack) usize {
 pub fn paint(stack: *shuttle.Stack, until: usize) bool {
     const low = lowest(stack.*);
     stack.reach(low) catch return false;
-    const bytes: [*]u8 = @ptrFromInt(low); // safe: exclusively owned, committed stack below its first frame
-    @memset(bytes[0 .. until - low], paint_byte);
+    @memset(stack.usable()[low - stack.bottom .. until - stack.bottom], paint_byte);
     return true;
 }
 
@@ -89,8 +88,7 @@ pub fn paint(stack: *shuttle.Stack, until: usize) bool {
 /// returned before the next park included.
 pub fn highWater(stack: shuttle.Stack) usize {
     const low = lowest(stack);
-    const bytes: [*]const u8 = @ptrFromInt(low); // safe: the scheduler exclusively owns this suspended stack
-    const size = stack.end - low;
-    for (bytes[0..size], 0..) |byte, at| if (byte != paint_byte) return size - at;
+    const bytes = stack.usable()[low - stack.bottom ..];
+    for (bytes, 0..) |byte, at| if (byte != paint_byte) return bytes.len - at;
     return 0;
 }

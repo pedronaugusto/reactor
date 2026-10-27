@@ -258,6 +258,9 @@ pub const Processor = struct {
         /// A park whose stack holds pages a deeper park touched: once the
         /// task is off it, the loop may arm its trim.
         inspect: bool = false,
+        /// What the switch runs on the scheduler's side, which finds the
+        /// message from it.
+        after: shuttle.handoff.After = .{ .run = afterSwitch },
     };
 
     pub const Action = union(enum) {
@@ -577,8 +580,8 @@ pub const Processor = struct {
     /// What the scheduler does once a task has switched back to it, run
     /// by the switch on the scheduler's side: the task's stack is still
     /// now, so it may be published to whoever will resume it.
-    pub fn afterSwitch(data: ?*anyopaque, from: *shuttle.Context) void {
-        const message: *const Message = @ptrCast(@alignCast(data.?)); // safe: every switch to a scheduler sends its message
+    pub fn afterSwitch(after: *shuttle.handoff.After, from: *shuttle.Context) void {
+        const message: *const Message = @fieldParentPtr("after", after);
         const t: *Task = @fieldParentPtr("context", from);
         const p = message.processor;
         if (p.scheduler.monitor != null) return p.afterSwitchMode(true, t, message);
@@ -1444,17 +1447,17 @@ pub fn wakeAll(s: *Scheduler) void {
 /// (aligned to `extra_align`) below its record for the caller's context
 /// and result; null when no stack can be had (`stacks.take`). `entry` runs
 /// first.
-pub inline fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn) ?struct { *Task, [*]u8 } {
+pub inline fn create(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) callconv(.c) noreturn) ?struct { *Task, [*]u8 } {
     const taken = stacks_.take(&s.stacks, s.stack_size, null) orelse return null;
     return s.createAt(taken, kind, extra, extra_align, entry, .normal);
 }
 
-pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, size: ?aegis.units.Bytes(usize), priority: Task.Priority) ?struct { *Task, [*]u8 } {
+pub fn createWith(s: *Scheduler, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) callconv(.c) noreturn, size: ?aegis.units.Bytes(usize), priority: Task.Priority) ?struct { *Task, [*]u8 } {
     const taken = stacks_.take(&s.stacks, s.stack_size, size) orelse return null;
     return s.createAt(taken, kind, extra, extra_align, entry, priority);
 }
 
-inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
+inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: usize, extra_align: std.mem.Alignment, entry: *const fn (t: *Task) callconv(.c) noreturn, priority: Task.Priority) ?struct { *Task, [*]u8 } {
     var stack = taken;
     const top = stack.top;
     const record = stack.carve(Task) catch return s.refuse(stack);
@@ -1476,7 +1479,7 @@ inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: 
         .budget = undefined,
         .slice_start = undefined,
     };
-    record.context = shuttle.Context.init(&stack, shuttle.handoff.entry(taskBody), @ptrCast(@constCast(entry))) catch return s.refuse(stack); // safe: `taskBody` casts it back to the entry it is
+    record.context = shuttle.handoff.init(&stack, *const fn (t: *Task) callconv(.c) noreturn, taskBody, entry) catch return s.refuse(stack);
     return .{ record, extra_bytes };
 }
 
@@ -1529,15 +1532,14 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
 }
 
 /// A task's first code, once the switch that started it is finished.
-fn taskBody(arg: ?*anyopaque) noreturn {
-    const entry: *const fn (t: *Task) noreturn = @ptrCast(@alignCast(arg.?)); // safe: `create` passed the entry
+fn taskBody(entry: *const fn (t: *Task) callconv(.c) noreturn) noreturn {
     entry(current().?);
 }
 
 /// From a task to a scheduler's context, which runs `afterSwitch` with
 /// `message` once the task's stack is still.
 inline fn toScheduler(t: *Task, scheduler: *shuttle.Context, message: *Processor.Message) void {
-    shuttle.handoff.switchTo(&t.context, scheduler, .{ .run = Processor.afterSwitch, .data = message });
+    shuttle.handoff.switchTo(&t.context, scheduler, &message.after);
 }
 
 fn wakeProcessor(target: *Processor) void {

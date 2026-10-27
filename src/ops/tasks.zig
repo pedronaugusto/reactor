@@ -61,7 +61,7 @@ const Layout = struct {
     }
 };
 
-fn futureEntry(t: *Task) noreturn {
+fn futureEntry(t: *Task) callconv(.c) noreturn {
     Scheduler.callOut(t, t.start.future, .{ t.context_bytes, t.result_bytes });
     Scheduler.exit(futureDone);
 }
@@ -141,7 +141,7 @@ pub fn groupConcurrent(s: *Scheduler, g: *Io.Group, context: []const u8, context
     s.place(t);
 }
 
-fn memberEntry(t: *Task) noreturn {
+fn memberEntry(t: *Task) callconv(.c) noreturn {
     Scheduler.callOut(t, t.start.member, .{t.context_bytes});
     Scheduler.exit(memberDone);
 }

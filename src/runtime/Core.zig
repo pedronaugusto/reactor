@@ -179,7 +179,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     // The home thread's scheduler is the home processor's, on a stack of
     // its own: the root, on the thread's own, switches to it to wait.
     const own = Scheduler.seatNow();
-    own.context = shuttle.Context.init(&c.home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
+    own.context = shuttle.handoff.init(&c.home_stack, *Processor, homeScheduler, home) catch return error.SystemResources;
     own.task = &c.root;
     c.root.seat_context = &own.context;
     c.root.processor_loop = &home.loop;
@@ -242,8 +242,7 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
 
 /// The home processor's scheduler, entered the first time the root waits,
 /// once that switch has run what the root asked.
-fn homeScheduler(arg: ?*anyopaque) noreturn {
-    const home: *Processor = @ptrCast(@alignCast(arg.?)); // safe: `init` passed the home processor
+fn homeScheduler(home: *Processor) noreturn {
     while (true) {
         home.schedule();
         // The home processor went to another thread while a task here sat
