@@ -41,19 +41,6 @@ pub fn submitPending(l: *Loop, token: backend.pending.Token, operation: Io.Opera
     return outcome;
 }
 
-/// An operation `submit` finished at once, taken back before delivery:
-/// its result is the caller's now and no callback runs for it. False when
-/// it is under way, or not first in line for delivery.
-pub fn takeCompleted(l: *Loop, o: *Loop.Op) bool {
-    if (o.state.phase != .done or l.ready.head != o) return false;
-    l.ready.head = @ptrCast(@alignCast(o.state.next)); // safe: the ready list links `*Op`s only
-    if (l.ready.head == null) l.ready.tail = null;
-    o.state.next = null;
-    o.state.phase = .idle;
-    l.in_flight -= 1;
-    return true;
-}
-
 pub fn cancelPending(l: *Loop, token: backend.pending.Token) void {
     l.backend.cancelPending(token);
 }

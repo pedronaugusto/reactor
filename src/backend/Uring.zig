@@ -198,10 +198,13 @@ deferred_count: usize = 0,
 draining_pressure: bool = false,
 /// Installed by the loop on its owner before submissions. Pressure drains
 /// kernel ownership while leaving user callbacks queued until Loop.run.
-pressure: ?struct {
-    context: *anyopaque,
-    complete: *const fn (*anyopaque, linux.io_uring_cqe) void,
-} = null,
+pressure: ?*Pressure = null,
+
+/// Where the ring's owner takes the completions drained under pressure,
+/// kept in the owner's record, which `complete` finds by `@fieldParentPtr`.
+pub const Pressure = struct {
+    complete: *const fn (p: *Pressure, cqe: linux.io_uring_cqe) void,
+};
 
 pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uring {
     var u: Uring = .{
@@ -384,7 +387,7 @@ fn drainPressure(u: *Uring) void {
     const previous = u.draining_pressure;
     u.draining_pressure = true;
     defer u.draining_pressure = previous;
-    for (cqes[0..count]) |cqe| pressure.complete(pressure.context, cqe);
+    for (cqes[0..count]) |cqe| pressure.complete(pressure, cqe);
 }
 
 /// SQPOLL may consume published entries concurrently. Wait until it has

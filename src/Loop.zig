@@ -146,6 +146,9 @@ in_flight: u32 = 0,
 max_ops: u32,
 woken: std.atomic.Value(bool) = .init(false),
 batch_sink: ?BatchSink = null,
+/// Where the io_uring backend hands the completions it drains under
+/// pressure (`installPressure`).
+pressure: if (builtin.os.tag == .linux) backends.Uring.Pressure else void = if (builtin.os.tag == .linux) .{ .complete = Pressure.dispatch } else {},
 owner: std.Thread.Id,
 
 const List = struct {
@@ -581,7 +584,7 @@ const Fired = struct {
     count: u32 = 0,
 
     pub fn fire(f: *Fired, node: *Wheel.Node) void {
-        const storage: *op.State.Storage = @ptrCast(@alignCast(node)); // safe: the timer owns this union's node
+        const storage: *op.State.Storage = @alignCast(@fieldParentPtr("node", node)); // safe: the timer owns this union's node
         const state: *op.State = @alignCast(@fieldParentPtr("storage", storage)); // safe: the storage belongs to the operation's state
         const half: *op.Op = @alignCast(@fieldParentPtr("state", state)); // safe: the state is a field of an operation
         const o = Op.of(half);
@@ -596,13 +599,13 @@ const Fired = struct {
 fn installPressure(l: *Loop) void {
     if (comptime builtin.os.tag == .linux) if (l.backend == .io_uring) {
         const engine = l.backend.io_uring;
-        if (engine.pressure == null or engine.pressure.?.context != @as(*anyopaque, l)) engine.pressure = .{ .context = l, .complete = Pressure.dispatch };
+        engine.pressure = &l.pressure;
     };
 }
 const Pressure = struct {
     loop: *Loop,
-    fn dispatch(raw: *anyopaque, cqe: std.os.linux.io_uring_cqe) void {
-        const loop: *Loop = @ptrCast(@alignCast(raw)); // safe: installPressure retains the owning loop
+    fn dispatch(p: *backends.Uring.Pressure, cqe: std.os.linux.io_uring_cqe) void {
+        const loop: *Loop = @alignCast(@fieldParentPtr("pressure", p)); // safe: the field belongs to this record
         var sink: Pressure = .{ .loop = loop };
         loop.backend.io_uring.complete(cqe, &sink);
     }
