@@ -7,9 +7,10 @@ const Direction = records.Direction;
 
 prev: ?*Waiter = null,
 next: ?*Waiter = null,
-/// The operation's address; 0 for a batch entry. The operation holds this
-/// waiter, so the address is a number here.
-op: usize = 0,
+/// Who holds this waiter: an operation (in its scratch, where the backend
+/// finds the operation again by the waiter's place in it), or a batch
+/// entry.
+owner: Owner = .batch,
 record: u32 = records.none,
 place: Place = .none,
 direction: Direction = .read,
@@ -21,6 +22,8 @@ clock: Clock = .real,
 deadline: i96 = 0,
 
 pub const Place = enum(u2) { none, record, timer, done };
+
+pub const Owner = enum(u1) { batch, operation };
 
 /// The clocks with a kernel timer of their own.
 pub const Clock = enum(u1) { real, boot };

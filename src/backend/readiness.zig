@@ -108,9 +108,8 @@ const Action = enum {
     fired,
 };
 
-/// What `action` does to the operation `w` waits for.
-fn actOn(w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
-    const o: *op.Op = @ptrFromInt(w.op); // safe: `submit` stored this operation's address
+/// What `action` does to `o`, which `w` waits for.
+fn actOn(o: *op.Op, w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
     switch (action) {
         .closed => o.result = closedUnder(o),
         .fired => o.result = .{ .timer = {} },
@@ -152,7 +151,7 @@ pub fn Readiness(comptime Poller: type) type {
             outcome: pending.Outcome = undefined,
 
             fn of(w: *Waiter) *Entry {
-                assert(w.op == 0);
+                assert(w.owner == .batch);
                 return @alignCast(@fieldParentPtr("waiter", w)); // safe: a waiter with no operation is an entry's
             }
         };
@@ -220,10 +219,19 @@ pub fn Readiness(comptime Poller: type) type {
             return &@field(o.state.storage.scratch, Poller.name);
         }
 
+        /// The operation whose scratch holds `w`.
+        fn opOf(w: *Waiter) *op.Op {
+            assert(w.owner == .operation);
+            const scratch: *op.Scratch = @alignCast(@fieldParentPtr(Poller.name, w));
+            const storage: *op.State.Storage = @alignCast(@fieldParentPtr("scratch", scratch));
+            const state: *op.State = @alignCast(@fieldParentPtr("storage", storage));
+            return @alignCast(@fieldParentPtr("state", state));
+        }
+
         /// Starts `o`; true when it completed at once (its result is set).
         pub fn submit(self: *Self, o: *op.Op) SubmitError!bool {
             o.state.storage.scratch = @unionInit(op.Scratch, Poller.name, .{
-                .op = @intFromPtr(o), // safe: read back as this operation by its actions
+                .owner = .operation,
             });
             const w = waiterOf(o);
             switch (o.kind) {
@@ -476,7 +484,7 @@ pub fn Readiness(comptime Poller: type) type {
             const list = &self.records.at(index).waiters[@backingInt(direction)];
             var it = list.head;
             while (it) |w| : (it = w.next) {
-                if (w.op != 0 or Entry.of(w).token != token) continue;
+                if (w.owner == .operation or Entry.of(w).token != token) continue;
                 list.remove(w);
                 Entry.of(w).outcome = .canceled;
                 return self.finish(w);
@@ -507,8 +515,8 @@ pub fn Readiness(comptime Poller: type) type {
             self.woke = false;
             while (self.done.pop()) |w| {
                 w.place = .none;
-                if (w.op != 0) {
-                    sink.complete(@as(*op.Op, @ptrFromInt(w.op))); // safe: `submit` stored this operation's address
+                if (w.owner == .operation) {
+                    sink.complete(opOf(w));
                 } else {
                     const e = Entry.of(w);
                     const token = e.token;
@@ -538,7 +546,7 @@ pub fn Readiness(comptime Poller: type) type {
                         // An operation's result is taken at once; a batch
                         // entry's goes out with the next poll.
                         _ = self.act(w, fd, .attempt_unwaitable, calls.atomic_write);
-                        if (w.op != 0) return true;
+                        if (w.owner == .operation) return true;
                         self.finish(w);
                         return false;
                     },
@@ -578,7 +586,7 @@ pub fn Readiness(comptime Poller: type) type {
 
         fn act(self: *Self, w: *Waiter, fd: posix.fd_t, action: Action, limit: usize) Outcome {
             _ = self;
-            if (w.op != 0) return actOn(w, fd, action, limit);
+            if (w.owner == .operation) return actOn(opOf(w), w, fd, action, limit);
             const e = Entry.of(w);
             switch (action) {
                 .closed => e.outcome = .canceled,
