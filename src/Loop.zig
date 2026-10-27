@@ -77,6 +77,12 @@ pub const UringFeatures = packed struct {
     zero_copy: bool = false,
 };
 
+/// What runs when an operation completes, kept in the record that waits for
+/// it, which `run` finds by `@fieldParentPtr`.
+pub const Completion = struct {
+    run: *const fn (c: *Completion, l: *Loop, o: *Op) void,
+};
+
 /// Caller-owned and pinned from `submit` until its completion is
 /// delivered: the loop never copies or allocates one.
 pub const Op = struct {
@@ -85,7 +91,8 @@ pub const Op = struct {
     // lines.
     /// Runs inside `run`, on the loop's thread. Null: the completion waits
     /// for `reap`.
-    callback: ?*const fn (l: *Loop, o: *Op) void = null,
+    completion: ?*Completion = null,
+    /// The caller's tag for an operation it reaps.
     user_data: usize = 0,
     /// The operation's backend half, which is all a backend sees of it: its
     /// kind, its result (valid once completed, under the field of its
@@ -537,9 +544,9 @@ fn deliverReady(l: *Loop) u32 {
 /// The completion reaches its owner: a callback now, or the reap queue.
 fn deliver(l: *Loop, o: *Op) void {
     l.in_flight -= 1;
-    if (o.callback) |callback| {
+    if (o.completion) |c| {
         o.backend.state.phase = .idle;
-        callback(l, o);
+        c.run(c, l, o);
     } else {
         o.backend.state.phase = .done;
         l.reaped.push(o);

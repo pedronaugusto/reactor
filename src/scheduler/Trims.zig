@@ -18,7 +18,8 @@ const Record = struct {
     keep_from: usize = 0,
 };
 const Bucket = struct {
-    op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .{ .raw = .zero, .clock = .awake } } }, .callback = fired },
+    op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .{ .raw = .zero, .clock = .awake } } } },
+    completion: Loop.Completion = .{ .run = fired },
     loop: ?*Loop = null,
     head: ?*Record = null,
     tail: ?*Record = null,
@@ -32,6 +33,7 @@ const Bucket = struct {
         if (bucket.armed) return;
         const first = bucket.head orelse return;
         bucket.op.backend.kind = .{ .timer = .{ .raw = first.deadline, .clock = .awake } };
+        bucket.op.completion = &bucket.completion;
         bucket.loop.?.submit(&bucket.op) catch return;
         bucket.armed = true;
     }
@@ -106,8 +108,8 @@ fn unlink(record: *Record) void {
     record.queued = false;
 }
 
-fn fired(loop: *Loop, op: *Loop.Op) void {
-    const bucket: *Bucket = @alignCast(@fieldParentPtr("op", op)); // safe: the init-reserved bucket owns this timer
+fn fired(c: *Loop.Completion, loop: *Loop, op: *Loop.Op) void {
+    const bucket: *Bucket = @alignCast(@fieldParentPtr("completion", c)); // safe: the init-reserved bucket owns this timer
     bucket.armed = false;
     op.backend.result.timer catch return;
     const now = loop.clock.now(.awake);

@@ -21,6 +21,7 @@ pub const max = 64;
 pub const Error = error{ Canceled, Timeout, SystemResources } || Loop.Waitable.Error;
 
 const Waiter = struct {
+    completion: Loop.Completion = .{ .run = done },
     hook: Task.Hook = .{ .cancel = cancelHook },
     message: Scheduler.CancelMessage,
     task: *Task,
@@ -53,9 +54,9 @@ const Waiter = struct {
         w.endAll();
     }
 
-    fn done(l: *Loop, o: *Loop.Op) void {
+    fn done(c: *Loop.Completion, l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const w: *Waiter = @ptrFromInt(o.user_data); // safe: `first` stored the waiter's address
+        const w: *Waiter = @alignCast(@fieldParentPtr("completion", c)); // safe: the field belongs to this record
         const index = (@intFromPtr(o) - @intFromPtr(w.ops.ptr)) / @sizeOf(Loop.Op); // safe: `o` is an element of `w.ops`
         w.processor.release(handleOf(o.backend.kind.wait));
         if (o.backend.result.wait) |_| {
@@ -103,7 +104,7 @@ pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.
     // Every completion comes back to this processor, which resumes the task.
     t.pins += 1;
     for (members, w.ops, 0..) |m, *o, i| {
-        o.* = .{ .backend = .{ .kind = .{ .wait = m } }, .callback = Waiter.done, .user_data = @intFromPtr(&w) }; // safe: read back by the callback while this frame waits
+        o.* = .{ .backend = .{ .kind = .{ .wait = m } }, .completion = &w.completion };
         p.hold(handleOf(m));
         p.loop.submit(o) catch {
             p.release(handleOf(m));

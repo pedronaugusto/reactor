@@ -32,8 +32,9 @@ test "later: callback delivery permits reuse and never also enters reap" {
     const Count = struct {
         const Self = @This();
         count: usize = 0,
-        fn done(loop: *Loop, op: *Loop.Op) void {
-            const count: *Self = @ptrFromInt(op.user_data); // safe: this test retains the counter through delivery
+        completion: Loop.Completion = .{ .run = done },
+        fn done(c: *Loop.Completion, loop: *Loop, op: *Loop.Op) void {
+            const count: *Self = @fieldParentPtr("completion", c);
             count.count += 1;
             if (count.count < 8) {
                 op.backend.kind = .{ .timer = .now(testing.io, .awake) };
@@ -48,7 +49,7 @@ test "later: callback delivery permits reuse and never also enters reap" {
     };
     defer loop.deinit(testing.allocator);
     var count: Count = .{};
-    var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } }, .callback = Count.done, .user_data = @intFromPtr(&count) }; // safe: retained through every callback
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } }, .completion = &count.completion };
     try loop.submit(&op);
     while (count.count < 8) _ = try loop.run(.once);
     var reaped: [1]*Loop.Op = undefined;
@@ -484,24 +485,26 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
         guard.join();
     }
     const Counter = struct {
+        count: usize = 0,
+        completion: Loop.Completion = .{ .run = callback },
         fn prepare(_: *anyopaque, sqe: *linux.io_uring_sqe) void {
             sqe.prep_nop();
         }
-        fn callback(_: *Loop, op: *Loop.Op) void {
-            const count: *usize = @ptrFromInt(op.user_data); // safe: retained through the last callback
-            count.* += 1;
+        fn callback(c: *Loop.Completion, _: *Loop, _: *Loop.Op) void {
+            const counter: *@This() = @fieldParentPtr("completion", c);
+            counter.count += 1;
         }
     };
-    var count: usize = 0;
+    var counter: Counter = .{};
     var context: u8 = 0;
     var ops: [128]Loop.Op = undefined;
     for (&ops) |*op| {
-        op.* = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Counter.prepare } } } }, .callback = Counter.callback, .user_data = @intFromPtr(&count) }; // safe: the counter is retained through run
+        op.* = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Counter.prepare } } } }, .completion = &counter.completion };
         try loop.submit(op);
         loop.cancel(op);
-        try testing.expectEqual(@as(usize, 0), count);
+        try testing.expectEqual(@as(usize, 0), counter.count);
     }
-    while (count < ops.len) _ = try loop.run(.once);
+    while (counter.count < ops.len) _ = try loop.run(.once);
     try testing.expectEqual(@as(u32, 0), loop.in_flight);
     try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
 }

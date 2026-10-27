@@ -333,6 +333,7 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
 const Abort = struct {
     errand: Scheduler.Errand = .{ .run = start },
     after: Scheduler.After = .{ .run = send },
+    completion: Loop.Completion = .{ .run = done },
     op: Loop.Op,
     task: ?*Task,
     finished: std.atomic.Value(u32) = .init(0),
@@ -348,13 +349,14 @@ const Abort = struct {
 
     fn start(e: *Scheduler.Errand, p: *Processor) void {
         const a: *Abort = @alignCast(@fieldParentPtr("errand", e)); // safe: the field belongs to this record
-        a.op.callback = done;
+        a.op.completion = &a.completion;
         p.loop.submit(&a.op) catch a.finish();
     }
 
-    fn done(l: *Loop, o: *Loop.Op) void {
+    fn done(c: *Loop.Completion, l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const a: *Abort = @alignCast(@fieldParentPtr("op", o)); // safe: the field belongs to this record
+        _ = o;
+        const a: *Abort = @alignCast(@fieldParentPtr("completion", c)); // safe: the field belongs to this record
         a.finish();
     }
 

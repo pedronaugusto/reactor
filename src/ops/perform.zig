@@ -28,6 +28,7 @@ pub const Options = struct {
 
 const Waiter = struct {
     hook: Task.Hook = .{ .cancel = cancelHook },
+    completion: Loop.Completion = .{ .run = done },
     message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
@@ -48,9 +49,9 @@ const Waiter = struct {
         }
     }
 
-    fn done(l: *Loop, o: *Loop.Op) void {
+    fn done(c: *Loop.Completion, l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const w: *Waiter = @ptrFromInt(o.user_data); // safe: `run` stored the waiter's address
+        const w: *Waiter = @alignCast(@fieldParentPtr("completion", c)); // safe: the field belongs to this record
         if (descriptorOf(o.backend.kind)) |fd| w.processor.release(fd);
         w.scheduler.ready(w.task, .completed);
     }
@@ -71,6 +72,7 @@ const Waiter = struct {
 /// frame.
 pub const Deadline = struct {
     op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = undefined } } },
+    completion: Loop.Completion = .{ .run = callback },
     /// On the processor, when the deadline passes before `disarm`.
     fire: *const fn (d: *Deadline) void,
     scheduler: *Scheduler = undefined,
@@ -87,16 +89,16 @@ pub const Deadline = struct {
         d.processor = p;
         d.task = p.current.?;
         d.op.backend.kind = .{ .timer = at };
-        d.op.callback = callback;
+        d.op.completion = &d.completion;
         p.loop.submit(&d.op) catch return false;
         d.task.pins += 1;
         d.armed = true;
         return true;
     }
 
-    fn callback(l: *Loop, o: *Loop.Op) void {
+    fn callback(c: *Loop.Completion, l: *Loop, o: *Loop.Op) void {
         _ = l;
-        const d: *Deadline = @alignCast(@fieldParentPtr("op", o)); // safe: the field belongs to this record
+        const d: *Deadline = @alignCast(@fieldParentPtr("completion", c)); // safe: the field belongs to this record
         if (d.waiting) {
             d.waiting = false;
             return d.scheduler.ready(d.task, .completed);
@@ -134,8 +136,7 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     t.operation = std.meta.activeTag(o.backend.kind);
     defer t.operation = previous_operation;
     var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .o = o };
-    o.callback = Waiter.done;
-    o.user_data = @intFromPtr(&w); // safe: read back by the callback while this frame waits
+    o.completion = &w.completion;
     if (options.cancelable) try t.enterWait(&w.hook);
     const fd = descriptorOf(o.backend.kind);
     if (fd) |d| p.hold(d);
@@ -190,6 +191,7 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
 const RemoteAccept = struct {
     errand: Scheduler.Errand = .{ .run = submit },
     after: Scheduler.After = .{ .run = publish },
+    completion: Loop.Completion = .{ .run = done },
     hook: Task.Hook = .{ .cancel = cancel },
     message: Scheduler.CancelMessage,
     task: *Task,
@@ -212,8 +214,7 @@ const RemoteAccept = struct {
             return request.scheduler.ready(request.task, .completed);
         }
         const o = request.op;
-        o.callback = done;
-        o.user_data = @intFromPtr(request); // safe: retained until the completion callback
+        o.completion = &request.completion;
         p.hold(o.backend.kind.accept);
         p.loop.submit(o) catch {
             p.release(o.backend.kind.accept);
@@ -223,8 +224,8 @@ const RemoteAccept = struct {
         request.submitted = true;
     }
 
-    fn done(_: *Loop, o: *Loop.Op) void {
-        const request: *RemoteAccept = @ptrFromInt(o.user_data); // safe: submit retained the request
+    fn done(c: *Loop.Completion, _: *Loop, o: *Loop.Op) void {
+        const request: *RemoteAccept = @alignCast(@fieldParentPtr("completion", c)); // safe: the field belongs to this record
         request.processor.release(o.backend.kind.accept);
         request.scheduler.ready(request.task, .completed);
     }
@@ -319,6 +320,8 @@ pub fn runElsewhere(p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ 
 /// deadline's timer; only that processor's thread touches it until `done`.
 const Elsewhere = struct {
     errand: Scheduler.Errand = .{ .run = start },
+    finishing: Loop.Completion = .{ .run = finished },
+    expiring: Loop.Completion = .{ .run = expired },
     op: *Loop.Op,
     deadline: ?Io.Clock.Timestamp,
     timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = undefined } } },
@@ -333,8 +336,7 @@ const Elsewhere = struct {
         const e: *Elsewhere = @alignCast(@fieldParentPtr("errand", errand)); // safe: the field belongs to this record
         e.processor = p;
         const o = e.op;
-        o.callback = finished;
-        o.user_data = @intFromPtr(e); // safe: read back by `finished` while the thread waits
+        o.completion = &e.finishing;
         const fd = descriptorOf(o.backend.kind);
         if (fd) |d| p.hold(d);
         p.loop.submit(o) catch {
@@ -344,7 +346,7 @@ const Elsewhere = struct {
         };
         const at = e.deadline orelse return;
         e.timer.backend.kind = .{ .timer = at };
-        e.timer.callback = expired;
+        e.timer.completion = &e.expiring;
         if (p.loop.submit(&e.timer)) |_| {
             e.left += 1;
         } else |_| {
@@ -354,16 +356,16 @@ const Elsewhere = struct {
         }
     }
 
-    fn finished(l: *Loop, o: *Loop.Op) void {
-        const e: *Elsewhere = @ptrFromInt(o.user_data); // safe: `start` stored it
+    fn finished(c: *Loop.Completion, l: *Loop, o: *Loop.Op) void {
+        const e: *Elsewhere = @alignCast(@fieldParentPtr("finishing", c)); // safe: the field belongs to this record
         if (descriptorOf(o.backend.kind)) |fd| e.processor.release(fd);
         // The timer still armed: its cancel completes it, now or later.
         if (e.left == 2) l.cancel(&e.timer);
         e.settle();
     }
 
-    fn expired(l: *Loop, t: *Loop.Op) void {
-        const e: *Elsewhere = @alignCast(@fieldParentPtr("timer", t)); // safe: the field belongs to this record
+    fn expired(c: *Loop.Completion, l: *Loop, t: *Loop.Op) void {
+        const e: *Elsewhere = @alignCast(@fieldParentPtr("expiring", c)); // safe: the field belongs to this record
         if (t.backend.result.timer) |_| {
             e.timed_out = true;
             l.cancel(e.op);
