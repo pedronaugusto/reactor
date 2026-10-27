@@ -358,9 +358,7 @@ const Reserve = struct {
     /// Set once it no longer touches the entry.
     left: std.atomic.Value(bool) = .init(false),
 
-    fn hold(context: *const anyopaque) void {
-        const pointer: *const *Reserve = @ptrCast(@alignCast(context)); // safe: `grow` copies a pointer to its entry
-        const entry = pointer.*;
+    fn hold(entry: *Reserve) void {
         entry.entered.store(true, .release);
         entry.gate.waitUncancelable(system());
         entry.left.store(true, .release);
@@ -397,8 +395,7 @@ fn grow(threaded: *Io.Threaded, group: *Io.Group, launching: *Launch, target: u3
         // reserve has room for as many as the lane may hold: a free entry
         // is there, or one let go whose job is leaving.
         const entry = launching.vacant() orelse continue;
-        const pointer = entry;
-        io.vtable.groupConcurrent(io.userdata, group, std.mem.asBytes(&pointer), .of(*Reserve), Reserve.hold) catch return false;
+        group.concurrent(io, Reserve.hold, .{entry}) catch return false;
         entry.state = .holding;
         launching.held += 1;
         while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
@@ -509,8 +506,7 @@ fn start(l: *Lanes, job: *Job, running: u16) Start {
     defer launching.deinit(system());
     if (!l.reach(job.lane, launching.value(), threadsFor(running))) return .short;
     l.awaitIdle(job.lane, launching.value());
-    const context: Context = .{ .lanes = l, .job = job };
-    io.vtable.groupConcurrent(io.userdata, &job.group, std.mem.asBytes(&context), .of(Context), runEntry) catch return .refused;
+    job.group.concurrent(io, runEntry, .{ l, job }) catch return .refused;
     return .started;
 }
 
@@ -530,15 +526,11 @@ fn reject(l: *Lanes, first: *Job) void {
     }
 }
 
-const Context = struct { lanes: *Lanes, job: *Job };
-
-fn runEntry(context: *const anyopaque) void {
-    const c: *const Context = @ptrCast(@alignCast(context)); // safe: `start` passed a `Context`
-    const job = c.job;
+fn runEntry(lanes: *Lanes, job: *Job) void {
     job.run(job);
-    const refused = if (job.control) null else c.lanes.next(job.lane);
+    const refused = if (job.control) null else lanes.next(job.lane);
     finish(job);
-    if (refused) |next_job| c.lanes.reject(next_job);
+    if (refused) |next_job| lanes.reject(next_job);
 }
 
 /// A call on `lane` ended: the oldest queued one takes its slot, or the
@@ -586,8 +578,7 @@ pub fn cancel(l: *Lanes, job: *Job) void {
     defer launching.deinit(system());
     // The lane grew for this call's cancel before the call started.
     l.awaitIdle(job.lane, launching.value());
-    const context: Context = .{ .lanes = l, .job = job };
-    io.vtable.groupConcurrent(io.userdata, &job.cancellation, std.mem.asBytes(&context), .of(Context), cancelEntry) catch @panic("reactor: lane executor refused cancellation");
+    job.cancellation.concurrent(io, cancelEntry, .{ l, job }) catch @panic("reactor: lane executor refused cancellation");
 }
 
 /// Under the lane's launch lock: whether an owned lane holds at least
@@ -625,10 +616,9 @@ fn awaitIdle(l: *Lanes, lane: Lane, launching: *Launch) void {
     }
 }
 
-fn cancelEntry(context: *const anyopaque) void {
-    const c: *const Context = @ptrCast(@alignCast(context)); // safe: `cancel` passed a `Context`
-    c.job.group.cancel(c.lanes.executor(c.job.lane));
-    finish(c.job);
+fn cancelEntry(lanes: *Lanes, job: *Job) void {
+    job.group.cancel(lanes.executor(job.lane));
+    finish(job);
 }
 
 pub fn stats(l: *Lanes, lane: Lane) Stats {
