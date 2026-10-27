@@ -15,6 +15,11 @@
 //! after its lending began, so 10 ms at most after the monitor last looked.
 const Monitor = @This();
 
+/// Stalls ever recorded.
+const Stalls = aegis.units.Count(Stall, u64);
+/// Processors' work handed to another thread.
+const Handoffs = aegis.units.Count(Monitor, u64);
+
 const builtin = @import("builtin");
 const std = @import("std");
 const aegis = @import("aegis");
@@ -64,10 +69,10 @@ word: std.atomic.Value(u32) = .init(0),
 /// or a processor waking up wakes it.
 slow: Raised = .{},
 parked: Raised = .{},
-stalls: std.atomic.Value(u64) = .init(0),
+stalls: aegis.Atomic(Stalls) = .init(.fromRaw(0)),
 /// Set by `stop`.
 quit: Raised = .{},
-handoffs: std.atomic.Value(u64) = .init(0),
+handoffs: aegis.Atomic(Handoffs) = .init(.fromRaw(0)),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
 /// The sites a stall was logged for (safe builds log each site once).
@@ -167,7 +172,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) b
             } else {
                 watching = true;
                 if (m.handoff and clocks.since(sample.stage_since, t).compare(m.handoff_after) != .lt) {
-                    if (s.handOff(p, word, owner, stage)) _ = m.handoffs.fetchAdd(1, .monotonic);
+                    if (s.handOff(p, word, owner, stage)) _ = m.handoffs.fetchAddWrapping(.fromRaw(1), .monotonic);
                 }
             }
         }
@@ -197,9 +202,10 @@ fn doubled(delay: clocks.Span) clocks.Span {
 }
 
 fn record(m: *Monitor, stall: Stall) void {
+    // The monitor's thread alone records: a plain step, published.
     const n = m.stalls.load(.monotonic);
-    m.records[n % records_kept] = stall;
-    m.stalls.store(n + 1, .release);
+    m.records[n.raw() % records_kept] = stall;
+    m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // unreachable: no program records 2^64 stalls
     if (builtin.mode != .debug and builtin.mode != .safe) return;
     for (&m.logged) |*site| {
         if (site.* == stall.site) return;

@@ -134,8 +134,8 @@ pub fn stats(r: *Runtime) Stats {
         .steals = r.core.scheduler.shared.steals.load(.monotonic).raw(),
         .forced_yields = r.core.scheduler.shared.forced_yields.load(.monotonic).raw(),
         .lanes = lanes,
-        .handoffs = if (r.core.scheduler.monitor) |m| m.handoffs.load(.monotonic) else 0,
-        .stalls = if (r.core.scheduler.monitor) |m| m.stalls.load(.monotonic) else 0,
+        .handoffs = if (r.core.scheduler.monitor) |m| m.handoffs.load(.monotonic).raw() else 0,
+        .stalls = if (r.core.scheduler.monitor) |m| m.stalls.load(.monotonic).raw() else 0,
     };
 }
 
