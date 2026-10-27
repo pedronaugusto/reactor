@@ -22,6 +22,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const clocks = @import("../clock.zig");
+const Flag = @import("flag.zig").Flag;
 
 /// What the monitor remembers of one processor between samples.
 const Sample = struct {
@@ -56,14 +57,15 @@ report_after: ?clocks.Span,
 handoff: bool,
 thread: ?std.Thread = null,
 /// What the monitor sleeps on: moved to wake it early.
+// aegis: boundary: a futex word: the kernel waits on this u32's address
 word: std.atomic.Value(u32) = .init(0),
 /// Sleeping longer than the shortest interval, or parked: a blocking call
 /// or a processor waking up wakes it.
-slow: std.atomic.Value(bool) = .init(false),
-parked: std.atomic.Value(bool) = .init(false),
+slow: aegis.Atomic(Flag) = .init(.clear),
+parked: aegis.Atomic(Flag) = .init(.clear),
 stalls: std.atomic.Value(u64) = .init(0),
 /// Set by `stop`.
-quit: std.atomic.Value(bool) = .init(false),
+quit: aegis.Atomic(Flag) = .init(.clear),
 handoffs: std.atomic.Value(u64) = .init(0),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
@@ -96,8 +98,8 @@ fn now() clocks.Awake {
 
 /// From a processor: something to watch began while the monitor sleeps long.
 pub fn poke(m: *Monitor) void {
-    if (!m.slow.load(.monotonic)) return;
-    m.slow.store(false, .monotonic);
+    if (m.slow.load(.monotonic) != .set) return;
+    m.slow.store(.clear, .monotonic);
     _ = m.word.fetchAdd(1, .release);
     system().futexWake(u32, &m.word.raw, 1);
 }
@@ -105,7 +107,7 @@ pub fn poke(m: *Monitor) void {
 /// At stop, before any processor's thread may end: the monitor reads their
 /// seats.
 pub fn stop(m: *Monitor) void {
-    m.quit.store(true, .release);
+    m.quit.store(.set, .release);
     _ = m.word.fetchAdd(1, .release);
     system().futexWake(u32, &m.word.raw, 1);
     if (m.thread) |t| t.join();
@@ -117,7 +119,7 @@ pub fn stop(m: *Monitor) void {
 /// `isLent`, `isBlocked`, `handOff` and `allIdle`.
 pub fn run(m: *Monitor, s: anytype) void {
     var delay = shortest;
-    while (!m.quit.load(.acquire)) {
+    while (m.quit.load(.acquire) != .set) {
         const t = now();
         var watching = false;
         for (s.processors, m.samples) |*p, *sample| {
@@ -126,16 +128,16 @@ pub fn run(m: *Monitor, s: anytype) void {
         delay = if (watching) shortest else doubled(delay);
         const seen = m.word.load(.acquire);
         if (!watching and s.allIdle()) {
-            m.parked.store(true, .seq_cst);
-            m.slow.store(true, .monotonic);
+            m.parked.store(.set, .seq_cst);
+            m.slow.store(.set, .monotonic);
             // A processor that leaves its kernel wait after this check
             // sees `parked` and wakes the monitor.
-            if (s.allIdle() and !m.quit.load(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
-            m.parked.store(false, .monotonic);
+            if (s.allIdle() and m.quit.load(.acquire) != .set) system().futexWaitUncancelable(u32, &m.word.raw, seen);
+            m.parked.store(.clear, .monotonic);
             delay = shortest;
             continue;
         }
-        m.slow.store(delay.compare(shortest) == .gt, .monotonic);
+        m.slow.store(.of(delay.compare(shortest) == .gt), .monotonic);
         system().futexWaitTimeout(u32, &m.word.raw, seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
         if (m.word.load(.acquire) != seen) delay = shortest;
     }
@@ -167,7 +169,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) b
             }
         }
     }
-    const passes = p.passes.load(.acquire);
+    const passes = p.passes.load(.acquire).raw();
     // Odd while a task runs.
     if (passes & 1 == 1) {
         if (sample.passes == passes) watching = true;
@@ -178,7 +180,7 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) b
         } else if (!sample.reported) {
             if (m.report_after) |after| if (clocks.since(sample.passes_since, t).compare(after) != .lt) {
                 sample.reported = true;
-                m.record(.{ .site = p.site.load(.monotonic), .processor = p.index, .duration = clocks.since(sample.passes_since, t).toIoDuration() });
+                m.record(.{ .site = p.site.load(.monotonic).raw(), .processor = p.index, .duration = clocks.since(sample.passes_since, t).toIoDuration() });
             };
         }
     } else sample.passes = passes;

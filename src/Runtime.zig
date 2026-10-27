@@ -122,17 +122,17 @@ pub fn stats(r: *Runtime) Stats {
     for (&lanes, 0..) |*l, i| l.* = r.core.lanes.stats(@fromBackingInt(@intCast(i)));
     var overall: usize = 0;
     for (r.core.processors) |*processor| {
-        overall = @max(overall, processor.stack_high_water.load(.monotonic));
+        overall = @max(overall, processor.stack_high_water.load(.monotonic).raw());
     }
     return .{
         .parked_high_water = r.core.scheduler.records.deepest(),
         .stack_high_water = if (r.core.options.measure_stacks) overall else null,
-        .stack_trims = r.core.scheduler.shared.stack_trims.load(.monotonic),
+        .stack_trims = r.core.scheduler.shared.stack_trims.load(.monotonic).raw(),
         .workers = @intCast(r.core.processors.len - 1),
         .tasks = r.core.scheduler.stacks.inUse(),
         .max_tasks = r.core.options.max_tasks,
-        .steals = r.core.scheduler.shared.steals.load(.monotonic),
-        .forced_yields = r.core.scheduler.shared.forced_yields.load(.monotonic),
+        .steals = r.core.scheduler.shared.steals.load(.monotonic).raw(),
+        .forced_yields = r.core.scheduler.shared.forced_yields.load(.monotonic).raw(),
         .lanes = lanes,
         .handoffs = if (r.core.scheduler.monitor) |m| m.handoffs.load(.monotonic) else 0,
         .stalls = if (r.core.scheduler.monitor) |m| m.stalls.load(.monotonic) else 0,

@@ -10,6 +10,7 @@ const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Flag = @import("flag.zig").Flag;
 
 /// Threads without a processor, for a scheduler whose processors are `Item`s.
 pub fn Of(comptime Item: type) type {
@@ -33,6 +34,7 @@ pub fn Of(comptime Item: type) type {
         /// The most spares that may be started.
         cap: u32,
         /// Moves on every post and at stop: what waiting threads wait on.
+        // aegis: boundary: a futex word: the kernel waits on this u32's address
         signal: std.atomic.Value(u32) = .init(0),
 
         pub fn init(gpa: Allocator, processors: usize, cap: u16) Allocator.Error!Spares {
@@ -98,7 +100,7 @@ pub fn Of(comptime Item: type) type {
 
         /// A processor for the calling thread, or null once `stopping` is set.
         /// `fresh`: the thread was just started as a spare.
-        pub fn wait(sp: *Spares, stopping: *const std.atomic.Value(bool), fresh: bool) ?*Item {
+        pub fn wait(sp: *Spares, stopping: *const aegis.Atomic(Flag), fresh: bool) ?*Item {
             var held = sp.state.acquireUncancelable(system());
             const state = held.value();
             if (fresh) state.starting -= 1;
@@ -110,7 +112,7 @@ pub fn Of(comptime Item: type) type {
                     held.deinit(system());
                     return p;
                 } else |_| {}
-                if (stopping.load(.acquire)) {
+                if (stopping.load(.acquire) == .set) {
                     state.idle -= 1;
                     held.deinit(system());
                     return null;

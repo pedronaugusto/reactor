@@ -148,6 +148,7 @@ pub const Awaiter = struct {
     /// the group's `state` gives up to the awaiter.
     members: ?*Task = null,
     /// Set to 1 when the future finishes, for a waiting thread.
+    // aegis: boundary: a futex word: the kernel waits on this u32's address
     done: std.atomic.Value(u32) = .init(0),
 };
 

@@ -154,10 +154,10 @@ fn memberDone(t: *Task) void {
     // Counted from before it leaves the group until its stack is back, so an
     // awaiter that finds the group empty can wait for the stacks without
     // every member holding the group's lock for the release.
-    p.retiring.store(p.retiring.load(.monotonic) +% 1, .release);
+    p.retiring.store(p.retiring.load(.monotonic).add(.fromRaw(1)) catch unreachable, .release); // unreachable: fewer tasks than a u32 counts
     const a = t.leaveGroup();
     s.release(t);
-    p.retiring.store(p.retiring.load(.monotonic) -% 1, .release);
+    p.retiring.store(p.retiring.load(.monotonic).sub(.fromRaw(1)) catch unreachable, .release); // unreachable: it counted this member
     if (a) |awaiter| wakeAwaiter(s, awaiter); // safe: an awaiter waits until woken, and its record with it
 }
 

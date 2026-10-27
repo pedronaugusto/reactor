@@ -285,7 +285,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     // handed to the home processor from here on wakes the loop, and work
     // handed to it before this was set makes the handle ready now.
     const p = Scheduler.processorOf(&c.root).?;
-    p.remote.away.store(true, .seq_cst);
+    p.remote.away.store(.set, .seq_cst);
     if (p.hasWork()) p.loop.wake();
 }
 
@@ -297,7 +297,7 @@ pub fn stop(c: *Core) void {
     assert(c.scheduler.stacks.inUse() == 0);
     // The monitor first: it reads the seats of the threads that end next.
     if (c.scheduler.monitor) |m| m.stop();
-    c.scheduler.stopping.store(true, .release);
+    c.scheduler.stopping.store(.set, .release);
     c.scheduler.wakeAll();
     // Spares, and workers waiting as spares, see the stop.
     if (c.scheduler.monitor != null) c.scheduler.spares.stop();
