@@ -30,6 +30,8 @@ pub const Error = net.IpAddress.ListenError;
 pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!net.Server {
     const plain: net.IpAddress.ListenOptions = .{ .kernel_backlog = options.kernel_backlog, .reuse_address = options.reuse_address, .mode = options.mode, .protocol = options.protocol };
     if (!options.socket.any()) return address.listen(io, plain);
+    // A listener's send buffer would be dropped, unsaid (see the flag).
+    if (options_file.send_buffer_when_connected and options.socket.send_buffer != null) return error.OptionUnsupported;
     try io.checkCancel();
     const family = Io.Threaded.posixAddressFamily(address);
     const handle = if (builtin.os.tag == .windows) try afd.open(family, options.mode, options.protocol) else try sys_socket.open(family, options.mode, options.protocol, .blocking);
@@ -37,7 +39,7 @@ pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!net
     if (options.reuse_address) try options_file.reuse(handle);
     try options_file.apply(handle, address.*, options.socket);
     const bound = if (builtin.os.tag == .windows) bound: {
-        const at = try afd.bind(handle, address, .Passive);
+        const at = try afd.bind(handle, address, .of(address, options.reuse_address));
         try afd.listen(handle, options.kernel_backlog);
         break :bound at;
     } else try sys_socket.bindListen(handle, address, options.kernel_backlog);

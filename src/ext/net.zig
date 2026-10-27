@@ -20,6 +20,7 @@ pub const KeepaliveSeconds = options_file.KeepaliveSeconds;
 pub const KeepaliveCount = options_file.KeepaliveCount;
 pub const OptionsError = options_file.Error;
 pub const setOptions = options_file.setOptions;
+pub const send_buffer_when_connected = options_file.send_buffer_when_connected;
 
 pub const ListenOptions = listen_file.Options;
 pub const ListenError = listen_file.Error;

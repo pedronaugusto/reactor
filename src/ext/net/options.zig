@@ -10,6 +10,7 @@
 //! A refused option is returned, named, never passed over. The kernel's own
 //! adjustments stand: Linux doubles a buffer size and caps it at
 //! `net.core.wmem_max` or `rmem_max`.
+const builtin = @import("builtin");
 const std = @import("std");
 const aegis = @import("aegis");
 const sys = @import("../../sys/options.zig");
@@ -41,6 +42,14 @@ pub const Keepalive = union(enum) {
     };
 };
 
+/// Windows keeps a send buffer only on a connected socket: AFD takes one
+/// asked of a socket not yet connected, or of a listener, and goes on with
+/// its default, and an accepted socket inherits none. There a connect sets
+/// it once connected, and a listen asking for it is `OptionUnsupported`
+/// (`setOptions` gives an accepted socket its own). Winsock applies
+/// `SO_SNDBUF` once connected too.
+pub const send_buffer_when_connected = builtin.os.tag == .windows;
+
 /// The options to set; a null field leaves the system's setting.
 pub const Options = struct {
     /// Turn Nagle's algorithm off (true) or on (false).
@@ -57,9 +66,24 @@ pub const Options = struct {
 
     /// Whether an option is asked for that must be set before the connect
     /// or the listen: the buffers, which fix the window scale, and the
-    /// traffic class, which the first segment carries.
+    /// traffic class, which the first segment carries. Not Windows' send
+    /// buffer (`send_buffer_when_connected`).
     pub fn beforeConnect(o: Options) bool {
-        return o.send_buffer != null or o.receive_buffer != null or o.traffic_class != null;
+        return (o.send_buffer != null and !send_buffer_when_connected) or o.receive_buffer != null or o.traffic_class != null;
+    }
+
+    /// What is set on a socket before it connects or listens: all of it
+    /// but, on Windows, the send buffer.
+    pub fn unconnected(o: Options) Options {
+        var before = o;
+        if (send_buffer_when_connected) before.send_buffer = null;
+        return before;
+    }
+
+    /// What is left to set once the socket is connected: on Windows the
+    /// send buffer, elsewhere nothing.
+    pub fn connected(o: Options) Options {
+        return if (send_buffer_when_connected) .{ .send_buffer = o.send_buffer } else .{};
     }
 
     /// Whether any option is asked for.
