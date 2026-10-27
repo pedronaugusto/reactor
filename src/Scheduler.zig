@@ -408,7 +408,7 @@ pub const Processor = struct {
     pub fn pushCancel(p: *Processor, m: *CancelMessage) void {
         if (m.queued) return;
         m.queued = true;
-        _ = m.task.cancel_messages.fetchAdd(1, .release);
+        _ = m.task.cancel_messages.fetchAddWrapping(.fromRaw(1), .release);
         _ = p.remote.cancels.push(m);
         p.wakeIfIdle();
     }
@@ -429,7 +429,7 @@ pub const Processor = struct {
             // cancels its operation in this loop.
             if (t.wait) |hook| hook.cancel(hook, t);
             t.unlock();
-            _ = t.cancel_messages.fetchSub(1, .release);
+            _ = t.cancel_messages.fetchSubWrapping(.fromRaw(1), .release);
         }
         return any;
     }
@@ -1034,9 +1034,9 @@ pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
 /// when this is that thread; this task gives its processor the turn meanwhile.
 pub fn leaveWait(t: *Task) void {
     t.leaveWait();
-    while (t.cancel_messages.load(.acquire) != 0) {
+    while (!t.cancel_messages.load(.acquire).eql(.fromRaw(0))) {
         if (heldNow()) |p| _ = p.serveCancels();
-        if (t.cancel_messages.load(.acquire) == 0) return;
+        if (t.cancel_messages.load(.acquire).eql(.fromRaw(0))) return;
         std.atomic.spinLoopHint();
         if (current() != null) yield();
     }
