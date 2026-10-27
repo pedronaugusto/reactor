@@ -20,13 +20,26 @@ pub const Span = aegis.units.Duration(.nanosecond, u64);
 /// starts at zero and ends 584 years on: a negative stamp is the start and
 /// one beyond the end is the end, which no wait reaches.
 pub fn awakeOf(t: Io.Timestamp) Awake {
-    return .fromRaw(@intCast(std.math.clamp(t.nanoseconds, 0, std.math.maxInt(u64)))); // safe: clamped into u64 above
+    return Awake.fromTimestamp(t, .exact) catch if (t.compare(.lt, .zero)) .fromRaw(0) else .fromRaw(std.math.maxInt(u64));
 }
 
 /// A span from std's duration, on the same terms: negative is zero and
 /// beyond the end is the end.
 pub fn spanOf(d: Io.Duration) Span {
-    return .fromRaw(@intCast(std.math.clamp(d.nanoseconds, 0, std.math.maxInt(u64)))); // safe: clamped into u64 above
+    return Span.fromIoDuration(d, .exact) catch if (Signed.fromIoDuration(d, .exact).compare(.fromRaw(0)) == .lt) .fromRaw(0) else .fromRaw(std.math.maxInt(u64));
+}
+
+/// A length of time either way, as std's durations are: what `spanOf` reads
+/// the sign of.
+pub const Signed = aegis.units.Duration(.nanosecond, i96);
+
+/// `then`, read on some clock whose time is `now`, as a point of the awake
+/// timeline whose time is `awake_now`: as far ahead of `awake_now` as it is
+/// of `now`, clamped at the ends of each.
+pub fn carried(then: Io.Timestamp, now: Io.Timestamp, awake_now: Io.Timestamp) Awake {
+    const Point = aegis.units.Instant(.any, .nanosecond, i96);
+    const ahead = Point.fromTimestamp(now, .exact).saturatingDurationTo(Point.fromTimestamp(then, .exact));
+    return awakeOf(Point.fromTimestamp(awake_now, .exact).saturatingAdd(ahead).toTimestamp());
 }
 
 /// How long ago `then` was at `now`: nothing when the clock stepped back.
@@ -55,8 +68,12 @@ pub fn awakeAt(tick: Tick) Awake {
 pub const Parts = struct { sec: u64, nsec: u32 };
 
 pub fn parts(span: Span) Parts {
-    const ns = span.raw(); // c-os-boundary: the timespec of a kernel call
-    return .{ .sec = ns / std.time.ns_per_s, .nsec = @intCast(ns % std.time.ns_per_s) }; // safe: a remainder below a second
+    const seconds = span.convert(.second, u64, .down);
+    // Whole seconds back in nanoseconds are no more than the span, and what
+    // is left of it is below a second.
+    const whole = seconds.convert(.nanosecond, u64, .exact) catch unreachable;
+    const rest = span.saturatingSub(whole).convert(.nanosecond, u32, .exact) catch unreachable;
+    return .{ .sec = seconds.raw(), .nsec = rest.raw() };
 }
 
 pub const Source = union(enum) {
@@ -116,7 +133,10 @@ pub const Virtual = struct {
     }
 
     /// Moves `real` by `by` without moving the timeline.
-    pub fn jump(v: *Virtual, by: Io.Duration) void {
-        _ = v.real_offset.fetchAdd(@intCast(by.nanoseconds), .acq_rel);
+    pub fn jump(v: *Virtual, by: Offset) void {
+        _ = v.real_offset.fetchAdd(by.raw(), .acq_rel);
     }
+
+    /// How far `jump` moves `real`, either way.
+    pub const Offset = aegis.units.Duration(.nanosecond, i64);
 };

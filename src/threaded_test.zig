@@ -6,7 +6,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
-const Io = std.Io;
 const Ast = std.zig.Ast;
 
 const slots = @import("runtime/slots.zig");

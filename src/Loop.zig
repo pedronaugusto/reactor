@@ -494,9 +494,7 @@ fn writeTotal(data: []const []const u8, splat: usize) usize {
 /// A timestamp on any clock as a point on the loop's awake timeline.
 fn awakeAt(l: *const Loop, t: Io.Clock.Timestamp) clocks.Awake {
     if (t.clock == .awake) return clocks.awakeOf(t.raw);
-    // Another clock's deadline is as far ahead on the awake timeline as it is on its own.
-    const ahead = t.raw.nanoseconds -| l.clock.now(t.clock).nanoseconds;
-    return clocks.awakeOf(.{ .nanoseconds = l.clock.now(.awake).nanoseconds +| ahead });
+    return clocks.carried(t.raw, l.clock.now(t.clock), l.clock.now(.awake));
 }
 
 /// The wheel tick a timer for `t` fires at, never earlier than `t`.

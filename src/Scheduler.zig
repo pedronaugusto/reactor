@@ -177,7 +177,8 @@ pub const Processor = struct {
         line: [0]u8 align(std.atomic.cache_line) = .{},
 
         comptime {
-            assert(@alignOf(Remote) == std.atomic.cache_line and @sizeOf(Remote) % std.atomic.cache_line == 0);
+            assert(@alignOf(Remote) == std.atomic.cache_line);
+            assert(@sizeOf(Remote) % std.atomic.cache_line == 0);
         }
     };
 
@@ -768,7 +769,8 @@ const Shared = struct {
     line: [0]u8 align(std.atomic.cache_line) = .{},
 
     comptime {
-        assert(@alignOf(Shared) == std.atomic.cache_line and @sizeOf(Shared) % std.atomic.cache_line == 0);
+        assert(@alignOf(Shared) == std.atomic.cache_line);
+        assert(@sizeOf(Shared) % std.atomic.cache_line == 0);
     }
 };
 

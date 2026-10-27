@@ -102,8 +102,7 @@ pub const Config = struct {
 
 /// `value` taken into `R`'s range, as resolv.conf's options are read.
 fn clamped(comptime R: type, value: R.Representation) R {
-    // unreachable: clamped into the range
-    return R.init(std.math.clamp(value, R.minimum, R.maximum)) catch unreachable;
+    return R.init(value) catch if (value < R.minimum) .literal(R.minimum) else .literal(R.maximum);
 }
 
 pub fn lookup(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress) Error!usize {
