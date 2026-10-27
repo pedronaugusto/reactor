@@ -93,7 +93,7 @@ pub inline fn parked(records: *Records, task: *Task, processor: u16, bytes: usiz
 pub inline fn release(records: *Records, task: *Task) void {
     const record = &records.items[task.stack.?.raw()];
     const summary: Summary = record.summary.load(.monotonic).summary();
-    if (summary.high_water > records.retained.load(.monotonic).raw()) records.retain(summary.high_water);
+    if (aegis.units.Bytes(usize).fromRaw(summary.high_water).compare(records.retained.load(.monotonic)) == .gt) records.retain(summary.high_water);
     record.summary.store(.of(Summary{}), .monotonic);
 }
 

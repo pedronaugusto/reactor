@@ -204,6 +204,7 @@ fn doubled(delay: clocks.Span) clocks.Span {
 fn record(m: *Monitor, stall: Stall) void {
     // The monitor's thread alone records: a plain step, published.
     const n = m.stalls.load(.monotonic);
+    // aegis: no-danger: a ring of the last stalls: only the count's remainder picks the slot to overwrite
     m.records[n.raw() % records_kept] = stall;
     m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // unreachable: no program records 2^64 stalls
     if (builtin.mode != .debug and builtin.mode != .safe) return;
