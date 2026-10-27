@@ -13,6 +13,7 @@ const Driver = @import("testing/Driver.zig");
 const perform = @import("ops/perform.zig");
 const stacks_ = @import("scheduler/stacks.zig");
 const pending = @import("backend/pending.zig");
+const UringRequest = @import("backend/op.zig").UringRequest;
 const backend_op = @import("backend/op.zig");
 const UringState = backend_op.UringState;
 
@@ -239,12 +240,12 @@ test "later: explicitly requested SQPOLL stays enabled and wakes after idle" {
     try testing.expect(loop.backend.io_uring.ring.flags & linux.IORING_SETUP_SQPOLL != 0);
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     const Request = struct {
-        fn prepare(_: *anyopaque, sqe: *linux.io_uring_sqe) void {
+        fn prepare(_: *UringRequest, sqe: *linux.io_uring_sqe) void {
             sqe.prep_nop();
         }
     };
-    var context: u8 = 0;
-    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Request.prepare } } } } };
+    var nop: UringRequest = .{ .prepare = Request.prepare };
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = &nop } } } };
     try loop.submit(&op);
     var reaped: [1]*Loop.Op = undefined;
     while (loop.reap(&reaped).len == 0) _ = try loop.run(.once);
@@ -487,7 +488,7 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
     const Counter = struct {
         count: usize = 0,
         completion: Loop.Completion = .{ .run = callback },
-        fn prepare(_: *anyopaque, sqe: *linux.io_uring_sqe) void {
+        fn prepare(_: *UringRequest, sqe: *linux.io_uring_sqe) void {
             sqe.prep_nop();
         }
         fn callback(c: *Loop.Completion, _: *Loop, _: *Loop.Op) void {
@@ -496,10 +497,10 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
         }
     };
     var counter: Counter = .{};
-    var context: u8 = 0;
+    var nop: UringRequest = .{ .prepare = Counter.prepare };
     var ops: [128]Loop.Op = undefined;
     for (&ops) |*op| {
-        op.* = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &context, .prepare = Counter.prepare } } } }, .completion = &counter.completion };
+        op.* = .{ .backend = .{ .kind = .{ .raw = .{ .uring = &nop } } }, .completion = &counter.completion };
         try loop.submit(op);
         loop.cancel(op);
         try testing.expectEqual(@as(usize, 0), counter.count);

@@ -171,13 +171,23 @@ pub const has_kqueue = switch (builtin.os.tag) {
 };
 
 /// Backend escapes preserve the ordinary operation's cancellation lifetime.
+/// Each is a node the caller keeps in its own request, which its function
+/// finds again from the node (`@fieldParentPtr`).
 pub const Raw = union(enum) {
-    uring: struct { context: *anyopaque, prepare: *const fn (*anyopaque, *std.os.linux.io_uring_sqe) void },
-    windows: struct {
-        handle: std.os.windows.HANDLE,
-        context: *anyopaque,
-        start: *const fn (*anyopaque, *std.os.windows.IO_STATUS_BLOCK, *anyopaque) std.os.windows.NTSTATUS,
-    },
+    uring: *UringRequest,
+    windows: *WindowsRequest,
+};
+
+/// A request a caller writes into an io_uring submission entry itself.
+pub const UringRequest = struct {
+    prepare: *const fn (*UringRequest, *std.os.linux.io_uring_sqe) void,
+};
+
+/// An NT overlapped call a caller makes itself on `handle`, its status
+/// block and APC context the backend's.
+pub const WindowsRequest = struct {
+    handle: std.os.windows.HANDLE,
+    start: *const fn (*WindowsRequest, *std.os.windows.IO_STATUS_BLOCK, *anyopaque) std.os.windows.NTSTATUS,
 };
 pub const RawResult = union(enum) { uring: i32, windows: std.os.windows.IO_STATUS_BLOCK };
 

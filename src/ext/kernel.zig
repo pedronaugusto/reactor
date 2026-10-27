@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const Loop = @import("../Loop.zig");
+const backend = @import("../backend.zig");
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("../ops/perform.zig");
 const native = @import("native.zig");
@@ -24,16 +25,18 @@ pub fn submit(io: Io, comptime prepare: anytype, context: anytype, timeout: Io.T
     const entered = native.enter();
     defer native.leave(entered);
     if (!native.taskRuntime(core) or core.backendKind() != .io_uring) return error.Unsupported;
-    var prepared = std.mem.zeroInit(std.os.linux.io_uring_sqe, .{});
-    prepare(context, &prepared);
-    if (!singleCompletion(prepared)) return error.Unsupported;
-    const Thunk = struct {
-        fn prep(raw: *anyopaque, sqe: *std.os.linux.io_uring_sqe) void {
-            const c: *const std.os.linux.io_uring_sqe = @ptrCast(@alignCast(raw)); // safe: submit passed its prepared SQE
-            sqe.* = c.*;
+    const Prepared = struct {
+        raw: backend.op.UringRequest = .{ .prepare = copy },
+        sqe: std.os.linux.io_uring_sqe = std.mem.zeroInit(std.os.linux.io_uring_sqe, .{}),
+        fn copy(raw: *backend.op.UringRequest, sqe: *std.os.linux.io_uring_sqe) void {
+            const prepared: *@This() = @fieldParentPtr("raw", raw);
+            sqe.* = prepared.sqe;
         }
     };
-    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &prepared, .prepare = Thunk.prep } } } } };
+    var prepared: Prepared = .{};
+    prepare(context, &prepared.sqe);
+    if (!singleCompletion(prepared.sqe)) return error.Unsupported;
+    var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = &prepared.raw } } } };
     try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
     return (try op.backend.result.raw).uring;
 }
@@ -68,15 +71,17 @@ pub fn overlapped(io: Io, comptime start: anytype, handle: windows.HANDLE, conte
         const entered = native.enter();
         defer native.leave(entered);
         if (native.taskRuntime(core) and core.backendKind() == .iocp) {
-            const Thunk = struct {
-                fn begin(raw: *anyopaque, iosb: *windows.IO_STATUS_BLOCK, completion: *anyopaque) windows.NTSTATUS {
-                    const c: *const @TypeOf(context) = @ptrCast(@alignCast(raw)); // safe: overlapped passed the context's address
-                    return start(c.*, iosb, Completion{ .event = null, .context = completion });
+            const Call = struct {
+                raw: backend.op.WindowsRequest,
+                context: @TypeOf(context),
+                fn begin(raw: *backend.op.WindowsRequest, iosb: *windows.IO_STATUS_BLOCK, completion: *anyopaque) windows.NTSTATUS {
+                    const call: *@This() = @fieldParentPtr("raw", raw);
+                    return start(call.context, iosb, Completion{ .event = null, .context = completion });
                 }
             };
-            // The context parameter (a pointer value included) stays in this frame until the call ends;
-            // the kernel's start reads it through its address, never writes it.
-            var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .windows = .{ .handle = handle, .context = @ptrCast(@constCast(&context)), .start = Thunk.begin } } } } }; // safe: Thunk.begin reads this parameter back, const, with its original type
+            // The call stays in this frame until it ends.
+            var call: Call = .{ .raw = .{ .handle = handle, .start = Call.begin }, .context = context };
+            var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .windows = &call.raw } } } };
             try perform.run(&core.scheduler, &op, .{ .deadline = perform.deadline(Scheduler.processor().?, timeout) });
             return (try op.backend.result.raw).windows;
         }

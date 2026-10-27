@@ -447,7 +447,7 @@ fn queue(u: *Uring, o: *op.Op) error{SystemResources}!void {
         .raw => |raw| switch (raw) {
             .uring => |request| {
                 const sqe = u.entry();
-                request.prepare(request.context, sqe);
+                request.prepare(request, sqe);
                 sqe.user_data = ud;
             },
             .windows => unreachable, // unreachable: only uring requests reach Linux

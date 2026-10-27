@@ -6,6 +6,7 @@ const Io = std.Io;
 const linux = std.os.linux;
 const Core = @import("Core.zig");
 const Loop = @import("../Loop.zig");
+const UringRequest = @import("../backend/op.zig").UringRequest;
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("../ops/perform.zig");
 
@@ -32,14 +33,17 @@ pub fn call(comptime name: []const u8, core: *Core, args: anytype) ?Return(name)
 
 const RequestError = error{ Canceled, SystemResources };
 fn request(core: *Core, prepared: *linux.io_uring_sqe) RequestError!linux.io_uring_cqe {
-    const Prep = struct {
-        fn copy(raw: *anyopaque, sqe: *linux.io_uring_sqe) void {
-            const from: *const linux.io_uring_sqe = @ptrCast(@alignCast(raw)); // safe: this request retains prepared
-            sqe.* = from.*;
+    const Prepared = struct {
+        raw: UringRequest = .{ .prepare = copy },
+        from: *const linux.io_uring_sqe,
+        fn copy(raw: *UringRequest, sqe: *linux.io_uring_sqe) void {
+            const self: *@This() = @fieldParentPtr("raw", raw);
+            sqe.* = self.from.*;
         }
     };
+    var held: Prepared = .{ .from = prepared };
     while (true) {
-        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = prepared, .prepare = Prep.copy } } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = &held.raw } } } };
         perform.run(&core.scheduler, &op, .{}) catch |err| return switch (err) {
             error.Timeout => unreachable,
             error.Canceled => error.Canceled,

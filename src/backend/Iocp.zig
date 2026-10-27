@@ -188,7 +188,7 @@ pub fn submit(b: *Iocp, o: *op.Op) error{ SystemResources, Unexpected }!bool {
             .windows => |request| {
                 if (!b.bindHandle(request.handle)) return b.refuse(o);
                 s.target = request.handle;
-                return b.settle(o, request.start(request.context, &s.status.iosb, context));
+                return b.settle(o, request.start(request, &s.status.iosb, context));
             },
         },
         .io => |*operation| return b.submitIo(o, operation, context),

@@ -11,6 +11,7 @@ const Scheduler = @import("../Scheduler.zig");
 const lane_call = @import("../ops/lane_call.zig");
 const readiness = @import("../ops/readiness.zig");
 const Loop = @import("../Loop.zig");
+const backend = @import("../backend.zig");
 const perform = @import("../ops/perform.zig");
 const process = @import("../sys/process.zig");
 
@@ -28,15 +29,16 @@ pub fn childWait(userdata: ?*anyopaque, child: *Child) Child.WaitError!Child.Ter
         const linux = std.os.linux;
         const Request = struct {
             const Self = @This();
+            raw: backend.op.UringRequest = .{ .prepare = prepare },
             pid: linux.pid_t,
             info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t),
-            fn prepare(context: *anyopaque, sqe: *linux.io_uring_sqe) void {
-                const request: *Self = @ptrCast(@alignCast(context)); // safe: childWait retains request through completion
+            fn prepare(raw: *backend.op.UringRequest, sqe: *linux.io_uring_sqe) void {
+                const request: *Self = @fieldParentPtr("raw", raw);
                 sqe.prep_waitid(.PID, request.pid, &request.info, linux.W.EXITED | linux.W.NOWAIT, 0);
             }
         };
         var request: Request = .{ .pid = child.id.? };
-        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = .{ .context = &request, .prepare = Request.prepare } } } } };
+        var op: Loop.Op = .{ .backend = .{ .kind = .{ .raw = .{ .uring = &request.raw } } } };
         perform.run(&r.scheduler, &op, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return onLane(r, child),
