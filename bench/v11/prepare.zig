@@ -1,6 +1,7 @@
 //! Adapt an owned copy of an immutable published suite. Replacements operate
 //! on Zig tokens, never strings/comments; only selection of the test Io changes.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 pub fn main(init: std.process.Init) !void {
@@ -26,11 +27,11 @@ pub fn main(init: std.process.Init) !void {
     var sites: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        const bytes = try sources.readFileAlloc(io, entry.path, gpa, .limited(8 << 20));
+        const bytes = try aegis.own.readFile(io, sources, entry.path, gpa, .literal("8MiB"));
         const adapted = try replaceIo(gpa, bytes, &sites);
         try sources.writeFile(io, .{ .sub_path = entry.path, .data = adapted });
     }
-    const original_build = try dir.readFileAlloc(io, "build.zig", gpa, .limited(1 << 20));
+    const original_build = try aegis.own.readFile(io, dir, "build.zig", gpa, .literal("1MiB"));
     const build = try compileSources(gpa, try planning(gpa, original_build));
     const call = "    v11(b, tests, target, optimize);\n";
     const at = if (std.mem.find(u8, build, "    return needed;")) |pos| pos else try buildEnd(gpa, build);
