@@ -7,6 +7,8 @@
 //! `NamedPipeUnsupported`.
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
+const clock = @import("../../clock.zig");
 const Io = std.Io;
 const windows = std.os.windows;
 
@@ -22,6 +24,13 @@ pub const max_path = 268;
 
 /// How long a connect waits before it tries a busy pipe again: every
 /// instance was taken, and a free one is made when the server accepts.
+/// A pipe instance the listener holds until a client takes it.
+const OwnedFile = aegis.own.OwnedIo(Io.File, closeFile);
+
+fn closeFile(file: *Io.File, io: Io) void {
+    file.close(io);
+}
+
 const busy_retry: Io.Duration = .fromMilliseconds(10);
 
 pub const ConnectOptions = struct {
@@ -47,10 +56,12 @@ pub const ConnectError = Io.Cancelable || error{
 /// A client's end of the pipe at `path`, `\\.\pipe\<name>`: an `Io.File`
 /// opened for overlapped reads and writes, the caller's to close. A busy
 /// pipe is tried again until `options.timeout`.
+// aegis: boundary: a connection is handed back as std's connects hand theirs, a handle by value the caller closes
 pub fn connectPipe(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
     return if (supported) connectWindows(io, path, options) else error.NamedPipeUnsupported;
 }
 
+// aegis: boundary: `connectPipe`'s connection, handed back as it hands it
 fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
     var buffer: [max_path:0]u16 = undefined;
     const name = try pipeName(path, &buffer);
@@ -63,9 +74,9 @@ fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectErro
             pipe_windows.error_pipe_busy => {
                 var wait = busy_retry;
                 if (deadline) |d| {
-                    const left = Io.Clock.Timestamp.now(io, d.clock).durationTo(d);
-                    if (left.raw.nanoseconds <= 0) return error.Timeout;
-                    wait = .fromNanoseconds(@min(wait.nanoseconds, left.raw.nanoseconds));
+                    const left = clock.spanOf(Io.Clock.Timestamp.now(io, d.clock).durationTo(d).raw);
+                    if (left.eql(.fromRaw(0))) return error.Timeout;
+                    if (left.compare(clock.spanOf(busy_retry)) == .lt) wait = left.toIoDuration();
                 }
                 try io.sleep(wait, .awake);
             },
@@ -124,27 +135,32 @@ pub const PipeListener = struct {
     buffer_size: u32,
     /// The instance the next client connects to; null when making it
     /// failed after the last accept, and the next accept makes it.
-    next: ?Io.File,
+    next: ?OwnedFile,
 
     /// The next client: its instance, connected, an `Io.File` the caller
     /// closes. A canceled accept leaves the instance waiting for the next.
+    // aegis: boundary: an accepted connection is handed back as std's accepts hand theirs, a handle by value the caller closes
     pub fn accept(l: *PipeListener, io: Io) AcceptError!Io.File {
         if (supported) return l.acceptWindows(io) else unreachable; // unreachable: a listener is made on Windows alone
     }
 
+    // aegis: boundary: `accept`'s connection, handed back as it hands it
     fn acceptWindows(l: *PipeListener, io: Io) AcceptError!Io.File {
-        const waiting = l.next orelse l.instance(false) catch |err| return switch (err) {
+        if (l.next == null) l.next = l.instance(false) catch |err| return switch (err) {
             error.SystemResources => error.SystemResources,
             else => error.Unexpected,
         };
-        l.next = waiting;
-        const result = try io.operate(.{ .device_io_control = .{ .file = waiting, .code = pipe_windows.fsctl_pipe_listen } });
+        const owned = &l.next.?;
+        const result = try io.operate(.{ .device_io_control = .{ .file = owned.borrow().*, .code = pipe_windows.fsctl_pipe_listen } });
         switch (result.device_io_control.u.Status) {
             // A client came during the wait, or before it.
             .SUCCESS, .PIPE_CONNECTED => {},
             .INSUFFICIENT_RESOURCES, .NO_MEMORY => return error.SystemResources,
             else => return error.Unexpected,
         }
+        // The connected instance is the caller's from here.
+        var waiting: Io.File = undefined;
+        owned.take(&waiting);
         // The next client's instance; one not made now is made by the
         // next accept, and this client is served regardless.
         l.next = l.instance(false) catch null;
@@ -152,14 +168,14 @@ pub const PipeListener = struct {
     }
 
     pub fn deinit(l: *PipeListener, io: Io) void {
-        if (l.next) |file| file.close(io);
+        if (l.next) |*file| file.deinit(io);
         if (supported) if (l.descriptor) |d| {
             _ = pipe_windows.LocalFree(d);
         };
         l.* = undefined;
     }
 
-    fn instance(l: *PipeListener, first: bool) ListenError!Io.File {
+    fn instance(l: *PipeListener, first: bool) ListenError!OwnedFile {
         var attributes: windows.SECURITY_ATTRIBUTES = .{
             .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
             .lpSecurityDescriptor = l.descriptor,
@@ -169,7 +185,7 @@ pub const PipeListener = struct {
             (if (first) pipe_windows.file_flag_first_pipe_instance else 0);
         const pipe_mode = pipe_windows.pipe_type_byte | pipe_windows.pipe_readmode_byte | pipe_windows.pipe_wait | pipe_windows.pipe_reject_remote_clients;
         const handle = pipe_windows.CreateNamedPipeW(l.name[0..l.name_len :0], open_mode, pipe_mode, pipe_windows.pipe_unlimited_instances, l.buffer_size, l.buffer_size, 0, if (l.descriptor != null) &attributes else null);
-        if (handle != windows.INVALID_HANDLE_VALUE) return .{ .handle = handle, .flags = .{ .nonblocking = true } };
+        if (handle != windows.INVALID_HANDLE_VALUE) return .init(.{ .handle = handle, .flags = .{ .nonblocking = true } });
         return switch (pipe_windows.GetLastError()) {
             pipe_windows.error_access_denied => if (first) error.AddressInUse else error.AccessDenied,
             pipe_windows.error_invalid_name, pipe_windows.error_bad_pathname => error.InvalidPipeName,

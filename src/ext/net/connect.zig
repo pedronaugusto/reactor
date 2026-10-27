@@ -43,6 +43,7 @@ pub const Options = struct {
 };
 
 pub const Connected = struct {
+    // aegis: boundary: the connected stream, by value, as std's connect gives it: the caller closes it
     stream: net.Stream,
     /// False when a timeout was asked for and this `Io` could not keep it.
     timeout_enforced: bool = true,
@@ -127,6 +128,7 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
 /// any other `Io` connects through Winsock (`sys/unix_windows.zig`), where
 /// std 0.17's `Io.Threaded` drives AFD itself and the system refuses it.
 /// The connect does not wait: a Unix socket is answered at once.
+// aegis: boundary: std's UnixAddress.connect's shape: the stream by value, the caller's to close
 pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Stream {
     if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return address.connect(io);
     try io.checkCancel();

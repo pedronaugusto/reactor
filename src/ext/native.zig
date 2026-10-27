@@ -2,6 +2,7 @@
 //! often it could not: an `Io` wrapping a runtime (a tracing layer,
 //! shakedown's `Layer`) takes the path every other `Io` takes.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 const Core = @import("../runtime/Core.zig");
@@ -9,12 +10,15 @@ const slots = @import("../runtime/slots.zig");
 const Scheduler = @import("../Scheduler.zig");
 const Task = @import("../scheduler/Task.zig");
 
-var taken: std.atomic.Value(u64) = .init(0);
+/// Times an extension met an `Io` that is not a runtime.
+const Fallbacks = aegis.units.Count(Io, u64);
+
+var taken: aegis.Atomic(Fallbacks) = .init(.fromRaw(0));
 
 /// The runtime `io` is; null for any other `Io`, which is counted.
 pub fn runtimeOf(io: Io) ?*Core {
     if (slots.isRuntime(io.vtable)) return Core.of(io.userdata);
-    _ = taken.fetchAdd(1, .monotonic);
+    _ = taken.fetchAddWrapping(.fromRaw(1), .monotonic);
     return null;
 }
 
@@ -41,5 +45,5 @@ pub fn taskRuntime(core: *Core) bool {
 /// Times an extension took the path for an `Io` that is not a runtime,
 /// process-wide.
 pub fn fallbacks() u64 {
-    return taken.load(.monotonic);
+    return taken.load(.monotonic).raw();
 }

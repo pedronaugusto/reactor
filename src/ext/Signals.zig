@@ -210,7 +210,8 @@ const Registry = struct {
 
 // aegis: boundary: the listeners a signal handler reaches, which may take no lock: each is reserved and released under the registry's lock, and a handler reads only its notifier and its delivered bits
 var listeners: [max_listeners]Listener = @splat(.{});
-// aegis: boundary: what a signal handler reads to find its listeners, which may take no lock: atomic slots, written under the registry's lock
+// What a signal handler reads to find its listeners, which may take no
+// lock: atomic slots, written under the registry's lock.
 var table: [signal_count][max_per_signal]aegis.Atomic(Slot) = @splat(@splat(.init(.none)));
 var in_handler: aegis.Atomic(Running) = .init(.fromRaw(0));
 var registry: aegis.BlockingGuarded(Registry) = .init(.{});

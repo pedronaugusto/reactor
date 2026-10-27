@@ -27,6 +27,7 @@ pub const Error = net.IpAddress.ListenError;
 /// A listener at `address`. With no socket option asked for it is std's
 /// `IpAddress.listen` on `io`; with any, reactor makes the socket itself,
 /// sets them, binds and listens.
+// aegis: boundary: std's IpAddress.listen's shape: the server by value, the caller's to close
 pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!net.Server {
     const plain: net.IpAddress.ListenOptions = .{ .kernel_backlog = options.kernel_backlog, .reuse_address = options.reuse_address, .mode = options.mode, .protocol = options.protocol };
     if (!options.socket.any()) return address.listen(io, plain);
