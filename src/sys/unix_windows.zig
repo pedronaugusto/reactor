@@ -6,6 +6,7 @@
 //! fails once a listener is there. The handle is a socket std's streams
 //! read, write and close.
 const std = @import("std");
+const aegis = @import("aegis");
 const windows = std.os.windows;
 const ws2_32 = windows.ws2_32;
 const net = std.Io.net;
@@ -13,22 +14,27 @@ const net = std.Io.net;
 const Socket = windows.HANDLE;
 const invalid_socket: Socket = @ptrFromInt(std.math.maxInt(usize));
 
+// aegis: boundary: ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) c_int;
+// aegis: boundary: ws2_32's socket, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn socket(family: c_int, kind: c_int, protocol: c_int) callconv(.winapi) Socket;
+// aegis: boundary: ws2_32's connect, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn connect(s: Socket, name: *const anyopaque, len: c_int) callconv(.winapi) c_int;
+// aegis: boundary: ws2_32's closesocket, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn closesocket(s: Socket) callconv(.winapi) c_int;
+// aegis: boundary: ws2_32's WSAGetLastError, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
 
 /// Winsock started once for the process and left running: a socket made
 /// here outlives the call, and `WSACleanup` would reset it.
-var started: std.atomic.Value(bool) = .init(false);
+var started: aegis.Atomic(enum(u8) { no, yes }) = .init(.no);
 
 fn start() net.UnixAddress.ConnectError!void {
-    if (started.load(.acquire)) return;
+    if (started.load(.acquire) == .yes) return;
     var data: [512]u8 align(8) = undefined;
     if (WSAStartup(0x202, &data) != 0) return error.SystemResources;
     // A second start from a racing thread only counts Winsock up once more.
-    started.store(true, .release);
+    started.store(.yes, .release);
 }
 
 /// `address` connected. AF_UNIX through Winsock names a socket file with

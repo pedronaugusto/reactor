@@ -6,6 +6,7 @@
 //! stack fields the fiber switch keeps are here too.
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const windows = std.os.windows;
 const Handle = windows.HANDLE;
 const Status = windows.NTSTATUS;
@@ -28,15 +29,24 @@ const wait_packet_all_access: u32 = 0x1f0003;
 
 const TimerType = enum(c_int) { notification = 0, synchronization = 1 };
 
+// aegis: boundary: ntdll's NtCreateIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateIoCompletion(handle: *Handle, access: u32, attributes: ?*anyopaque, threads: u32) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtSetIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtSetIoCompletion(port: Handle, key: usize, context: usize, status: Status, information: usize) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtRemoveIoCompletionEx, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtRemoveIoCompletionEx(port: Handle, entries: [*]Entry, count: u32, removed: *u32, timeout: ?*const i64, alertable: Boolean) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtCreateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateWaitCompletionPacket(handle: *Handle, access: u32, attributes: ?*anyopaque) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtAssociateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtAssociateWaitCompletionPacket(packet: Handle, port: Handle, target: Handle, key: usize, context: usize, status: Status, information: usize, already_signaled: ?*Boolean) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtCancelWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCancelWaitCompletionPacket(packet: Handle, remove_signaled: Boolean) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtCreateTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateTimer(handle: *Handle, access: u32, attributes: ?*anyopaque, kind: TimerType) callconv(.winapi) Status;
+// aegis: boundary: ntdll's NtSetTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtSetTimer(timer: Handle, due: *const i64, apc: ?*anyopaque, context: ?*anyopaque, resume_system: Boolean, period: i32, previous: ?*Boolean) callconv(.winapi) Status;
 /// Windows 10 1803 and later: `flags` may ask for a high-resolution timer.
+// aegis: boundary: kernel32's CreateWaitableTimerExW, declared as Microsoft's Win32 documentation gives it
 extern "kernel32" fn CreateWaitableTimerExW(attributes: ?*anyopaque, name: ?[*:0]const u16, flags: u32, access: u32) callconv(.winapi) ?Handle;
 
 const create_waitable_timer_high_resolution: u32 = 0x2;
@@ -145,18 +155,27 @@ pub fn close(handle: Handle) void {
 /// again, and finds itself bound already. An entry goes when reactor
 /// closes the handle (`close`, `forget`); a handle reactor bound must be
 /// closed through reactor, or its number, reused, would look bound.
-var bound: [1 << 14]std.atomic.Value(usize) = @splat(.init(0));
+var bound: [1 << 14]aegis.Atomic(HandleNumber) = @splat(.init(.none));
 
-fn slotOf(handle: Handle) *std.atomic.Value(usize) {
-    const value = @intFromPtr(handle); // safe: a handle's number, hashed
-    return &bound[(value >> 2) & (bound.len - 1)];
+/// A handle's number, as the cache keeps it: zero, no handle.
+const HandleNumber = enum(usize) {
+    none = 0,
+    _,
+
+    fn of(handle: Handle) HandleNumber {
+        return @fromBackingInt(@intFromPtr(handle)); // safe: a handle's number, compared and hashed
+    }
+};
+
+fn slotOf(handle: Handle) *aegis.Atomic(HandleNumber) {
+    return &bound[(@backingInt(HandleNumber.of(handle)) >> 2) & (bound.len - 1)];
 }
 
 /// `bind` once per handle: whether `handle` is bound to a port (this one,
 /// or one bound before), with the port skipped on success.
 pub fn bindOnce(handle: Handle, port: Handle, key: usize) bool {
     const slot = slotOf(handle);
-    const value = @intFromPtr(handle); // safe: a handle's number, compared
+    const value: HandleNumber = .of(handle);
     if (slot.load(.acquire) == value) return true;
     switch (bind(handle, port, key)) {
         .bound, .already => {
@@ -169,8 +188,7 @@ pub fn bindOnce(handle: Handle, port: Handle, key: usize) bool {
 
 /// `handle` is going away: drops what reactor knew of its binding.
 pub fn forget(handle: Handle) void {
-    const value = @intFromPtr(handle); // safe: a handle's number, compared
-    _ = slotOf(handle).cmpxchgStrong(value, 0, .acq_rel, .monotonic);
+    _ = slotOf(handle).cmpxchgStrong(.of(handle), .none, .acq_rel, .monotonic);
 }
 
 // Wait completion packets.

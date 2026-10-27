@@ -62,12 +62,12 @@ pub fn set(n: Notify) void {
         .linux => {
             const one: u64 = 1;
             // A full counter is still readable: nothing is lost.
-            _ = std.os.linux.write(n.set_end, @ptrCast(&one), 8); // safe: eight bytes, as an eventfd is written
+            _ = std.os.linux.write(n.set_end, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
         },
         else => {
             const byte: u8 = 1;
             // A full pipe is still readable: nothing is lost.
-            _ = posix.system.write(n.set_end, @ptrCast(&byte), 1); // safe: one byte
+            _ = posix.system.write(n.set_end, @ptrCast(&byte), 1); // aegis: boundary: one byte
         },
     }
 }
@@ -78,7 +78,7 @@ pub fn clear(n: Notify) void {
         .windows => _ = win32.ResetEvent(n.handle),
         .linux => {
             var count: u64 = 0;
-            _ = std.os.linux.read(n.handle, @ptrCast(&count), 8); // safe: eight bytes, as an eventfd reads
+            _ = std.os.linux.read(n.handle, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as an eventfd reads
         },
         else => {
             var bytes: [64]u8 = undefined;
