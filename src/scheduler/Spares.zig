@@ -10,7 +10,7 @@ const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Flag = @import("flag.zig").Flag;
+const Raised = @import("../sync/Raised.zig");
 
 /// Threads without a processor, for a scheduler whose processors are `Item`s.
 pub fn Of(comptime Item: type) type {
@@ -100,7 +100,7 @@ pub fn Of(comptime Item: type) type {
 
         /// A processor for the calling thread, or null once `stopping` is set.
         /// `fresh`: the thread was just started as a spare.
-        pub fn wait(sp: *Spares, stopping: *const aegis.Atomic(Flag), fresh: bool) ?*Item {
+        pub fn wait(sp: *Spares, stopping: *const Raised, fresh: bool) ?*Item {
             var held = sp.state.acquireUncancelable(system());
             const state = held.value();
             if (fresh) state.starting -= 1;
@@ -112,7 +112,7 @@ pub fn Of(comptime Item: type) type {
                     held.deinit(system());
                     return p;
                 } else |_| {}
-                if (stopping.load(.acquire) == .set) {
+                if (stopping.raised(.acquire)) {
                     state.idle -= 1;
                     held.deinit(system());
                     return null;

@@ -22,13 +22,14 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const clocks = @import("../clock.zig");
-const Flag = @import("flag.zig").Flag;
+const Stage = @import("stage.zig").Stage;
+const Raised = @import("../sync/Raised.zig");
 
 /// What the monitor remembers of one processor between samples.
 const Sample = struct {
     /// The owner's seat (an opaque `*Scheduler.Seat`) and its stage.
     owner: ?*const anyopaque = null,
-    stage: u32 = 0,
+    stage: Stage = .first,
     stage_since: clocks.Awake = .fromRaw(0),
     passes: u32 = 0,
     passes_since: clocks.Awake = .fromRaw(0),
@@ -61,11 +62,11 @@ thread: ?std.Thread = null,
 word: std.atomic.Value(u32) = .init(0),
 /// Sleeping longer than the shortest interval, or parked: a blocking call
 /// or a processor waking up wakes it.
-slow: aegis.Atomic(Flag) = .init(.clear),
-parked: aegis.Atomic(Flag) = .init(.clear),
+slow: Raised = .{},
+parked: Raised = .{},
 stalls: std.atomic.Value(u64) = .init(0),
 /// Set by `stop`.
-quit: aegis.Atomic(Flag) = .init(.clear),
+quit: Raised = .{},
 handoffs: std.atomic.Value(u64) = .init(0),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
@@ -98,8 +99,8 @@ fn now() clocks.Awake {
 
 /// From a processor: something to watch began while the monitor sleeps long.
 pub fn poke(m: *Monitor) void {
-    if (m.slow.load(.monotonic) != .set) return;
-    m.slow.store(.clear, .monotonic);
+    if (!m.slow.raised(.monotonic)) return;
+    m.slow.clear(.monotonic);
     _ = m.word.fetchAdd(1, .release);
     system().futexWake(u32, &m.word.raw, 1);
 }
@@ -107,7 +108,7 @@ pub fn poke(m: *Monitor) void {
 /// At stop, before any processor's thread may end: the monitor reads their
 /// seats.
 pub fn stop(m: *Monitor) void {
-    m.quit.store(.set, .release);
+    _ = m.quit.raise(.release);
     _ = m.word.fetchAdd(1, .release);
     system().futexWake(u32, &m.word.raw, 1);
     if (m.thread) |t| t.join();
@@ -119,7 +120,7 @@ pub fn stop(m: *Monitor) void {
 /// `isLent`, `isBlocked`, `handOff` and `allIdle`.
 pub fn run(m: *Monitor, s: anytype) void {
     var delay = shortest;
-    while (m.quit.load(.acquire) != .set) {
+    while (!m.quit.raised(.acquire)) {
         const t = now();
         var watching = false;
         for (s.processors, m.samples) |*p, *sample| {
@@ -128,16 +129,18 @@ pub fn run(m: *Monitor, s: anytype) void {
         delay = if (watching) shortest else doubled(delay);
         const seen = m.word.load(.acquire);
         if (!watching and s.allIdle()) {
-            m.parked.store(.set, .seq_cst);
-            m.slow.store(.set, .monotonic);
+            _ = m.parked.raise(.seq_cst);
+            _ = m.slow.raise(.monotonic);
             // A processor that leaves its kernel wait after this check
             // sees `parked` and wakes the monitor.
-            if (s.allIdle() and m.quit.load(.acquire) != .set) system().futexWaitUncancelable(u32, &m.word.raw, seen);
-            m.parked.store(.clear, .monotonic);
+            if (s.allIdle() and !m.quit.raised(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
+            m.parked.clear(.monotonic);
             delay = shortest;
             continue;
         }
-        m.slow.store(.of(delay.compare(shortest) == .gt), .monotonic);
+        if (delay.compare(shortest) == .gt) {
+            _ = m.slow.raise(.monotonic);
+        } else m.slow.clear(.monotonic);
         system().futexWaitTimeout(u32, &m.word.raw, seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
         if (m.word.load(.acquire) != seen) delay = shortest;
     }

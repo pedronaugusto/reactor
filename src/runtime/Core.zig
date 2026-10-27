@@ -209,11 +209,11 @@ fn initMonitor(c: *Core, workers: u16) InitError!void {
     c.scheduler.monitor = monitor;
     if (!handoff) return;
     for (c.processors) |*p| p.lends = true;
-    _ = Scheduler.lending.fetchAdd(1, .monotonic);
+    _ = Scheduler.lending.fetchAddWrapping(.fromRaw(1), .monotonic);
 }
 
 fn deinitMonitor(c: *Core) void {
-    if (c.processors[0].lends) _ = Scheduler.lending.fetchSub(1, .monotonic);
+    if (c.processors[0].lends) _ = Scheduler.lending.fetchSubWrapping(.fromRaw(1), .monotonic);
     if (c.scheduler.monitor) |m| {
         m.deinit(c.gpa);
         c.gpa.destroy(m);
@@ -285,7 +285,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     // handed to the home processor from here on wakes the loop, and work
     // handed to it before this was set makes the handle ready now.
     const p = Scheduler.processorOf(&c.root).?;
-    p.remote.away.store(.set, .seq_cst);
+    _ = p.remote.away.raise(.seq_cst);
     if (p.hasWork()) p.loop.wake();
 }
 
@@ -297,7 +297,7 @@ pub fn stop(c: *Core) void {
     assert(c.scheduler.stacks.inUse() == 0);
     // The monitor first: it reads the seats of the threads that end next.
     if (c.scheduler.monitor) |m| m.stop();
-    c.scheduler.stopping.store(.set, .release);
+    _ = c.scheduler.stopping.raise(.release);
     c.scheduler.wakeAll();
     // Spares, and workers waiting as spares, see the stop.
     if (c.scheduler.monitor != null) c.scheduler.spares.stop();

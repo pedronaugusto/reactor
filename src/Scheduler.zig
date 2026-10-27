@@ -19,7 +19,7 @@ const loop_internal = @import("loop/internal.zig");
 const Task = @import("scheduler/Task.zig");
 const Records = @import("scheduler/Records.zig");
 const Trims = @import("scheduler/Trims.zig");
-const Flag = @import("scheduler/flag.zig").Flag;
+const Raised = @import("sync/Raised.zig");
 const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
@@ -68,6 +68,31 @@ fn descriptorSlot(fd: Io.File.Handle) usize {
     return @intCast(key % descriptor_slots);
 }
 
+/// The processors whose kernel queues hold an operation on a descriptor
+/// slot: a bit each (`processorBit`).
+const Holders = enum(u64) {
+    none = 0,
+    _,
+
+    fn with(h: Holders, bit: u64) Holders {
+        return @fromBackingInt(@backingInt(h) | bit);
+    }
+
+    fn without(h: Holders, bit: u64) Holders {
+        return @fromBackingInt(@backingInt(h) & ~bit);
+    }
+
+    fn has(h: Holders, bit: u64) bool {
+        return @backingInt(h) & bit != 0;
+    }
+
+    /// Adds or takes `bit` in `cell`.
+    fn mark(cell: *aegis.Atomic(Holders), bit: u64, comptime held: bool) void {
+        var seen = cell.load(.monotonic);
+        while (cell.cmpxchgWeak(seen, if (held) seen.with(bit) else seen.without(bit), .release, .monotonic)) |found| seen = found;
+    }
+};
+
 /// A processor's bit in `holders`; beyond 64 processors bits are shared.
 fn processorBit(index: u16) u64 {
     return @as(u64, 1) << @intCast(index % 64);
@@ -78,7 +103,7 @@ pub fn holds(s: *const Scheduler, index: u16, fd: Io.File.Handle) bool {
     if (comptime builtin.os.tag == .linux) if (s.processors[index].loop.backend == .io_uring) {
         if (s.processors[index].loop.backend.io_uring.contains(fd)) return true;
     };
-    return s.holders[descriptorSlot(fd)].load(.acquire) & processorBit(index) != 0;
+    return s.holders[descriptorSlot(fd)].load(.acquire).has(processorBit(index));
 }
 
 /// How much deeper than its current park a task must once have been parked
@@ -170,15 +195,15 @@ pub const Processor = struct {
         errands: Inbox(Errand, "next") = .{},
         /// Set while the processor may be waiting in the kernel: a producer
         /// that sees it wakes the loop.
-        sleeping: aegis.Atomic(Flag) = .init(.clear),
+        sleeping: Raised = .{},
         /// Set from the root's return to its host (`Runtime.run`) until the
         /// root parks again: the scheduler is not looking and the host may
         /// be waiting on the loop's handle, so a producer wakes the loop as
         /// for `sleeping`.
-        away: aegis.Atomic(Flag) = .init(.clear),
+        away: Raised = .{},
         /// The home processor, held by another thread: the home thread
         /// wants it back for the root.
-        home_wants: aegis.Atomic(Flag) = .init(.clear),
+        home_wants: Raised = .{},
         /// Aligns and pads the whole to cache lines.
         line: [0]u8 align(std.atomic.cache_line) = .{},
 
@@ -345,7 +370,7 @@ pub const Processor = struct {
     /// After a push from another thread: a processor waiting in the kernel,
     /// or whose root is back in its host, is woken through its loop.
     fn wakeIfIdle(p: *Processor) void {
-        if (p.remote.sleeping.load(.seq_cst) == .set or p.remote.away.load(.seq_cst) == .set) wakeProcessor(p);
+        if (p.remote.sleeping.raised(.seq_cst) or p.remote.away.raised(.seq_cst)) wakeProcessor(p);
     }
 
     /// Whether this processor has a task to run or a message to serve: a
@@ -366,14 +391,14 @@ pub const Processor = struct {
     pub fn hold(p: *Processor, fd: Io.File.Handle) void {
         const slot = descriptorSlot(fd);
         p.held[slot] += 1;
-        if (p.held[slot] == 1) _ = p.scheduler.holders[slot].fetchOr(processorBit(p.index), .release);
+        if (p.held[slot] == 1) Holders.mark(&p.scheduler.holders[slot], processorBit(p.index), true);
     }
 
     /// The owner's: one fewer.
     pub inline fn release(p: *Processor, fd: Io.File.Handle) void {
         const slot = descriptorSlot(fd);
         p.held[slot] -= 1;
-        if (p.held[slot] == 0) _ = p.scheduler.holders[slot].fetchAnd(~processorBit(p.index), .release);
+        if (p.held[slot] == 0) Holders.mark(&p.scheduler.holders[slot], processorBit(p.index), false);
     }
 
     /// From a wait's cancel hook, which runs with the task's lock held: this
@@ -423,7 +448,7 @@ pub const Processor = struct {
     // or thread-local reads at every task switch.
     fn scheduleMode(p: *Processor, comptime watched: bool, own: *Seat) void {
         while (true) {
-            if (watched and p.index == 0 and p.remote.home_wants.load(.seq_cst) == .set and !p.on_home_thread) {
+            if (watched and p.index == 0 and p.remote.home_wants.raised(.seq_cst) and !p.on_home_thread) {
                 if (p.root_aside) {
                     p.root_aside = false;
                     p.pushLocal(p.scheduler.root, .completed);
@@ -437,7 +462,7 @@ pub const Processor = struct {
                 continue;
             }
             if (p.drainInboxes()) continue;
-            if (p.index != 0 and p.scheduler.stopping.load(.acquire) == .set) return;
+            if (p.index != 0 and p.scheduler.stopping.raised(.acquire)) return;
             if (p.serving != null and p.serve()) continue;
             if (p.pollKernel(.nowait)) continue;
             if (p.scheduler.scheduling == .stealing and (p.steal() or p.spin())) continue;
@@ -531,7 +556,7 @@ pub const Processor = struct {
                 // Kept aside until the home thread asks for its processor:
                 // given back now, it would sit with no thread to run it
                 // while the home thread still runs a task of its own.
-                if (p.remote.home_wants.load(.seq_cst) != .set) {
+                if (!p.remote.home_wants.raised(.seq_cst)) {
                     p.root_aside = true;
                     return;
                 }
@@ -572,7 +597,7 @@ pub const Processor = struct {
         }
         if (message.inspect or t.policy.measured) p.inspectStack(t, message.inspect);
         p.current = null;
-        if (t.kind == .root) p.remote.away.store(.clear, .monotonic);
+        if (t.kind == .root) p.remote.away.clear(.monotonic);
         if (action == .exit) p.scheduler.records.publish(t, p.index, .finished);
         switch (action) {
             .yield => p.pushLocal(t, .yielded),
@@ -603,17 +628,17 @@ pub const Processor = struct {
 
     /// Waits in the kernel until a completion, a timer, or a wake.
     fn block(p: *Processor) void {
-        p.remote.sleeping.store(.set, .seq_cst);
-        defer p.remote.sleeping.store(.clear, .monotonic);
+        _ = p.remote.sleeping.raise(.seq_cst);
+        defer p.remote.sleeping.clear(.monotonic);
         // Publish idleness before checking the global queue. An injector
         // between the check and publication must still find someone to wake.
         p.scheduler.idle(p, true);
         defer p.scheduler.idle(p, false);
         if (!p.remote.inbox.isEmpty() or !p.remote.cancels.isEmpty() or !p.remote.errands.isEmpty() or p.scheduler.injectedLen() > 0) return;
-        if (p.index != 0 and p.scheduler.stopping.load(.acquire) == .set) return;
+        if (p.index != 0 and p.scheduler.stopping.raised(.acquire)) return;
         // The home thread wants its processor back: its wake may have come
         // while this thread was still taking an earlier one.
-        if (p.index == 0 and p.remote.home_wants.load(.seq_cst) == .set) return;
+        if (p.index == 0 and p.remote.home_wants.raised(.seq_cst)) return;
         const mode: Loop.RunMode = if (p.serving) |s| switch (s.mode) {
             .within, .until => |deadline| .{ .within = deadline },
             .nowait, .once => .once,
@@ -737,7 +762,7 @@ pub const Processor = struct {
     pub fn holdFrom(p: *Processor, holder: *Seat) void {
         const word = Lease.next(p.lease.load(.monotonic)) | Lease.held;
         holder.lease = word;
-        holder.stage.store(Stage.move(holder.stage.raw, Stage.inside), .monotonic);
+        holder.stage.store(holder.stage.load(.monotonic).moved(.inside), .monotonic);
         // The owner before the word: a monitor that reads the new word reads
         // the new owner after it.
         p.owner.store(holder, .release);
@@ -809,8 +834,8 @@ shared: Shared = .{},
 listeners: aegis.Guarded(void) = .init({}),
 /// Per descriptor slot, a bit for each processor whose kernel queue holds
 /// an operation on it.
-holders: [descriptor_slots]std.atomic.Value(u64) = @splat(.init(0)),
-stopping: aegis.Atomic(Flag) = .init(.clear),
+holders: [descriptor_slots]aegis.Atomic(Holders) = @splat(.init(.none)),
+stopping: Raised = .{},
 
 /// The thread that built the runtime: the root runs there alone.
 home_thread: std.Thread.Id,
@@ -839,7 +864,7 @@ pub const Seat = struct {
     /// Where the thread is (`Stage`): in the runtime, or lending its
     /// processor while its task runs its own code or sits in a blocking
     /// call. Written by the thread alone, read by the monitor.
-    stage: std.atomic.Value(u32) = .init(Stage.inside),
+    stage: aegis.Atomic(Stage) = .init(.first),
     /// The processor's `lease` word while this thread holds it, its
     /// generation this thread's: any other word says the monitor claimed
     /// it or handed it on.
@@ -850,7 +875,9 @@ threadlocal var seat: Seat = .{};
 
 /// The runtimes in the process whose processors are lent: any thread may
 /// hold one of theirs and call into any runtime.
-pub var lending: std.atomic.Value(u32) = .init(0);
+pub var lending: aegis.Atomic(Lending) = .init(.fromRaw(0));
+/// A number of runtimes.
+const Lending = aegis.units.Count(Scheduler, u32);
 
 /// The calling thread's seat, read afresh at every call.
 ///
@@ -903,7 +930,7 @@ pub fn processor() ?*Processor {
 pub fn runningTask() ?*Task {
     const own = seatNow();
     const p = own.held orelse return null;
-    if (own.stage.raw & Stage.mode != Stage.inside) return own.task;
+    if (own.stage.load(.monotonic).mode() != .inside) return own.task;
     return p.current;
 }
 
@@ -1093,7 +1120,7 @@ pub fn idle(s: *Scheduler, p: *Processor, waiting: bool) void {
     } else {
         _ = s.shared.idle_count.fetchSubWrapping(.fromRaw(1), .seq_cst);
         // The monitor parks while every processor waits: one is back.
-        if (s.monitor) |m| if (m.parked.load(.seq_cst) == .set) m.poke();
+        if (s.monitor) |m| if (m.parked.raised(.seq_cst)) m.poke();
     }
 }
 
@@ -1147,43 +1174,30 @@ pub const Lease = struct {
 
 /// Where a thread is, in its seat's `stage`: a count of its moves in the
 /// bits above, so the monitor tells one long lending from many short ones.
-pub const Stage = struct {
-    /// In the runtime: its processor is its own to touch.
-    pub const inside: u32 = 0;
-    /// Its task runs its own code: the processor is lent.
-    pub const user: u32 = 1;
-    /// Its task sits in a blocking call: the processor is lent, and watched
-    /// from the start of the call.
-    pub const blocked: u32 = 2;
-    pub const mode: u32 = 3;
-
-    fn move(stage: u32, to: u32) u32 {
-        return ((stage & ~mode) +% (mode + 1)) | to;
-    }
-};
+pub const Stage = @import("scheduler/stage.zig").Stage;
 
 /// Whether `stage` lends its thread's processor.
-pub fn isLent(s: *const Scheduler, stage: u32) bool {
+pub fn isLent(s: *const Scheduler, stage: Stage) bool {
     _ = s;
-    return stage & Stage.mode != Stage.inside;
+    return stage.mode() != .inside;
 }
 
 /// Whether `stage` lends its thread's processor for a blocking call.
-pub fn isBlocked(s: *const Scheduler, stage: u32) bool {
+pub fn isBlocked(s: *const Scheduler, stage: Stage) bool {
     _ = s;
-    return stage & Stage.mode == Stage.blocked;
+    return stage.mode() == .blocked;
 }
 
 /// The thread at `own` leaves the runtime for `to`, lending its processor.
-inline fn lendFrom(own: *Seat, to: u32) void {
-    own.stage.store(Stage.move(own.stage.raw, to), .release);
+inline fn lendFrom(own: *Seat, to: Stage.Mode) void {
+    own.stage.store(own.stage.load(.monotonic).moved(to), .release);
 }
 
 /// The thread at `own` comes back into the runtime: true when it still
 /// holds its processor, having waited out a look of the monitor's; false
 /// when the monitor handed it on meanwhile.
 fn comeBack(own: *Seat) bool {
-    own.stage.store(Stage.move(own.stage.raw, Stage.inside), .seq_cst);
+    own.stage.store(own.stage.load(.monotonic).moved(.inside), .seq_cst);
     const p = own.held.?;
     while (true) {
         const word = p.lease.load(.seq_cst);
@@ -1201,13 +1215,13 @@ fn comeBack(own: *Seat) bool {
 /// lent. Nothing before it may touch the processor.
 pub inline fn fromUser() ?*Task {
     // A process with no runtime that lends reads nothing more.
-    if (lending.load(.monotonic) == 0) return null;
+    if (lending.load(.monotonic).eql(.fromRaw(0))) return null;
     // The seat read first, before anything in the caller can move the task
     // to another thread; nothing reads it directly after (`seatNow`, a
     // call, reads it afresh), so the address is never one thread's taken
     // for another's.
     const own = &seat;
-    if (own.stage.raw & Stage.mode != Stage.user) return null;
+    if (own.stage.load(.monotonic).mode() != .user) return null;
     return comeIn(own);
 }
 
@@ -1221,7 +1235,7 @@ fn fromTask(t: *Task) void {
 }
 
 inline fn fromSeat(own: *Seat) ?*Task {
-    if (own.stage.raw & Stage.mode != Stage.user) return null;
+    if (own.stage.load(.monotonic).mode() != .user) return null;
     const t = own.task.?;
     if (!comeBack(own)) rejoin(own, t);
     return t;
@@ -1231,7 +1245,7 @@ inline fn fromSeat(own: *Seat) ?*Task {
 /// is lent until it calls into the runtime again. Through the task's seat,
 /// which is the thread's it runs on now, wherever the call took it.
 pub fn toUser(t: *Task) void {
-    lendFrom(seatOf(t), Stage.user);
+    lendFrom(seatOf(t), .user);
 }
 
 fn seatOf(t: *Task) *Seat {
@@ -1286,7 +1300,7 @@ pub fn enterBlocking() ?Blocking {
     const p = own.held orelse return null;
     if (!p.lends) return null;
     const t = p.current orelse return null;
-    lendFrom(own, Stage.blocked);
+    lendFrom(own, .blocked);
     // The monitor sleeps long while nothing is lent for long: a blocking
     // call is worth watching from its start.
     p.scheduler.monitor.?.poke();
@@ -1303,14 +1317,14 @@ pub fn leaveBlocking(b: *Blocking) void {
 /// On the home thread: asks for the home processor, waits until it is
 /// given back (`giveBack`), then holds it again.
 pub fn reclaim(p: *Processor) void {
-    p.remote.home_wants.store(.set, .seq_cst);
+    _ = p.remote.home_wants.raise(.seq_cst);
     p.loop.wake();
     while (true) {
         const word = p.lease.load(.acquire);
         if (word & Lease.state == Lease.home_back) break;
         system().futexWaitUncancelable(u32, &p.lease.raw, word);
     }
-    p.remote.home_wants.store(.clear, .monotonic);
+    p.remote.home_wants.clear(.monotonic);
     if (heldNow() == null) enter(p);
     p.adopt();
 }
@@ -1329,7 +1343,7 @@ fn relocated(s: *Scheduler, t: *Task) void {
 /// home thread asking for it. The global queue is any processor's, and an
 /// idle one is woken for it. False when it has nothing, there is no thread
 /// to hand it to, or the owner came back into the runtime or changed.
-pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: u32) bool {
+pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: Stage) bool {
     if (word & Lease.state != Lease.held) return false;
     // A thread first, outside the claim: starting one is slow, and the owner
     // waits on a claim.
@@ -1344,7 +1358,7 @@ pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: u32
     }
     // Claimed while lent: the owner waits at its next way in, so the
     // processor's queues and loop are still.
-    if (!p.hasOwnWork() and !p.loop.waiting() and p.remote.home_wants.load(.seq_cst) != .set) {
+    if (!p.hasOwnWork() and !p.loop.waiting() and !p.remote.home_wants.raised(.seq_cst)) {
         p.lease.store(word, .release);
         return false;
     }
@@ -1404,10 +1418,10 @@ fn wakeIdle(s: *Scheduler) void {
     // A host outside run() is waiting on the home loop's handle, rather
     // than counted as a processor waiting in its kernel.
     const home = &s.processors[0];
-    if (home.remote.away.load(.seq_cst) == .set) wakeProcessor(home);
+    if (home.remote.away.raised(.seq_cst)) wakeProcessor(home);
     if (s.shared.idle_count.load(.seq_cst).eql(.fromRaw(0))) return;
     for (s.processors) |*other| {
-        if (other.remote.sleeping.load(.seq_cst) == .set) {
+        if (other.remote.sleeping.raised(.seq_cst)) {
             wakeProcessor(other);
             return;
         }

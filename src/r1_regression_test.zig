@@ -120,7 +120,7 @@ fn groupDeep(io: Io) void {
 fn wakeStoppingWorkers(r: *Runtime) void {
     // The deliberately broken before revision queues its shutdown message
     // without submitting it. Keep that independent bug out of group release.
-    while (r.core.scheduler.stopping.load(.acquire) != .set) std.atomic.spinLoopHint();
+    while (!r.core.scheduler.stopping.raised(.acquire)) std.atomic.spinLoopHint();
     for (r.core.processors[1..]) |*p| p.loop.wake();
 }
 test "R1 group await observes all member stacks released" {
@@ -285,7 +285,7 @@ const CrossRuntime = struct {
         switch (c.mode) {
             .wake => {
                 // Destination waiter and root are both off-stack before waking.
-                while (c.processor.remote.sleeping.load(.seq_cst) != .set) std.atomic.spinLoopHint();
+                while (!c.processor.remote.sleeping.raised(.seq_cst)) std.atomic.spinLoopHint();
                 c.event.set(c.io);
             },
             .spawn => c.future = try c.io.concurrent(owner, .{}),
