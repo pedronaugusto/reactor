@@ -30,6 +30,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/clock.zig",
         "src/Lanes.zig",
         "src/lanes/SlotPool.zig",
+        "src/sync.zig",
         "src/sync/Raised.zig",
         "src/sync/Done.zig",
         "src/sync/FreeList.zig",

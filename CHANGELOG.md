@@ -8,11 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- On the aegis 0.2 line: reactor pins aegis 0.2.3, shuttle 0.5.0 and airlock 0.6.0, whose types its own carry, so a consumer moves with it.
+- `Loop.Op.callback` is `Op.completion`, a `?*Loop.Completion`: an intrusive node, `Completion { run(*Completion, *Loop, *Op) }`, kept in the record that waits and found from it by `@fieldParentPtr`, where the callback found its record from an address in `user_data`. `user_data` stays the reaping caller's tag.
+
 - `net.Deadlines.Watch` watches a socket or a named pipe: its `socket` field is `target`, a `Watch.Target`; `Watch.init(socket)` is as it was, and `Watch.initPipe(file)` makes a pipe's.
 
 ### Added
 
+- `syncLaneFor(Blocking)`: a library's `Blocking` whose jobs run through `syncLane`, as airlock's typed runner takes it.
 - Windows named pipes (`net.pipe`): `net.connectPipe` opens a client's end, a busy pipe tried again until the timeout; `net.listenPipe` makes a server's, its security descriptor the caller's (SDDL, or the token's default named as such), clients of other machines refused, a fresh instance made as each client is accepted (`PipeListener.accept`); `pipe.disconnect` ends a server instance's client from any task, as `abort` ends a socket. Each handle is an `Io.File` opened for overlapped calls, so a runtime finishes its reads, writes and listens on its port. `pipe.readPipeWithin` waits a bounded time for bytes on a runtime. A pipe's deadlines are kept on a runtime; off one, `Deadlines.add` refuses a pipe's watch and its operations run unbounded. Off Windows each call is `NamedPipeUnsupported`.
+
+### Changed
+
+- The kernel is named by no address. An io_uring completion's `user_data` is a slot and its generation in the ring's table (`backend.Slab`), so a stale or forged completion is refused and counted rather than followed. An IOCP completion's context is its status header, from which its operation or batch is found by `@fieldParentPtr`. Every pointer conversion and foreign declaration left is one the kernel's or std's contract forces, named at its site.
+- The runtime's synchronization is aegis cells (`Atomic`, `Condition`, `BlockingGuarded`): its flags one `sync.Raised` naming each ordering, its counters Counts, its stack depths Bytes, and a run queue's slots, an inbox's head, a processor's owner and a future's awaiter pointer cells, at the orderings they had. An operation's phase is an aegis `state.Machine`, every move checked in every build.
 
 ## [0.8.7] - 2026-10-27
 
