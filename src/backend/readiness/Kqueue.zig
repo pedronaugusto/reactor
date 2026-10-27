@@ -254,7 +254,7 @@ pub fn decode(e: *const Event) readiness.Decoded {
 
 /// From any thread: the next (or a waiting) call returns a wake event.
 pub fn wake(k: *Kqueue) void {
-    if (k.wake_pending.raise()) return;
+    if (k.wake_pending.raise(.acq_rel)) return;
     if (has_user) {
         const trigger = [1]Event{change(0, c.EVFILT.USER, 0, c.NOTE.TRIGGER, 0, wake_key)};
         // A kqueue that cannot take the trigger has no room left: the
@@ -274,7 +274,7 @@ pub fn woken(k: *Kqueue) void {
         var buffer: [64]u8 = undefined;
         while (c.read(k.wake_pipe[0], &buffer, buffer.len) > 0) {}
     }
-    k.wake_pending.clear();
+    k.wake_pending.clear(.release);
 }
 
 pub fn handle(k: *const Kqueue) posix.fd_t {

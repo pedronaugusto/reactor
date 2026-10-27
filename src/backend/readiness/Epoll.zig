@@ -183,7 +183,7 @@ pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
 
 /// From any thread: the next (or a waiting) call returns a wake event.
 pub fn wake(e: *Epoll) void {
-    if (e.wake_pending.raise()) return;
+    if (e.wake_pending.raise(.acq_rel)) return;
     const one: u64 = 1;
     _ = linux.write(e.wake_fd, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
 }
@@ -192,7 +192,7 @@ pub fn wake(e: *Epoll) void {
 pub fn woken(e: *Epoll) void {
     var count: u64 = 0;
     _ = linux.read(e.wake_fd, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as an eventfd reads
-    e.wake_pending.clear();
+    e.wake_pending.clear(.release);
 }
 
 pub fn handle(e: *const Epoll) linux.fd_t {

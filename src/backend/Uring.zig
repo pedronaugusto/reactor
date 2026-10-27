@@ -802,7 +802,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         },
         .auxiliary => {
             if (!Key.of(ud).names()) {
-                u.message_pending.clear();
+                u.message_pending.clear(.release);
                 return sink.notified();
             }
             const o = u.opOf(ud) orelse return;
@@ -826,7 +826,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
         },
         .wake => {
             _ = linux.read(u.wake_fd, @ptrCast(&u.wake_buffer), 8); // aegis: boundary: eight bytes, as an eventfd reads
-            u.wake_pending.clear();
+            u.wake_pending.clear(.release);
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
         },
         .receiver => {
@@ -854,7 +854,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             if (target != .message) return;
             u.release(ud);
             if (cqe.res < 0) {
-                target.message.message_pending.clear();
+                target.message.message_pending.clear(.release);
                 target.message.wake();
             }
         },
@@ -942,7 +942,7 @@ fn armWake(u: *Uring) void {
 
 /// From any thread: ends a waiting `poll`.
 pub fn wake(u: *Uring) void {
-    if (u.wake_pending.raise()) return;
+    if (u.wake_pending.raise(.acq_rel)) return;
     const one: u64 = 1;
     _ = linux.write(u.wake_fd, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
 }
@@ -1053,9 +1053,9 @@ fn timespecOf(at: kernel_time.KernelTime) linux.kernel_timespec {
 /// sleeping target asleep with work waiting for it.
 pub fn messageWake(source: *Uring, target: *Uring) bool {
     if (!source.features.msg_ring) return false;
-    if (target.message_pending.raise()) return true;
+    if (target.message_pending.raise(.acq_rel)) return true;
     const data = source.register(.ignore, .{ .message = target }) orelse {
-        target.message_pending.clear();
+        target.message_pending.clear(.release);
         return false;
     };
     const sqe = source.entry();

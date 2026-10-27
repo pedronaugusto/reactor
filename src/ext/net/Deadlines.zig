@@ -168,14 +168,14 @@ pub const OperateError = Io.Cancelable || error{Timeout};
 /// before the deadline is returned even when the deadline fired, though
 /// the socket is aborted then.
 pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
-    if (w.fired.raised()) return error.Timeout;
+    if (w.fired.raised(.acquire)) return error.Timeout;
     if (native.runtimeOf(io) != null) {
         return io.operateTimeout(operation, .{ .deadline = deadline }) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             // Device control has no evented form: unbounded, as std's.
             error.ConcurrencyUnavailable => io.operate(operation),
             error.Timeout => {
-                _ = w.fired.raise();
+                _ = w.fired.raise(.acq_rel);
                 w.end(io);
                 return error.Timeout;
             },
@@ -187,7 +187,7 @@ pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadli
     const result = io.operate(operation);
     d.disarm(w);
     const r = try result;
-    if (w.fired.raised() and failed(r)) return error.Timeout;
+    if (w.fired.raised(.acquire) and failed(r)) return error.Timeout;
     return r;
 }
 
@@ -247,8 +247,8 @@ fn scan(d: *Deadlines, io: Io) void {
     while (it) |node| : (it = node.next) {
         const w: *Watch = @fieldParentPtr("node", node);
         const deadline = w.deadline.load(.acquire);
-        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.raised()) continue;
-        _ = w.fired.raise();
+        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.raised(.acquire)) continue;
+        _ = w.fired.raise(.acq_rel);
         w.end(io);
     }
 }

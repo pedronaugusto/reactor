@@ -694,7 +694,7 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
     };
     if (e.key != key()) return;
     switch (e.context) {
-        wake_context => return b.wake_pending.clear(),
+        wake_context => return b.wake_pending.clear(.release),
         timer_context => {
             b.timer_armed = false;
             return;
@@ -732,8 +732,8 @@ fn forward(port: Handle, e: sys.Entry) void {
 
 /// From any thread: ends a waiting `poll`.
 pub fn wake(b: *Iocp) void {
-    if (b.wake_pending.raise()) return;
-    sys.post(b.port, key(), wake_context, .SUCCESS, 0) catch b.wake_pending.clear();
+    if (b.wake_pending.raise(.acq_rel)) return;
+    sys.post(b.port, key(), wake_context, .SUCCESS, 0) catch b.wake_pending.clear(.release);
 }
 
 /// The port: what a host waits on, or its own.

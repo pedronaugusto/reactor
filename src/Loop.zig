@@ -397,7 +397,7 @@ pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
         delivered += counted.count;
         delivered += l.expire();
         delivered += l.deliverReady();
-        const woken = l.woken.take();
+        const woken = l.woken.take(.acq_rel);
         switch (mode) {
             .nowait => return delivered,
             .once => if (delivered > 0 or woken) return delivered,
@@ -443,7 +443,7 @@ pub fn nextTimeout(l: *const Loop) ?Io.Duration {
 /// From any thread: makes `backendHandle` readable and returns a waiting
 /// `run`.
 pub fn wake(l: *Loop) void {
-    _ = l.woken.raise();
+    _ = l.woken.raise(.acq_rel);
     l.backend.wake();
 }
 
@@ -621,6 +621,6 @@ const Pressure = struct {
         p.notified();
     }
     pub fn notified(p: *Pressure) void {
-        _ = p.loop.woken.raise();
+        _ = p.loop.woken.raise(.acq_rel);
     }
 };

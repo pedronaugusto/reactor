@@ -1,8 +1,13 @@
-//! A flag one thread raises and its owner clears: a wake, or a message to
-//! another ring, under way, of which one is enough until it is taken.
+//! A flag one side raises and another takes or clears: a wake under way,
+//! a message to another ring, a task started, a handshake's side. Every
+//! read and write names its ordering: some are plain hand-offs
+//! (acquire and release), some sequentially consistent handshakes.
 const Raised = @This();
 
+const std = @import("std");
 const aegis = @import("aegis");
+
+const Order = std.builtin.AtomicOrder;
 
 const State = enum(u8) { clear, raised };
 
@@ -10,21 +15,21 @@ cell: aegis.Atomic(State) = .init(.clear),
 
 /// Raises it; true when it was raised already, and the caller need do
 /// nothing more.
-pub fn raise(p: *Raised) bool {
-    return p.cell.swap(.raised, .acq_rel) == .raised;
+pub fn raise(p: *Raised, comptime order: Order) bool {
+    return p.cell.swap(.raised, order) == .raised;
 }
 
 /// Whether it was raised, cleared in the same step.
-pub fn take(p: *Raised) bool {
-    return p.cell.swap(.clear, .acq_rel) == .raised;
+pub fn take(p: *Raised, comptime order: Order) bool {
+    return p.cell.swap(.clear, order) == .raised;
 }
 
 /// Whether it is raised.
-pub fn raised(p: *const Raised) bool {
-    return p.cell.load(.acquire) == .raised;
+pub fn raised(p: *const Raised, comptime order: Order) bool {
+    return p.cell.load(order) == .raised;
 }
 
-/// Taken: the next `raise` acts again.
-pub fn clear(p: *Raised) void {
-    p.cell.store(.clear, .release);
+/// Cleared: the next `raise` acts again.
+pub fn clear(p: *Raised, comptime order: Order) void {
+    p.cell.store(.clear, order);
 }

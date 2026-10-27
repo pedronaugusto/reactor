@@ -103,7 +103,7 @@ const Command = struct {
 
     fn execute(c: *Command, p: *Scheduler.Processor) void {
         const core = native.runtimeOf(c.io).?;
-        if (Scheduler.processor() == p or (!core.started.raised() and !p.loop.backend.io_uring.enabled)) {
+        if (Scheduler.processor() == p or (!core.started.raised(.acquire) and !p.loop.backend.io_uring.enabled)) {
             run(&c.errand, p);
         } else {
             p.send(&c.errand);

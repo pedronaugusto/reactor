@@ -253,10 +253,10 @@ fn homeScheduler(arg: ?*anyopaque) noreturn {
 }
 
 pub fn start(c: *Core) StartError!void {
-    assert(!c.started.raised());
+    assert(!c.started.raised(.acquire));
     try c.lanes.prepare();
     // Publish startup before adoption: native setup must go to each owner.
-    _ = c.started.raise();
+    _ = c.started.raise(.acq_rel);
     errdefer c.stop();
     // TSan’s thread-local storage needs more than the small normal OS stack.
     for (c.processors[1..]) |*p| {
@@ -290,7 +290,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 }
 
 pub fn stop(c: *Core) void {
-    if (!c.started.raised()) return;
+    if (!c.started.raised(.acquire)) return;
     // The home processor back first, should it have gone to a spare while
     // the host ran its own code; it stays held from here.
     _ = Scheduler.fromUser();
@@ -302,7 +302,7 @@ pub fn stop(c: *Core) void {
     // Spares, and workers waiting as spares, see the stop.
     if (c.scheduler.monitor != null) c.scheduler.spares.stop();
     for (c.processors[1..]) |*p| if (p.thread) |t| t.join();
-    c.started.clear();
+    c.started.clear(.release);
 }
 
 pub fn deinit(c: *Core) void {
@@ -340,7 +340,7 @@ pub fn of(userdata: ?*anyopaque) *Core {
 /// Fixed std.Io signatures require a successfully started runtime.
 pub fn running(userdata: ?*anyopaque) *Core {
     const core = of(userdata);
-    assert(core.started.raised());
+    assert(core.started.raised(.acquire));
     return core;
 }
 

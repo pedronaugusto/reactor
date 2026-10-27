@@ -49,7 +49,7 @@ pub fn cancelPending(l: *Loop, token: backend.pending.Token) void {
 /// source completions drain. The scheduler uses this only within one runtime;
 /// independent runtimes use ordinary wake, which retains no target pointer.
 pub fn wakeFrom(l: *Loop, source: *Loop) void {
-    _ = l.woken.raise();
+    _ = l.woken.raise(.acq_rel);
     if (comptime builtin.os.tag == .linux) if (source != l and source.backend == .io_uring and l.backend == .io_uring) {
         if (source.backend.io_uring.messageWake(l.backend.io_uring)) return;
     };

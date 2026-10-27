@@ -190,7 +190,7 @@ const Launch = struct {
     fn vacant(launching: *Launch) ?*Reserve {
         for (launching.reserve) |*entry| switch (entry.state) {
             .free => return entry,
-            .let_go => if (entry.left.raised()) {
+            .let_go => if (entry.left.raised(.acquire)) {
                 entry.* = .{};
                 return entry;
             },
@@ -367,9 +367,9 @@ const Reserve = struct {
     left: Raised = .{},
 
     fn hold(entry: *Reserve) void {
-        _ = entry.entered.raise();
+        _ = entry.entered.raise(.acq_rel);
         entry.gate.waitUncancelable(system());
-        _ = entry.left.raise();
+        _ = entry.left.raise(.acq_rel);
     }
 };
 
@@ -406,7 +406,7 @@ fn grow(threaded: *Io.Threaded, group: *Io.Group, launching: *Launch, target: u3
         group.concurrent(io, Reserve.hold, .{entry}) catch return false;
         entry.state = .holding;
         launching.held += 1;
-        while (!entry.entered.raised()) std.atomic.spinLoopHint();
+        while (!entry.entered.raised(.acquire)) std.atomic.spinLoopHint();
     }
     return true;
 }

@@ -230,7 +230,7 @@ test "a deadline passed aborts the operation's socket, and one disarmed in time 
     // A read that never gets an answer ends at its deadline.
     const start = Io.Clock.awake.now(io);
     try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
-    try testing.expect(watch.fired.raised());
+    try testing.expect(watch.fired.raised(.acquire));
     // The socket is poisoned: the next operation reports the deadline.
     try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
 }
