@@ -2,7 +2,7 @@
 const Groups = @This();
 const builtin = @import("builtin");
 const std = @import("std");
-const Done = @import("../../Done.zig");
+const Done = @import("../../../sync/Done.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -103,7 +103,7 @@ const Command = struct {
 
     fn execute(c: *Command, p: *Scheduler.Processor) void {
         const core = native.runtimeOf(c.io).?;
-        if (Scheduler.processor() == p or (!core.started.load(.acquire) and !p.loop.backend.io_uring.enabled)) {
+        if (Scheduler.processor() == p or (!core.started.raised() and !p.loop.backend.io_uring.enabled)) {
             run(&c.errand, p);
         } else {
             p.send(&c.errand);

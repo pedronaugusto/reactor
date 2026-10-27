@@ -14,6 +14,11 @@ pub fn raise(p: *Raised) bool {
     return p.cell.swap(.raised, .acq_rel) == .raised;
 }
 
+/// Whether it was raised, cleared in the same step.
+pub fn take(p: *Raised) bool {
+    return p.cell.swap(.clear, .acq_rel) == .raised;
+}
+
 /// Whether it is raised.
 pub fn raised(p: *const Raised) bool {
     return p.cell.load(.acquire) == .raised;

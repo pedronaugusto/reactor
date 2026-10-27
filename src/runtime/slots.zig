@@ -422,17 +422,17 @@ fn random(userdata: ?*anyopaque, buffer: []u8) void {
 // Standard error: a mutex tasks wait on, and a writer over the runtime's
 // own `Io`. The holder is a task, which may move between threads.
 
-fn holderId() usize {
-    if (Scheduler.current()) |t| return @intFromPtr(t); // safe: an identity, never dereferenced
-    return @as(usize, std.Thread.getCurrentId()) << 1 | 1;
+fn holderId() Core.Holder {
+    if (Scheduler.current()) |t| return @fromBackingInt(@intFromPtr(t)); // safe: an identity, never dereferenced
+    return @fromBackingInt(@as(usize, std.Thread.getCurrentId()) << 1 | 1);
 }
 
 fn lockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
     const r = Core.running(userdata);
     const me = holderId();
-    if (@atomicLoad(usize, &r.stderr.holder, .acquire) != me) {
+    if (r.stderr.holder.load(.acquire) != me) {
         try r.stderr.mutex.lock(r.io());
-        @atomicStore(usize, &r.stderr.holder, me, .release);
+        r.stderr.holder.store(me, .release);
     }
     r.stderr.depth += 1;
     return lockedStderr(r, mode);
@@ -441,9 +441,9 @@ fn lockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.L
 fn tryLockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!?Io.LockedStderr {
     const r = Core.running(userdata);
     const me = holderId();
-    if (@atomicLoad(usize, &r.stderr.holder, .acquire) != me) {
+    if (r.stderr.holder.load(.acquire) != me) {
         if (!r.stderr.mutex.tryLock()) return null;
-        @atomicStore(usize, &r.stderr.holder, me, .release);
+        r.stderr.holder.store(me, .release);
     }
     r.stderr.depth += 1;
     const locked = try lockedStderr(r, mode);
@@ -477,7 +477,7 @@ fn unlockStderr(userdata: ?*anyopaque) void {
     s.writer.interface.buffer = &.{};
     s.depth -= 1;
     if (s.depth == 0) {
-        @atomicStore(usize, &s.holder, 0, .release);
+        s.holder.store(.none, .release);
         s.mutex.unlock(r.io());
     }
 }

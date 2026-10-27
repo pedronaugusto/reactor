@@ -6,18 +6,18 @@
 const SlotPool = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
+const FreeList = @import("../sync/FreeList.zig");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
 pub const slot_len = 256;
 pub const slot_alignment: Alignment = .@"16";
 
-const Free = packed struct(u64) { index_plus_one: u32, tag: u32 };
-
 buffer: []align(slot_alignment.toByteUnits()) u8,
-links: []u32,
+links: []aegis.Atomic(FreeList.Link),
 size: usize,
-head: std.atomic.Value(u64) = .init(0),
+free_slots: FreeList = .{},
 
 pub fn init(gpa: Allocator, count: u32) Allocator.Error!SlotPool {
     return initSized(gpa, count, slot_len);
@@ -29,7 +29,7 @@ pub fn initSized(gpa: Allocator, count: u32, size: usize) Allocator.Error!SlotPo
     std.debug.assert(size % slot_alignment.toByteUnits() == 0);
     const buffer = try gpa.alignedAlloc(u8, slot_alignment, @as(usize, count) * size);
     errdefer gpa.free(buffer);
-    var p: SlotPool = .{ .buffer = buffer, .links = try gpa.alloc(u32, count), .size = size };
+    var p: SlotPool = .{ .buffer = buffer, .links = try gpa.alloc(aegis.Atomic(FreeList.Link), count), .size = size };
     var i = count;
     while (i > 0) {
         i -= 1;
@@ -67,22 +67,9 @@ fn free(context: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize
 }
 
 fn pop(p: *SlotPool) ?u32 {
-    var raw = p.head.load(.acquire);
-    while (true) {
-        const f: Free = @bitCast(raw);
-        if (f.index_plus_one == 0) return null;
-        const index = f.index_plus_one - 1;
-        const next: Free = .{ .index_plus_one = @atomicLoad(u32, &p.links[index], .monotonic), .tag = f.tag +% 1 };
-        raw = p.head.cmpxchgWeak(raw, @bitCast(next), .acq_rel, .acquire) orelse return index;
-    }
+    return p.free_slots.pop(p.links);
 }
 
 fn push(p: *SlotPool, index: u32) void {
-    var raw = p.head.load(.monotonic);
-    while (true) {
-        const f: Free = @bitCast(raw);
-        @atomicStore(u32, &p.links[index], f.index_plus_one, .monotonic);
-        const next: Free = .{ .index_plus_one = index + 1, .tag = f.tag +% 1 };
-        raw = p.head.cmpxchgWeak(raw, @bitCast(next), .release, .monotonic) orelse return;
-    }
+    p.free_slots.push(p.links, index);
 }

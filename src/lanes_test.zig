@@ -116,7 +116,7 @@ test "admission: startup refuses disabled owned lanes before fixed operations" {
     defer driver.deinit();
     for (&driver.runtime.core.lanes.threaded) |*threaded| try testing.expectEqual(@as(usize, 0), @as(usize, @intFromBool(threaded.worker_threads.load(.acquire) != null)));
     try testing.expectError(error.SystemResources, driver.runtime.start());
-    try testing.expect(!driver.runtime.core.started.load(.acquire));
+    try testing.expect(!driver.runtime.core.started.raised());
 }
 
 const Retained = struct {

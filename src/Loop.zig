@@ -15,6 +15,7 @@ const Loop = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const Raised = @import("sync/Raised.zig");
 const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -144,7 +145,7 @@ ready: List = .{},
 reaped: List = .{},
 in_flight: u32 = 0,
 max_ops: u32,
-woken: std.atomic.Value(bool) = .init(false),
+woken: Raised = .{},
 batch_sink: ?BatchSink = null,
 /// Where the io_uring backend hands the completions it drains under
 /// pressure (`installPressure`).
@@ -396,7 +397,7 @@ pub fn run(l: *Loop, mode: RunMode) RunError!u32 {
         delivered += counted.count;
         delivered += l.expire();
         delivered += l.deliverReady();
-        const woken = l.woken.swap(false, .acq_rel);
+        const woken = l.woken.take();
         switch (mode) {
             .nowait => return delivered,
             .once => if (delivered > 0 or woken) return delivered,
@@ -442,7 +443,7 @@ pub fn nextTimeout(l: *const Loop) ?Io.Duration {
 /// From any thread: makes `backendHandle` readable and returns a waiting
 /// `run`.
 pub fn wake(l: *Loop) void {
-    l.woken.store(true, .release);
+    _ = l.woken.raise();
     l.backend.wake();
 }
 
@@ -620,6 +621,6 @@ const Pressure = struct {
         p.notified();
     }
     pub fn notified(p: *Pressure) void {
-        p.loop.woken.store(true, .release);
+        _ = p.loop.woken.raise();
     }
 };

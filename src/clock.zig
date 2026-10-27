@@ -112,29 +112,32 @@ pub fn resolution(clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
 /// clocks read the same timeline; `real` reads it shifted to an epoch,
 /// and `jump` moves `real` alone, as a wall-clock change does.
 pub const Virtual = struct {
-    ns: std.atomic.Value(u64) = .init(0),
-    /// `real` minus the timeline, in nanoseconds.
-    real_offset: std.atomic.Value(i64) = .init(1_700_000_000 * std.time.ns_per_s),
+    at: aegis.Atomic(Awake) = .init(.fromRaw(0)),
+    /// `real` minus the timeline.
+    real_offset: aegis.Atomic(Offset) = .init(.fromRaw(1_700_000_000 * std.time.ns_per_s)),
 
     pub fn now(v: *const Virtual, clock: Io.Clock) Io.Timestamp {
-        const ns: i96 = v.ns.load(.acquire);
+        const Point = aegis.units.Instant(.any, .nanosecond, i96);
+        const at: Point = .fromRaw(v.at.load(.acquire).raw());
         return switch (clock) {
-            .real => .{ .nanoseconds = ns + v.real_offset.load(.acquire) },
-            else => .{ .nanoseconds = ns },
+            .real => at.saturatingAdd(Signed.fromRaw(v.real_offset.load(.acquire).raw())).toTimestamp(),
+            else => at.toTimestamp(),
         };
     }
 
     pub fn advance(v: *Virtual, by: Io.Duration) void {
-        _ = v.ns.fetchAdd(spanOf(by).raw(), .acq_rel);
+        const span = spanOf(by);
+        var seen = v.at.load(.acquire);
+        while (v.at.cmpxchgWeak(seen, seen.saturatingAdd(span), .acq_rel, .acquire)) |found| seen = found;
     }
 
     pub fn set(v: *Virtual, at: Awake) void {
-        v.ns.store(at.raw(), .release);
+        v.at.store(at, .release);
     }
 
     /// Moves `real` by `by` without moving the timeline.
     pub fn jump(v: *Virtual, by: Offset) void {
-        _ = v.real_offset.fetchAdd(by.raw(), .acq_rel);
+        _ = v.real_offset.fetchAddWrapping(by, .acq_rel);
     }
 
     /// How far `jump` moves `real`, either way.

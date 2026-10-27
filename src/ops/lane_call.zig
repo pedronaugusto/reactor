@@ -4,7 +4,7 @@
 //! which the monitor can rescue by handing on the processor; or "borrowed": std's code run on the worker
 //! itself, for calls that never block.
 const std = @import("std");
-const Io = std.Io;
+const Done = @import("../sync/Done.zig");
 
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
@@ -65,7 +65,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         func: @TypeOf(func),
         args: @TypeOf(args),
         result: R = undefined,
-        finished: Io.Event = .unset,
+        finished: Done = .{},
 
         fn run(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the waiting caller owns the record
@@ -83,7 +83,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
     };
     while (true) {
         c.job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ };
-        c.finished = .unset;
+        c.finished = .{};
         while (!lanes.admit(&c.job)) {
             if (comptime raw) return error.ConcurrencyUnavailable;
             std.Thread.yield() catch std.atomic.spinLoopHint();
@@ -165,7 +165,7 @@ fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes:
             Scheduler.yield();
         }
         if (comptime cancelable(R)) t.enterWait(&c.hook) catch {
-            c.job.pending.store(0, .release);
+            c.job.pending.store(.fromRaw(0), .release);
             lanes.retire(&c.job);
             return error.Canceled;
         };

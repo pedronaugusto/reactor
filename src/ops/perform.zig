@@ -336,6 +336,7 @@ const Elsewhere = struct {
     left: u8 = 1,
     timed_out: bool = false,
     failed: bool = false,
+    // aegis: boundary: a futex word: the kernel waits on this u32's address
     done: std.atomic.Value(u32) = .init(0),
 
     fn start(errand: *Scheduler.Errand, p: *Processor) void {

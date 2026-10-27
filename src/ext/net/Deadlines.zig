@@ -23,7 +23,7 @@ const Io = std.Io;
 const clock = @import("../../clock.zig");
 const native = @import("../native.zig");
 const abort = @import("abort.zig").abort;
-const Raised = @import("../../backend/Raised.zig");
+const Raised = @import("../../sync/Raised.zig");
 
 /// Watches with an operation armed.
 const Armed = aegis.units.Count(Watch, u32);

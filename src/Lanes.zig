@@ -30,6 +30,8 @@ const Lanes = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const Raised = @import("sync/Raised.zig");
+const Done = @import("sync/Done.zig");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -88,7 +90,7 @@ pub const Job = struct {
     control: bool = false,
     next: ?*Job = null,
     /// The call, plus one while a cancel of it runs.
-    pending: std.atomic.Value(u32) = .init(1),
+    pending: aegis.Atomic(Holders) = .init(.fromRaw(1)),
     /// Cancelled before it started: `run` never ran.
     dropped: bool = false,
     /// The executor refused the call; no user code ran.
@@ -188,7 +190,7 @@ const Launch = struct {
     fn vacant(launching: *Launch) ?*Reserve {
         for (launching.reserve) |*entry| switch (entry.state) {
             .free => return entry,
-            .let_go => if (entry.left.load(.acquire)) {
+            .let_go => if (entry.left.raised()) {
                 entry.* = .{};
                 return entry;
             },
@@ -198,12 +200,18 @@ const Launch = struct {
     }
 };
 
+/// Who holds a job: the call, and a cancel of it while one runs.
+const Holders = aegis.units.Count(Job, u32);
+
+/// Calls a lane ran on the caller's thread.
+const Inlined = aegis.units.Count(State, u64);
+
 const State = struct {
     cap: u16,
     limit: u32,
     launch: aegis.BlockingGuarded(Launch) = .init(.{}),
     queue: aegis.BlockingGuarded(Queue) = .init(.{}),
-    inlined: std.atomic.Value(u64) = .init(0),
+    inlined: aegis.Atomic(Inlined) = .init(.fromRaw(0)),
 };
 
 mode: std.meta.Tag(Config),
@@ -333,7 +341,7 @@ pub fn executor(l: *Lanes, lane: Lane) Io {
 
 /// Counts a call run inline.
 pub fn countInline(l: *Lanes, lane: Lane) void {
-    _ = l.states[@backingInt(lane)].inlined.fetchAdd(1, .monotonic);
+    _ = l.states[@backingInt(lane)].inlined.fetchAddWrapping(.fromRaw(1), .monotonic);
 }
 
 /// Readies the lanes for calls. Owned lanes start no thread here: each
@@ -352,16 +360,16 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
 /// pool until let go: the reserve a lane grows by.
 const Reserve = struct {
     state: enum { free, holding, let_go } = .free,
-    gate: Io.Event = .unset,
-    /// Set once it runs: whether its thread is one the executor made for it.
-    entered: std.atomic.Value(bool) = .init(false),
-    /// Set once it no longer touches the entry.
-    left: std.atomic.Value(bool) = .init(false),
+    gate: Done = .{},
+    /// Raised once it runs: whether its thread is one the executor made for it.
+    entered: Raised = .{},
+    /// Raised once it no longer touches the entry.
+    left: Raised = .{},
 
     fn hold(entry: *Reserve) void {
-        entry.entered.store(true, .release);
+        _ = entry.entered.raise();
         entry.gate.waitUncancelable(system());
-        entry.left.store(true, .release);
+        _ = entry.left.raise();
     }
 };
 
@@ -398,7 +406,7 @@ fn grow(threaded: *Io.Threaded, group: *Io.Group, launching: *Launch, target: u3
         group.concurrent(io, Reserve.hold, .{entry}) catch return false;
         entry.state = .holding;
         launching.held += 1;
-        while (!entry.entered.load(.acquire)) std.atomic.spinLoopHint();
+        while (!entry.entered.raised()) std.atomic.spinLoopHint();
     }
     return true;
 }
@@ -479,7 +487,7 @@ fn dispatch(l: *Lanes, job: *Job) Dispatch {
 /// Running slots may already serve queued calls; their reservations are distinct.
 pub fn retire(l: *Lanes, job: *Job) void {
     assert(!job.held());
-    assert(job.pending.load(.acquire) == 0);
+    assert(job.pending.load(.acquire).eql(.fromRaw(0)));
     const reservation = if (job.executor) |*r| r else return;
     var held = l.admission.acquireUncancelable(system());
     defer held.deinit(system());
@@ -555,7 +563,7 @@ fn next(l: *Lanes, lane: Lane) ?*Job {
 }
 
 fn finish(job: *Job) void {
-    if (job.pending.fetchSub(1, .acq_rel) == 1) job.done(job);
+    if (job.pending.fetchSubWrapping(.fromRaw(1), .acq_rel).eql(.fromRaw(1))) job.done(job);
 }
 
 /// From any thread: cancels `job` by std's own mechanism. A call still
@@ -570,8 +578,9 @@ pub fn cancel(l: *Lanes, job: *Job) void {
     defer held.deinit(system());
     var pending = job.pending.load(.acquire);
     while (true) {
-        if (pending == 0) return;
-        pending = job.pending.cmpxchgWeak(pending, pending + 1, .acq_rel, .acquire) orelse break;
+        if (pending.eql(.fromRaw(0))) return;
+        const more = pending.add(.fromRaw(1)) catch unreachable; // unreachable: at most the call and one cancel hold it
+        pending = job.pending.cmpxchgWeak(pending, more, .acq_rel, .acquire) orelse break;
     }
     const io = l.executor(job.lane);
     var launching = l.states[@backingInt(job.lane)].launch.acquireUncancelable(system());
@@ -632,7 +641,7 @@ pub fn stats(l: *Lanes, lane: Lane) Stats {
     var launching = s.launch.acquireUncancelable(system());
     defer launching.deinit(system());
     const made: u32 = if (l.mode == .owned) threadsOf(&l.threaded[@backingInt(lane)]) else 0;
-    return .{ .queued = queued, .running = running, .threads = made, .@"inline" = s.inlined.load(.monotonic) };
+    return .{ .queued = queued, .running = running, .threads = made, .@"inline" = s.inlined.load(.monotonic).raw() };
 }
 
 /// Executor capacity the admitted calls hold, in units.

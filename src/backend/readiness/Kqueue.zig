@@ -14,7 +14,7 @@
 //! with a timeout arms that timer and waits without one.
 const builtin = @import("builtin");
 const std = @import("std");
-const Raised = @import("../Raised.zig");
+const Raised = @import("../../sync/Raised.zig");
 const assert = std.debug.assert;
 const posix = std.posix;
 const c = std.c;

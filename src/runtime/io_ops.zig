@@ -336,6 +336,7 @@ const Abort = struct {
     completion: Loop.Completion = .{ .run = done },
     op: Loop.Op,
     task: ?*Task,
+    // aegis: boundary: a futex word: the kernel waits on this u32's address
     finished: std.atomic.Value(u32) = .init(0),
     scheduler: *Scheduler,
     target: *Processor = undefined,

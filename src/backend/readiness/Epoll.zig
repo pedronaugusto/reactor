@@ -6,7 +6,7 @@
 //! threads write an eventfd; `real` and `boot` timers are one absolute
 //! timerfd each.
 const std = @import("std");
-const Raised = @import("../Raised.zig");
+const Raised = @import("../../sync/Raised.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 

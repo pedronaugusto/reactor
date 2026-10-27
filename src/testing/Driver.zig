@@ -69,7 +69,7 @@ pub fn io(d: *Driver) Io {
 
 /// Virtual nanoseconds since the start.
 pub fn elapsed(d: *const Driver) u64 {
-    return d.virtual.ns.load(.acquire);
+    return d.virtual.at.load(.acquire).raw();
 }
 
 /// Every fake scheduling and completion choice joins the property's tape.

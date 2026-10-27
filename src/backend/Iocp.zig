@@ -28,7 +28,7 @@
 const Iocp = @This();
 
 const std = @import("std");
-const Raised = @import("Raised.zig");
+const Raised = @import("../sync/Raised.zig");
 const Io = std.Io;
 const net = Io.net;
 const Allocator = std.mem.Allocator;

@@ -6,6 +6,8 @@ const Receiver = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const FreeList = @import("../../sync/FreeList.zig");
+const Link = FreeList.Link;
 const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -27,67 +29,21 @@ native_state: if (builtin.os.tag == .linux) ?Native else void = if (builtin.os.t
 
 /// Buffers of one length, all allocated at `init`, taken and given back
 /// from any thread without a lock.
-/// A buffer's link: the next buffer's index (on a delivered chain) or that
-/// index plus one (on the free list), or `end`.
-const Link = enum(u32) {
-    end = std.math.maxInt(u32),
-    _,
-
-    fn of(value: u32) Link {
-        return @fromBackingInt(value);
-    }
-
-    fn raw(l: Link) u32 {
-        return @backingInt(l);
-    }
-};
-
-/// The free list's head: the first buffer's index plus one (zero, none),
-/// and a tag moved on at every change, so a head seen before is not taken
-/// for the same head after a take and a give (ABA).
-const Free = enum(u64) {
-    empty = 0,
-    _,
-
-    const Parts = packed struct(u64) { index_plus_one: u32, tag: u32 };
-
-    fn of(index_plus_one: u32, tag_: u32) Free {
-        return @fromBackingInt(@as(u64, @bitCast(Parts{ .index_plus_one = index_plus_one, .tag = tag_ })));
-    }
-
-    fn parts(f: Free) Parts {
-        return @bitCast(@backingInt(f));
-    }
-
-    fn firstPlusOne(f: Free) u32 {
-        return f.parts().index_plus_one;
-    }
-
-    fn first(f: Free) ?u32 {
-        const plus_one = f.firstPlusOne();
-        return if (plus_one == 0) null else plus_one - 1;
-    }
-
-    fn tag(f: Free) u32 {
-        return f.parts().tag;
-    }
-};
-
 /// Receivers using a pool.
 const Receivers = aegis.units.Count(Receiver, u32);
 
 pub const Pool = struct {
     memory: []u8,
     buffer_len: u32,
-    /// Each buffer's next, on the free list (`Free`) or a receiver's
+    /// Each buffer's next, on the free list (`free`) or a receiver's
     /// delivered chain: a cell, as a buffer's link is read by a taker
     /// racing the giver.
     links: []aegis.Atomic(Link),
+    /// The free buffers, linked through `links`.
+    free: FreeList = .{},
     lengths: []u32,
     groups: if (builtin.os.tag == .linux) ?Groups else void = if (builtin.os.tag == .linux) null else {},
     fixed: if (builtin.os.tag == .linux) ?Registrations else void = if (builtin.os.tag == .linux) null else {},
-    /// The free list's head: an index plus one, and a tag against ABA.
-    head: aegis.Atomic(Free) = .init(.empty),
     receivers: aegis.Atomic(Receivers) = .init(.fromRaw(0)),
 
     pub const Options = struct {
@@ -146,20 +102,11 @@ pub const Pool = struct {
 
     fn take(p: *Pool) ?u32 {
         if (builtin.os.tag == .linux) if (p.groups != null) return null;
-        var head = p.head.load(.acquire);
-        while (true) {
-            const index = head.first() orelse return null;
-            const next_free = Free.of(p.links[index].load(.monotonic).raw(), head.tag() +% 1);
-            head = p.head.cmpxchgWeak(head, next_free, .acq_rel, .acquire) orelse return index;
-        }
+        return p.free.pop(p.links);
     }
 
     fn give(p: *Pool, index: u32) void {
-        var head = p.head.load(.monotonic);
-        while (true) {
-            p.links[index].store(.of(head.firstPlusOne()), .monotonic);
-            head = p.head.cmpxchgWeak(head, Free.of(index + 1, head.tag() +% 1), .release, .monotonic) orelse return;
-        }
+        p.free.push(p.links, index);
     }
 };
 
@@ -359,7 +306,7 @@ const Native = struct {
         if (mailbox.head) |index| {
             const pool = state.receiver.pool;
             const following = pool.links[index].load(.monotonic);
-            mailbox.head = if (following == .end) null else following.raw();
+            mailbox.head = following.index();
             if (mailbox.head == null) mailbox.tail = null;
             state.receiver.lent = index;
             return pool.buffer(index)[0..pool.lengths[index]];
@@ -401,7 +348,7 @@ const Native = struct {
         const pool = state.receiver.pool;
         while (mailbox.head) |index| {
             const following = pool.links[index].load(.monotonic);
-            mailbox.head = if (following == .end) null else following.raw();
+            mailbox.head = following.index();
             state.group.give(pool.memory, pool.buffer_len, index - state.group.first);
         }
     }

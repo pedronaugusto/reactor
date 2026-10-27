@@ -2,6 +2,7 @@
 //! runtime, so cancelling a caller never leaves libc using its stack.
 const Lookup = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const net = Io.net;
 const Allocator = std.mem.Allocator;
@@ -14,16 +15,18 @@ pub const capacity = 64;
 pub const Provider = *const fn ([]const u8, u16, ?net.IpAddress.Family, []net.IpAddress, ?*[254]u8) getaddrinfo.Error!getaddrinfo.Result;
 pub const Result = struct { count: usize, canonical: ?net.HostName = null };
 const State = enum(u8) { pending, completed, canceled };
+const Flag = enum(u8) { no, yes };
 
 const Record = struct {
-    occupied: std.atomic.Value(bool) = .init(false),
+    occupied: aegis.Atomic(Flag) = .init(.no),
+    // aegis: boundary: a futex word: the kernel waits on this u32's address
     finished: std.atomic.Value(u32) = .init(1),
-    published: std.atomic.Value(bool) = .init(false),
-    notified: std.atomic.Value(bool) = .init(false),
-    state: std.atomic.Value(State) = .init(.pending),
+    published: aegis.Atomic(Flag) = .init(.no),
+    notified: aegis.Atomic(Flag) = .init(.no),
+    state: aegis.Atomic(State) = .init(.pending),
     hook: Task.Hook = .{ .cancel = cancel },
     after: Scheduler.After = .{ .run = submit },
-    job: Lanes.Job = .{ .run = run, .done = done, .lane = .lookup, .pending = .init(0) },
+    job: Lanes.Job = .{ .run = run, .done = done, .lane = .lookup, .pending = .init(.fromRaw(0)) },
     scheduler: *Scheduler = undefined,
     task: *Task = undefined,
     provider: Provider = undefined,
@@ -37,8 +40,8 @@ const Record = struct {
     lanes: *Lanes = undefined,
 
     fn notify(r: *Record) void {
-        if (!r.published.load(.seq_cst)) return;
-        if (!r.notified.swap(true, .seq_cst)) r.scheduler.ready(r.task, .completed);
+        if (r.published.load(.seq_cst) == .no) return;
+        if (r.notified.swap(.yes, .seq_cst) == .no) r.scheduler.ready(r.task, .completed);
     }
 
     fn cancel(hook: *Task.Hook, _: *Task) void {
@@ -48,7 +51,7 @@ const Record = struct {
 
     fn submit(after: *Scheduler.After, _: *Task) void {
         const r: *Record = @fieldParentPtr("after", after);
-        r.published.store(true, .seq_cst);
+        r.published.store(.yes, .seq_cst);
         if (r.state.load(.seq_cst) == .canceled) r.notify();
         r.lanes.submit(&r.job);
     }
@@ -91,13 +94,13 @@ pub fn deinit(l: *Lookup, gpa: Allocator, lanes: *Lanes) void {
 
 fn acquire(l: *Lookup) ?*Record {
     for (l.records) |*r| {
-        if (r.occupied.cmpxchgStrong(false, true, .acquire, .monotonic) != null) continue;
+        if (r.occupied.cmpxchgStrong(.no, .yes, .acquire, .monotonic) != null) continue;
         if (r.finished.load(.acquire) == 0 or r.job.held()) {
-            r.occupied.store(false, .release);
+            r.occupied.store(.no, .release);
             continue;
         }
         if (r.job.admitted()) r.lanes.retire(&r.job);
-        r.job = .{ .run = Record.run, .done = Record.done, .lane = .lookup, .pending = .init(0) };
+        r.job = .{ .run = Record.run, .done = Record.done, .lane = .lookup, .pending = .init(.fromRaw(0)) };
         return r;
     }
     return null;
@@ -109,7 +112,7 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     const t = Scheduler.current() orelse return direct(lanes, provider, name, options, out);
     if (lanes.inlined()) return direct(lanes, provider, name, options, out);
     const r = l.acquire() orelse return error.SystemResources;
-    defer r.occupied.store(false, .release);
+    defer r.occupied.store(.no, .release);
     r.scheduler = s;
     r.task = t;
     r.lanes = lanes;
@@ -118,8 +121,8 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     r.name_len = name.bytes.len;
     r.port = options.port;
     r.family = options.family;
-    r.published.store(false, .monotonic);
-    r.notified.store(false, .monotonic);
+    r.published.store(.no, .monotonic);
+    r.notified.store(.no, .monotonic);
     r.state.store(.pending, .monotonic);
     std.debug.assert(lanes.started);
     if (!lanes.admit(&r.job)) return error.SystemResources;
@@ -128,7 +131,7 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
         return err;
     };
     r.finished.store(0, .release);
-    r.job.pending.store(1, .monotonic);
+    r.job.pending.store(.fromRaw(1), .monotonic);
     Scheduler.park(&r.after);
     t.leaveWait();
     if (r.state.load(.acquire) == .canceled) return t.acknowledge();

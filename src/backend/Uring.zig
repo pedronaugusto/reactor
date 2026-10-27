@@ -17,7 +17,7 @@
 const Uring = @This();
 
 const std = @import("std");
-const Raised = @import("Raised.zig");
+const Raised = @import("../sync/Raised.zig");
 const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;

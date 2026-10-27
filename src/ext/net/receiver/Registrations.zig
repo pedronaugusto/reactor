@@ -2,7 +2,7 @@
 const Registrations = @This();
 const builtin = @import("builtin");
 const std = @import("std");
-const Done = @import("../../Done.zig");
+const Done = @import("../../../sync/Done.zig");
 const Io = std.Io;
 const Scheduler = @import("../../../Scheduler.zig");
 const native = @import("../../native.zig");
@@ -62,7 +62,7 @@ const Command = struct {
     fn execute(command: *Command, owner: *Scheduler.Processor) void {
         if (comptime builtin.os.tag != .linux) unreachable; // unreachable: registration is Linux only
         const core = native.runtimeOf(command.io).?;
-        if (Scheduler.processor() == owner or (!core.started.load(.acquire) and !owner.loop.backend.io_uring.enabled)) run(&command.errand, owner) else {
+        if (Scheduler.processor() == owner or (!core.started.raised() and !owner.loop.backend.io_uring.enabled)) run(&command.errand, owner) else {
             command.awaiting = true;
             owner.send(&command.errand);
             command.ready.waitUncancelable(command.io);

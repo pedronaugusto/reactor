@@ -5,6 +5,7 @@ const Core = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const Raised = @import("../sync/Raised.zig");
 const aegis = @import("aegis");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -46,7 +47,7 @@ lanes: Lanes,
 lookup: Lookup,
 jobs: if (builtin.os.tag == .windows) Notifications else void,
 /// The home processor's scheduler runs here while the root waits.
-started: std.atomic.Value(bool) = .init(false),
+started: Raised = .{},
 stderr: Stderr = .{},
 csprngs: []Io.Threaded.Csprng,
 /// io_uring: the files this runtime opened and has not closed, which alone
@@ -57,9 +58,15 @@ const home_stack_size = 256 << 10;
 
 /// Standard error, held by a task (which may move between threads) or a
 /// thread outside the runtime; its writer runs on the runtime's `Io`.
+/// An identity a lock is held by: a task's address, or a thread's id
+/// marked in its low bit; never dereferenced.
+pub const Holder = enum(usize) { none = 0, _ };
+
 pub const Stderr = struct {
+    // aegis: boundary: std.Io's lockStderr and unlockStderr contract: the lock is taken by one vtable call and let go by another, so no guard of a scope can hold it
     mutex: Io.Mutex = .init,
-    holder: usize = 0,
+    /// Who holds it, so a holder may lock it again (`depth`).
+    holder: aegis.Atomic(Holder) = .init(.none),
     depth: u32 = 0,
     /// Filled when first locked: `File.stderr` is a call on some systems.
     writer: Io.File.Writer = .{
@@ -246,10 +253,10 @@ fn homeScheduler(arg: ?*anyopaque) noreturn {
 }
 
 pub fn start(c: *Core) StartError!void {
-    assert(!c.started.load(.acquire));
+    assert(!c.started.raised());
     try c.lanes.prepare();
     // Publish startup before adoption: native setup must go to each owner.
-    c.started.store(true, .release);
+    _ = c.started.raise();
     errdefer c.stop();
     // TSan’s thread-local storage needs more than the small normal OS stack.
     for (c.processors[1..]) |*p| {
@@ -283,7 +290,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
 }
 
 pub fn stop(c: *Core) void {
-    if (!c.started.load(.acquire)) return;
+    if (!c.started.raised()) return;
     // The home processor back first, should it have gone to a spare while
     // the host ran its own code; it stays held from here.
     _ = Scheduler.fromUser();
@@ -295,7 +302,7 @@ pub fn stop(c: *Core) void {
     // Spares, and workers waiting as spares, see the stop.
     if (c.scheduler.monitor != null) c.scheduler.spares.stop();
     for (c.processors[1..]) |*p| if (p.thread) |t| t.join();
-    c.started.store(false, .release);
+    c.started.clear();
 }
 
 pub fn deinit(c: *Core) void {
@@ -333,7 +340,7 @@ pub fn of(userdata: ?*anyopaque) *Core {
 /// Fixed std.Io signatures require a successfully started runtime.
 pub fn running(userdata: ?*anyopaque) *Core {
     const core = of(userdata);
-    assert(core.started.load(.acquire));
+    assert(core.started.raised());
     return core;
 }
 
