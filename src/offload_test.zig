@@ -38,15 +38,18 @@ const Outside = struct {
     fn threadId() std.Thread.Id {
         return current_thread.now();
     }
-    fn hookId(context: *anyopaque) void {
-        const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the retained test result
-        id.* = threadId();
-    }
+    const HookId = struct {
+        id: *std.Thread.Id,
+        pub fn execute(h: *HookId) void {
+            h.id.* = threadId();
+        }
+    };
     fn offloadId(io: Io) anyerror!std.Thread.Id {
         return reactor.blocking(io, .general, threadId, .{});
     }
     fn hookedId(io: Io, id: *std.Thread.Id) anyerror!void {
-        return reactor.syncLane(io, null, hookId, id);
+        var hook: HookId = .{ .id = id };
+        return reactor.syncLane(io, &hook);
     }
     fn checkAccepted(io: Io) !void {
         const caller = threadId();

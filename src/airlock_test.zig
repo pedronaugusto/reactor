@@ -16,29 +16,30 @@ const Noting = struct {
     var elsewhere: std.atomic.Value(u32) = .init(0);
     var calls: std.atomic.Value(u32) = .init(0);
 
-    const Call = struct { function: *const fn (*anyopaque) void, argument: *anyopaque };
+    /// The job airlock gave, noted where it runs.
+    const Call = struct {
+        job: *airlock.Blocking.Job,
+        pub fn execute(call: *Call) void {
+            if (@as(u64, current_thread.now()) != caller.load(.monotonic)) _ = elsewhere.fetchAdd(1, .monotonic);
+            call.job.execute();
+        }
+    };
 
-    fn run(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
-        var call: Call = .{ .function = function, .argument = argument };
+    fn run(_: *airlock.Blocking, io: Io, job: *airlock.Blocking.Job) Io.Cancelable!void {
+        var call: Call = .{ .job = job };
         _ = calls.fetchAdd(1, .monotonic);
-        return reactor.syncLane(io, context, noted, &call);
-    }
-
-    fn noted(context: *anyopaque) void {
-        const call: *Call = @ptrCast(@alignCast(context)); // safe: `run` passed its call record
-        if (@as(u64, current_thread.now()) != caller.load(.monotonic)) _ = elsewhere.fetchAdd(1, .monotonic);
-        call.function(call.argument);
+        return reactor.syncLane(io, &call);
     }
 };
 
 fn syncs(io: Io, dir: Io.Dir) !void {
     Noting.caller.store(current_thread.now(), .monotonic);
-    const blocking: airlock.Blocking = .{ .run = Noting.run };
+    var blocking: airlock.Blocking = .{ .run = Noting.run };
     const file = try dir.createFile(io, "file", .{});
     defer file.close(io);
     try file.writePositionalAll(io, "contents", 0);
-    _ = try airlock.syncFile(io, file, .{ .blocking = blocking });
-    _ = try airlock.syncDir(io, dir, .{ .blocking = blocking });
+    _ = try airlock.syncFile(io, file, .{ .blocking = &blocking });
+    _ = try airlock.syncDir(io, dir, .{ .blocking = &blocking });
 }
 
 test "airlock's syncs run on the sync lane through syncLane, from a task and from the root" {
@@ -54,4 +55,20 @@ test "airlock's syncs run on the sync lane through syncLane, from a task and fro
     try task.await(io);
     try testing.expect(Noting.calls.load(.monotonic) > 0);
     try testing.expectEqual(Noting.calls.load(.monotonic), Noting.elsewhere.load(.monotonic));
+}
+
+test "a Blocking made by syncLaneFor runs airlock's syncs on the sync lane" {
+    if (!supported) return error.SkipZigTest;
+    var t: Threads = undefined;
+    try t.init(testing.allocator, .{ .workers = 1, .max_tasks = 8, .stack_size = .fromRaw(256 << 10) });
+    defer t.deinit();
+    const io = t.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var lane = reactor.syncLaneFor(airlock.Blocking);
+    const file = try tmp.dir.createFile(io, "file", .{});
+    defer file.close(io);
+    try file.writePositionalAll(io, "contents", 0);
+    _ = try airlock.syncFile(io, file, .{ .blocking = &lane });
+    _ = try airlock.syncDir(io, tmp.dir, .{ .blocking = &lane });
 }

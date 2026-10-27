@@ -29,29 +29,41 @@ pub fn blocking(io: Io, lane: Lanes.Lane, function: anytype, args: std.meta.Args
 }
 
 /// The executor a library that keeps its own syscalls takes for its raw
-/// blocking calls (airlock's `Blocking.run`, for its device flushes):
-/// `function(argument)` on the runtime's `sync` lane, the calling task parked
-/// meanwhile; on the calling thread under any other `Io`. Its signature is
-/// fixed, as a `std.Io` slot's is, so it waits for a lane slot as they do
-/// and never refuses. `Canceled` only when the call never started; a call
-/// that started finishes and succeeds, its cancel left pending for the
-/// caller's next cancelation point, so a completed sync's error is never
-/// hidden. `function` and `argument` are borrowed for the call alone, and
-/// `function` makes no `Io` call. `context` is not used: the `io` given
-/// with each call names the runtime.
-pub fn syncLane(io: Io, context: ?*anyopaque, function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
-    _ = context;
+/// blocking calls (airlock's `Blocking`, for its device flushes): runs
+/// `job.execute()` on the runtime's `sync` lane, the calling task parked
+/// meanwhile; on the calling thread under any other `Io`. `job` points to
+/// whatever the library calls a job, anything with `execute()`. It waits for
+/// a lane slot as a `std.Io` slot does and never refuses. `Canceled` only
+/// when the call never started; a call that started finishes and succeeds,
+/// its cancel left pending for the caller's next cancelation point, so a
+/// completed sync's error is never hidden. `job` is borrowed for the call
+/// alone, and its `execute` makes no `Io` call.
+pub fn syncLane(io: Io, job: anytype) Io.Cancelable!void {
     const core = native.runtimeOf(io) orelse {
         try io.checkCancel();
-        return function(argument);
+        return job.execute();
     };
     const entered = native.enter();
     defer native.leave(entered);
-    return lane_call.call(&core.lanes, .sync, &Raw.run, .{ function, argument });
+    return lane_call.call(&core.lanes, .sync, &Raw(@TypeOf(job)).run, .{job});
 }
 
-const Raw = struct {
-    fn run(function: *const fn (*anyopaque) void, argument: *anyopaque) Io.Cancelable!void {
-        function(argument);
-    }
-};
+/// A `Blocking` of the library whose type it is, running every job through
+/// `syncLane`: one shaped as airlock's, its `run` taking the `Blocking`, the
+/// `Io` and a `*Blocking.Job`. It holds no state, so one value serves every
+/// caller.
+pub fn syncLaneFor(comptime Blocking: type) Blocking {
+    return .{ .run = struct {
+        fn run(_: *Blocking, io: Io, job: *Blocking.Job) Io.Cancelable!void {
+            return syncLane(io, job);
+        }
+    }.run };
+}
+
+fn Raw(comptime Job: type) type {
+    return struct {
+        fn run(job: Job) Io.Cancelable!void {
+            job.execute();
+        }
+    };
+}

@@ -451,40 +451,43 @@ test "a zero timeout consumes a ready Wake and otherwise times out" {
 test "syncLane runs a library's raw call on the sync lane, and on the caller under another Io" {
     try skipWithoutFibers();
     const Call = struct {
-        fn run(context: *anyopaque) void {
-            const id: *std.Thread.Id = @ptrCast(@alignCast(context)); // safe: the test passed the thread id
-            id.* = current_thread.now();
+        id: std.Thread.Id,
+        pub fn execute(c: *@This()) void {
+            c.id = current_thread.now();
         }
         fn fromTask(io: std.Io) !void {
-            var id: std.Thread.Id = current_thread.now();
-            try reactor.syncLane(io, null, run, &id);
-            try testing.expect(id != current_thread.now());
+            var call: @This() = .{ .id = current_thread.now() };
+            try reactor.syncLane(io, &call);
+            try testing.expect(call.id != current_thread.now());
         }
     };
     var t: Threads = undefined;
     try t.init(testing.allocator, .{ .workers = 0, .max_tasks = 16, .stack_size = .fromRaw(256 << 10) });
     defer t.deinit();
-    var id: std.Thread.Id = undefined;
-    try reactor.syncLane(t.io(), null, Call.run, &id);
-    try testing.expect(id != current_thread.now());
+    var call: Call = .{ .id = undefined };
+    try reactor.syncLane(t.io(), &call);
+    try testing.expect(call.id != current_thread.now());
     var task = try t.io().concurrent(Call.fromTask, .{t.io()});
     try task.await(t.io());
-    try reactor.syncLane(testing.io, null, Call.run, &id);
-    try testing.expectEqual(current_thread.now(), id);
+    try reactor.syncLane(testing.io, &call);
+    try testing.expectEqual(current_thread.now(), call.id);
 }
 
 test "syncLane: a task canceled before its call starts gets Canceled, and the call never runs" {
     try skipWithoutFibers();
     const Call = struct {
         var go: std.atomic.Value(bool) = .init(false);
-        fn mark(context: *anyopaque) void {
-            const ran: *bool = @ptrCast(@alignCast(context)); // safe: the test passed its boolean
-            ran.* = true;
-        }
+        const Mark = struct {
+            ran: *bool,
+            pub fn execute(m: *Mark) void {
+                m.ran.* = true;
+            }
+        };
         /// Computes until the cancel is in, then calls.
         fn task(io: std.Io, ran: *bool) std.Io.Cancelable!void {
             while (!go.load(.acquire)) std.atomic.spinLoopHint();
-            return reactor.syncLane(io, null, mark, ran);
+            var mark: Mark = .{ .ran = ran };
+            return reactor.syncLane(io, &mark);
         }
         fn release() void {
             std.Io.Threaded.global_single_threaded.io().sleep(.fromMilliseconds(10), .awake) catch unreachable; // unreachable: nothing cancels this plain thread

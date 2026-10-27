@@ -33,6 +33,8 @@ pub const Job = ext.Job;
 pub const blocking = ext.blocking.blocking;
 /// Adapter for a library's raw device flush calls.
 pub const syncLane = ext.blocking.syncLane;
+/// A library's `Blocking` that runs its jobs through `syncLane`.
+pub const syncLaneFor = ext.blocking.syncLaneFor;
 /// Signals and console control events, to several listeners each.
 pub const Signals = ext.Signals;
 /// Connect with a timeout, bounded lookups, aborts, deadlines, receivers.
