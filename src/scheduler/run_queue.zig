@@ -11,18 +11,29 @@
 //! owner writes on every task switch would bounce between cores; the fields
 //! the owner writes stay off every line a thief reads.
 const std = @import("std");
+const aegis = @import("aegis");
 
 pub const capacity = 256;
 const mask = capacity - 1;
 
 const Head = packed struct(u64) { real: u32, steal: u32 };
 
-fn unpack(raw: u64) Head {
-    return @bitCast(raw);
+/// The head as its cell holds it, read and written whole.
+const HeadWord = enum(u64) { _ };
+
+/// A place in the ring, counted on and wrapping: the tail's cell.
+const Position = enum(u32) { _ };
+
+fn unpack(word: HeadWord) Head {
+    return @bitCast(@backingInt(word));
 }
 
-fn pack(h: Head) u64 {
-    return @bitCast(h);
+fn pack(h: Head) HeadWord {
+    return @fromBackingInt(@as(u64, @bitCast(h)));
+}
+
+fn at(p: u32) Position {
+    return @fromBackingInt(p);
 }
 
 /// A queue of `*T`.
@@ -30,29 +41,30 @@ pub fn RunQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        head: std.atomic.Value(u64) align(std.atomic.cache_line) = .init(0),
-        tail: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
+        head: aegis.Atomic(HeadWord) align(std.atomic.cache_line) = .init(pack(.{ .real = 0, .steal = 0 })),
+        tail: aegis.Atomic(Position) align(std.atomic.cache_line) = .init(at(0)),
         buffer: [capacity]std.atomic.Value(?*T) align(std.atomic.cache_line) = @splat(.init(null)),
 
         /// The tasks queued, as the owner sees them.
         pub fn len(q: *const Self) u32 {
             const h = unpack(q.head.load(.acquire));
-            return q.tail.load(.monotonic) -% h.steal;
+            return @backingInt(q.tail.load(.monotonic)) -% h.steal;
         }
 
         pub fn isEmpty(q: *const Self) bool {
             const h = unpack(q.head.load(.acquire));
-            return q.tail.load(.monotonic) == h.real;
+            return @backingInt(q.tail.load(.monotonic)) == h.real;
         }
 
         /// Owner only. False when full: the caller moves work to the global
         /// queue (`takeHalf`) and pushes again.
         pub fn push(q: *Self, item: *T) bool {
-            const tail = q.tail.raw;
+            // The owner's own write: read without ordering.
+            const tail = @backingInt(q.tail.load(.monotonic));
             const h = unpack(q.head.load(.acquire));
             if (tail -% h.steal >= capacity) return false;
             q.buffer[tail & mask].store(item, .monotonic);
-            q.tail.store(tail +% 1, .release);
+            q.tail.store(at(tail +% 1), .release);
             return true;
         }
 
@@ -61,7 +73,7 @@ pub fn RunQueue(comptime T: type) type {
             var raw = q.head.load(.acquire);
             while (true) {
                 const h = unpack(raw);
-                if (h.real == q.tail.raw) return null;
+                if (h.real == @backingInt(q.tail.load(.monotonic))) return null;
                 const real = h.real +% 1;
                 const next: Head = if (h.steal == h.real) .{ .real = real, .steal = real } else .{ .real = real, .steal = h.steal };
                 if (q.head.cmpxchgWeak(raw, pack(next), .acq_rel, .acquire)) |actual| {
@@ -80,7 +92,7 @@ pub fn RunQueue(comptime T: type) type {
             const raw = q.head.load(.acquire);
             const h = unpack(raw);
             if (h.steal != h.real) return false;
-            if (q.tail.raw -% h.real < half) return false;
+            if (@backingInt(q.tail.load(.monotonic)) -% h.real < half) return false;
             const next: Head = .{ .real = h.real +% half, .steal = h.real +% half };
             if (q.head.cmpxchgStrong(raw, pack(next), .acq_rel, .acquire) != null) return false;
             for (out, 0..) |*slot, i| slot.* = q.buffer[(h.real +% @as(u32, @intCast(i))) & mask].load(.monotonic).?;
@@ -90,7 +102,7 @@ pub fn RunQueue(comptime T: type) type {
         /// Called by another processor: moves half of `q`'s tasks into
         /// `into`, the caller's own queue, and returns one more to run.
         pub fn stealInto(q: *Self, into: *Self) ?*T {
-            const into_tail = into.tail.raw;
+            const into_tail = @backingInt(into.tail.load(.monotonic));
             const into_head = unpack(into.head.load(.acquire));
             if (into_tail -% into_head.steal > capacity / 2) return null;
 
@@ -101,7 +113,7 @@ pub fn RunQueue(comptime T: type) type {
             while (true) {
                 const h = unpack(raw);
                 if (h.steal != h.real) return null; // another stealer is copying
-                const tail = q.tail.load(.acquire);
+                const tail = @backingInt(q.tail.load(.acquire));
                 const available = tail -% h.real;
                 if (available > capacity) return null; // a torn read of a moving queue
                 count = available - available / 2;
@@ -131,7 +143,7 @@ pub fn RunQueue(comptime T: type) type {
             }
             // The last one copied runs now; the rest are published to `into`.
             const last = into.buffer[(into_tail +% count -% 1) & mask].load(.monotonic).?;
-            if (count > 1) into.tail.store(into_tail +% count -% 1, .release);
+            if (count > 1) into.tail.store(at(into_tail +% count -% 1), .release);
             return last;
         }
     };
