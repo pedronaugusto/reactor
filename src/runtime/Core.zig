@@ -49,6 +49,9 @@ jobs: if (builtin.os.tag == .windows) Notifications else void,
 started: std.atomic.Value(bool) = .init(false),
 stderr: Stderr = .{},
 csprngs: []Io.Threaded.Csprng,
+/// io_uring: the files this runtime opened and has not closed, which alone
+/// its rings hold as fixed files.
+kept: if (builtin.os.tag == .linux) Loop.Kept else void,
 
 const home_stack_size = 256 << 10;
 
@@ -98,7 +101,9 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         .lookup = undefined,
         .jobs = undefined,
         .csprngs = undefined,
+        .kept = if (builtin.os.tag == .linux) try .init(gpa) else {},
     };
+    errdefer if (builtin.os.tag == .linux) c.kept.deinit(gpa);
     errdefer gpa.free(c.processors);
     c.csprngs = try gpa.alloc(Io.Threaded.Csprng, count);
     errdefer gpa.free(c.csprngs);
@@ -216,6 +221,7 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
             .sqpoll = c.options.sqpoll,
             .zero_copy_min = c.options.zero_copy_min,
             .registered_pools = c.options.registered_pools,
+            .kept = if (builtin.os.tag == .linux) &c.kept else null,
             .owner = if (p.index == 0) .caller else .adopter,
         }),
         .custom => |custom| loop_internal.initWith(&p.loop, .{ .custom = custom.backendFor(custom.context, p.index) }, custom.clock, 1 << 16),
@@ -303,6 +309,7 @@ pub fn deinit(c: *Core) void {
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);
+    if (builtin.os.tag == .linux) c.kept.deinit(c.gpa);
     c.gpa.free(c.csprngs);
     c.gpa.free(c.processors);
     c.* = undefined;

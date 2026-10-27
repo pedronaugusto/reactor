@@ -269,7 +269,9 @@ test "no file slot the runtime runs on a worker inside a blocking bracket calls 
     var bad: usize = 0;
     inline for (on_worker ++ [_][]const u8{ "fileReadPositional", "fileWritePositional" }) |slot| {
         if (comptime !std.mem.startsWith(u8, slot, "fileReadPositional") and !std.mem.startsWith(u8, slot, "fileWritePositional")) {
-            try testing.expect(@field(slots.raw, slot) == route.files(slot));
+            // An opening slot records what it opened around the same call.
+            const opens = comptime std.mem.eql(u8, slot, "dirOpenFile") or std.mem.eql(u8, slot, "dirCreateFile");
+            try testing.expect(@field(slots.raw, slot) == if (opens) route.opening(slot, route.files(slot)) else route.files(slot));
         }
         var impls = try g.implementations(gpa, slot);
         defer impls.deinit(gpa);

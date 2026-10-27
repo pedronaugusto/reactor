@@ -4,6 +4,7 @@ const std = @import("std");
 const testing = std.testing;
 const linux = std.os.linux;
 const Files = @import("backend/uring/Files.zig");
+const Kept = @import("backend/uring/Kept.zig");
 
 test "a positional read of a write-only file reports its missing read capability" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
@@ -34,13 +35,16 @@ test "removing a fixed file preserves requests not submitted yet" {
         }
     } = .{ .ring = linux.IoUring.init(32, 0) catch return error.SkipZigTest };
     defer owner.ring.deinit();
-    var files = try Files.init(testing.allocator, &owner.ring, 32, true);
+    var kept = try Kept.init(testing.allocator);
+    defer kept.deinit(testing.allocator);
+    var files = try Files.init(testing.allocator, &owner.ring, 32, true, &kept);
     defer files.deinit(testing.allocator);
     if (!files.enabled) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(testing.io, "fixed", .{ .read = true });
     defer file.close(testing.io);
+    kept.record(file.handle);
     try file.writePositionalAll(testing.io, "x", 0);
     var byte: [1]u8 = undefined;
     const sqe = try owner.ring.get_sqe();
@@ -170,4 +174,64 @@ test "a close removes the file from every ring that held it, whichever processor
     try testing.expect(m.reused);
     try testing.expectEqualStrings("new..", m.read[0..m.read_len]);
     try testing.expect(!m.held_after);
+}
+
+// A descriptor opened and closed outside the `Io`, as airlock's temps
+// are (a raw `openat`, writes through the `Io`, a raw `close` for its
+// EIO), then a second file opened outside it that gets the same number:
+// the second's writes through the `Io` go to the second file.
+test "a descriptor number another file reuses, opened and closed outside the Io, writes to its own file" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const Runtime = @import("Runtime.zig");
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try runtime.start();
+    defer runtime.deinit();
+    const io = runtime.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const flags: linux.O = .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true };
+    const first_fd: linux.fd_t = @intCast(linux.openat(tmp.dir.handle, "first", flags, 0o600));
+    try testing.expect(first_fd >= 0);
+    const first: std.Io.File = .{ .handle = first_fd, .flags = .{ .nonblocking = false } };
+    try first.writePositionalAll(io, "first", 0);
+    _ = linux.close(first_fd);
+    const second_fd: linux.fd_t = @intCast(linux.openat(tmp.dir.handle, "second", flags, 0o600));
+    try testing.expect(second_fd >= 0);
+    defer _ = linux.close(second_fd);
+    // The kernel gives the lowest free number: the one just closed.
+    if (second_fd != first_fd) return error.SkipZigTest;
+    const second: std.Io.File = .{ .handle = second_fd, .flags = .{ .nonblocking = false } };
+    try second.writePositionalAll(io, "second", 0);
+    var buffer: [16]u8 = undefined;
+    try testing.expectEqualStrings("first", try tmp.dir.readFile(testing.io, "first", &buffer));
+    try testing.expectEqualStrings("second", try tmp.dir.readFile(testing.io, "second", &buffer));
+}
+
+test "a file the runtime opens is held as a fixed file, and its close lets go of the number" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const Runtime = @import("Runtime.zig");
+    var runtime: Runtime = undefined;
+    runtime.init(testing.allocator, .{ .backend = .io_uring, .workers = 0, .max_tasks = 32 }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    try runtime.start();
+    defer runtime.deinit();
+    const ring = runtime.core.scheduler.processors[0].loop.backend.io_uring;
+    if (!ring.features.fixed_files) return error.SkipZigTest;
+    const io = runtime.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "kept", .{ .read = true });
+    try testing.expect(runtime.core.kept.contains(file.handle));
+    try file.writePositionalAll(io, "kept", 0);
+    try testing.expect(ring.files.contains(file.handle));
+    const handle = file.handle;
+    file.close(io);
+    try testing.expect(!runtime.core.kept.contains(handle));
+    try testing.expect(!ring.files.contains(handle));
 }

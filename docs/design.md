@@ -100,6 +100,13 @@ never names a record that has been released. Timeouts cancel and drain every ope
 the caller. SEND_ZC retains both primary and notification ownership, including
 notification-first delivery and the ordinary-send retry. Registered files and
 buffers are detached only after the kernel has relinquished their references.
+A ring holds as fixed files only the files the runtime opened and has not
+closed (`Kept`): a slot is the file it was made with, and only the runtime
+sees both ends of its own files' lives. A descriptor opened or closed outside
+the `Io` is used by its number, so a slot never outlives its descriptor and
+serves a later file of that number (reactor 0.8.6; airlock's raw close of its
+temps made a later write land in an earlier file). A bare `Loop` holds those
+its caller records in `Options.kept`.
 A deadline is the wheel's timer and a cancel of the operation, except for
 `connect` on io_uring, which links a kernel timeout: for every other operation
 a linked timeout is two more entries and a kernel timer to save a cancel that
@@ -264,8 +271,9 @@ on their own scheduler.
 
 Family-suite measurements belong to each package's move onto reactor. The
 [isolated harness](../bench/v11/prepare.zig) keeps the seams already
-investigated: cloak has no published TLS suite; airlock's raw close bypasses
-fixed-file invalidation on Linux and its macOS write-call bound differs;
+investigated: cloak has no published TLS suite; airlock's raw close bypassed
+fixed-file invalidation on Linux (fixed in 0.8.6: such a file is never held)
+and its macOS write-call bound differs;
 conduit uses a thread-spin mutex with a parked holder in its zero-worker
 profile; relic has allocation, concurrency and transport questions; the
 Windows uplink fixture crashes between tests and needs adoption-time

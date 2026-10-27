@@ -21,6 +21,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const backends = @import("backend.zig");
+/// The descriptors an io_uring loop may hold as fixed files (`Options.kept`).
+pub const Kept = @import("backend/uring/Kept.zig");
 const op = backends.op;
 const clocks = @import("clock.zig");
 const Wheel = @import("Wheel.zig");
@@ -45,6 +47,12 @@ pub const Options = struct {
     /// Minimum contiguous send eligible for SEND_ZC; null disables it.
     zero_copy_min: ?aegis.units.Bytes(usize) = null,
     registered_pools: u16 = 64,
+    /// io_uring: the descriptors a fixed-file slot may stand for, which
+    /// the caller records as it opens them and forgets as it closes them;
+    /// null, the default, uses every descriptor by its plain number. A slot
+    /// is the file it was made with: one kept past its descriptor's close
+    /// would serve the next file of that number.
+    kept: ?*const Kept = null,
     /// Windows: the host's completion port, which the loop shares. The host
     /// waits on it and hands the entries that carry `completionKey()` to
     /// `complete`; `run` then waits on nothing, so the host calls
@@ -198,6 +206,7 @@ fn initUring(gpa: Allocator, options: Options) InitError!backends.Backend {
         .zero_copy_min = options.zero_copy_min,
         .registered_pools = options.registered_pools,
         .pending_bound = options.max_ops,
+        .kept = options.kept,
     }) catch |err| return switch (err) {
         error.BackendUnavailable => error.BackendUnavailable,
         error.SystemResources => error.SystemResources,
