@@ -112,7 +112,7 @@ pub fn cancel(s: *Scheduler, t: *Task, result: []u8) void {
 }
 
 fn processorOf(t: *Task) *Processor {
-    return @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+    return Scheduler.processorOf(t).?;
 }
 
 fn schedulerOf(t: *Task) *Scheduler {

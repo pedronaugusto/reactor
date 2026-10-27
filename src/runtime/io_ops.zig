@@ -193,8 +193,8 @@ pub fn fileReadPositional(userdata: ?*anyopaque, file: Io.File, data: []const []
 fn cachedRead(fd: Io.File.Handle, buffer: []u8, offset: u64) ?usize {
     if (builtin.os.tag != .linux) return null;
     const linux = std.os.linux;
-    var iov: posix.iovec = .{ .base = buffer.ptr, .len = buffer.len };
-    const rc = linux.preadv2(fd, @ptrCast(&iov), 1, @bitCast(offset), linux.RWF.NOWAIT); // safe: one iovec as an array of one
+    const iov: [1]posix.iovec = .{.{ .base = buffer.ptr, .len = buffer.len }};
+    const rc = linux.preadv2(fd, &iov, iov.len, @bitCast(offset), linux.RWF.NOWAIT);
     if (linux.errno(rc) != .SUCCESS) return null;
     return rc;
 }
@@ -506,6 +506,7 @@ pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
 /// The wait/kill owns the child exclusively; each detached pipe stays live
 /// until std has finished with the child, then native pending work is drained
 /// and readiness registrations are invalidated before its number is reusable.
+// aegis: boundary: std.process.Child holds its pipes as Files by value; this moves them out of it to the close path that owns them from here
 fn takePipes(child: *std.process.Child) [3]?Io.File {
     const pipes = .{ child.stdin, child.stdout, child.stderr };
     child.stdin = null;

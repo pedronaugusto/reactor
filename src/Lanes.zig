@@ -663,13 +663,15 @@ fn allocator(l: *Lanes) Allocator {
 }
 
 fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    // aegis: boundary: std.mem.Allocator's vtable hands back as `*anyopaque` the lanes `allocator` gave it
+    const l: *Lanes = @ptrCast(@alignCast(context));
     const a = if (len <= SlotPool.slot_len) l.pool.allocator() else l.scratch.allocator();
     return a.rawAlloc(len, alignment, ret_addr);
 }
 
 fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-    const l: *Lanes = @ptrCast(@alignCast(context)); // safe: allocator passed the lanes
+    // aegis: boundary: std.mem.Allocator's vtable hands back as `*anyopaque` the lanes `allocator` gave it
+    const l: *Lanes = @ptrCast(@alignCast(context));
     const address = @intFromPtr(memory.ptr); // safe: only compares the address with the reserved pools
     const first = @intFromPtr(l.pool.buffer.ptr); // safe: only compares the pool's address
     const a = if (address >= first and address < first + l.pool.buffer.len) l.pool.allocator() else l.scratch.allocator();

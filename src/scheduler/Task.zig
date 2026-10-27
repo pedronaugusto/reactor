@@ -20,6 +20,7 @@ const shuttle = @import("shuttle");
 const op = @import("../backend/op.zig");
 const stacks = @import("stacks.zig");
 const Lanes = @import("../Lanes.zig");
+const Loop = @import("../Loop.zig");
 
 /// Saved registers while the task is not running.
 context: shuttle.Context = .{},
@@ -40,12 +41,15 @@ kind: Kind,
 policy: Policy = .{},
 /// Owned by the running task, or by its pinned loop while parked.
 execution: Execution = .{},
-/// The processor it runs or last ran on (an opaque `*Processor`).
-processor: ?*anyopaque = null,
-/// The seat of the thread it runs or last ran on (an opaque
-/// `*Scheduler.Seat`), set at every switch to it: where it lends its
-/// processor from without reading the thread's own storage again.
-seat: ?*anyopaque = null,
+/// The loop of the processor it runs or last ran on: the processor holds
+/// its loop, and `Scheduler.processorOf` finds the processor from it. A
+/// task's record cannot name the processor, which names tasks.
+processor_loop: ?*Loop = null,
+/// The context of the seat of the thread it runs or last ran on, set at
+/// every switch to it: where it lends its processor from without reading
+/// the thread's own storage again. The seat holds its context, and
+/// `Scheduler` finds the seat from it.
+seat_context: ?*shuttle.Context = null,
 /// Held on `processor` for now: a timer of its own armed there, or a
 /// batch with operations in that processor's kernel queue.
 pins: u16 = 0,

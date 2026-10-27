@@ -271,7 +271,7 @@ pub const Processor = struct {
     /// Makes `t` runnable on this processor; the owner's thread only.
     pub fn pushLocal(p: *Processor, t: *Task, how: How) void {
         p.scheduler.records.publish(t, p.index, .ready);
-        t.processor = p;
+        t.processor_loop = &p.loop;
         if (t.pins != 0 or t.policy.routed()) return p.pushRouted(t);
         switch (how) {
             .spawned, .woken => if (p.scheduler.scheduling == .stealing) {
@@ -520,7 +520,7 @@ pub const Processor = struct {
     fn runTask(p: *Processor, comptime watched: bool, t: *Task, own: *Seat) void {
         p.scheduler.records.publish(t, p.index, .running);
         p.current = t;
-        t.processor = p;
+        t.processor_loop = &p.loop;
         t.budget = p.scheduler.budget_ops;
         t.slice_start = no_slice;
         if (watched) {
@@ -543,7 +543,7 @@ pub const Processor = struct {
             p.passes.store(p.passes.load(.monotonic) +% 1, .release);
         }
         own.task = t;
-        t.seat = own;
+        t.seat_context = &own.context;
         // The task's switch back runs `afterSwitch` here, once its stack is still.
         shuttle.handoff.switchTo(&own.context, &t.context, null);
     }
@@ -855,6 +855,7 @@ pub var lending: std.atomic.Value(u32) = .init(0);
 /// task was never offered to an idle processor). The address passes through
 /// an assembly statement, which the compiler cannot see through.
 pub noinline fn seatNow() *Seat {
+    // aegis: design: the seat's address passes through an assembly statement the compiler cannot see through, so a switch does not merge it with an earlier read (above)
     return asm volatile (""
         : [address] "=r" (-> *Seat),
         : [seat] "0" (&seat),
@@ -974,7 +975,7 @@ pub fn spend(s: *Scheduler) void {
 /// Makes a parked task runnable, from any thread.
 pub fn ready(s: *Scheduler, t: *Task, how: Processor.How) void {
     const target: ?*Processor = if (t.policy.home or t.pins > 0 or s.scheduling == .per_core)
-        @ptrCast(@alignCast(t.processor)) // safe: only processors are stored there
+        processorOf(t)
     else
         null;
     if (heldNow()) |p| if (p.scheduler == s) {
@@ -1219,14 +1220,19 @@ pub fn toUser(t: *Task) void {
 }
 
 fn seatOf(t: *Task) *Seat {
-    return @ptrCast(@alignCast(t.seat.?)); // safe: only seats are stored there
+    return @fieldParentPtr("context", t.seat_context.?);
+}
+
+/// The processor `t` runs or last ran on, by the loop it holds.
+pub fn processorOf(t: *const Task) ?*Processor {
+    return @fieldParentPtr("loop", t.processor_loop orelse return null);
 }
 
 /// Calls the running task `t`'s own code from inside the runtime (an
 /// `async` run inline, its first function): its processor is lent
 /// meanwhile, and the task may come back on another.
 pub inline fn callOut(t: *Task, function: anytype, args: anytype) void {
-    const p: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: only processors are stored there
+    const p = processorOf(t).?;
     if (!p.lends) return @call(.auto, function, args);
     toUser(t);
     @call(.auto, function, args);
@@ -1419,11 +1425,11 @@ inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: 
     var stack = taken;
     const top = stack.top;
     const record = stack.carve(Task) catch return s.refuse(stack);
-    const extra_at = @intFromPtr(stack.carveBytes(extra, extra_align) catch return s.refuse(stack)); // safe: an address, for the caller's context and result
+    const extra_bytes = stack.carveBytes(extra, extra_align) catch return s.refuse(stack);
     // A task whose record and context leave it less than half its stack
     // would rather wait for a larger one.
     if (stack.top - stack.bottom < (stack.end - stack.bottom) / 2) return s.refuse(stack);
-    if (s.measure_stacks and !stacks_.paint(&stack, extra_at)) return s.refuse(stack);
+    if (s.measure_stacks and !stacks_.paint(&stack, @intFromPtr(extra_bytes))) return s.refuse(stack);
     // The task builder assigns its start/context and spawn site before
     // publication; runTask assigns execution budgets before entering it.
     // Cancellation and queue ownership are initialized here as usual.
@@ -1438,7 +1444,7 @@ inline fn createAt(s: *Scheduler, taken: shuttle.Stack, kind: Task.Kind, extra: 
         .slice_start = undefined,
     };
     record.context = shuttle.Context.init(&stack, shuttle.handoff.entry(taskBody), @ptrCast(@constCast(entry))) catch return s.refuse(stack); // safe: `taskBody` casts it back to the entry it is
-    return .{ record, @ptrFromInt(extra_at) };
+    return .{ record, extra_bytes };
 }
 
 /// Gives back a stack a task could not be made on.
@@ -1476,13 +1482,13 @@ pub fn stackOf(s: *const Scheduler, t: *const Task) shuttle.Stack {
 pub inline fn place(s: *Scheduler, t: *Task) void {
     s.records.created(t);
     if (heldNow()) |p| if (p.scheduler == s) {
-        t.processor = p;
+        t.processor_loop = &p.loop;
         return p.pushLocal(t, .spawned);
     };
     if (s.scheduling == .per_core) {
         const i = s.shared.placement.fetchAdd(1, .monotonic) % s.processors.len;
         const p = &s.processors[i];
-        t.processor = p;
+        t.processor_loop = &p.loop;
         return p.pushRemote(t);
     }
     s.inject(t);

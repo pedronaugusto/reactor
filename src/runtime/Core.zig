@@ -169,8 +169,8 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
     const own = Scheduler.seatNow();
     own.context = shuttle.Context.init(&c.home_stack, shuttle.handoff.entry(homeScheduler), home) catch return error.SystemResources;
     own.task = &c.root;
-    c.root.seat = own;
-    c.root.processor = home;
+    c.root.seat_context = &own.context;
+    c.root.processor_loop = &home.loop;
     home.current = &c.root;
     Scheduler.enter(home);
     home.holdFrom(own);
@@ -262,8 +262,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     const Serve = struct {
         fn after(context: *anyopaque, t: *Task) void {
             const m: *const Loop.RunMode = @ptrCast(@alignCast(context)); // safe: `run` passed its mode
-            const home: *Processor = @ptrCast(@alignCast(t.processor.?)); // safe: the root's processor is the home one
-            home.serving = .{ .mode = m.* };
+            Scheduler.processorOf(t).?.serving = .{ .mode = m.* };
         }
     };
     var m = mode;
@@ -271,8 +270,7 @@ pub fn run(c: *Core, mode: Loop.RunMode) void {
     // Back to the host, which may now wait on the loop's handle: work
     // handed to the home processor from here on wakes the loop, and work
     // handed to it before this was set makes the handle ready now.
-    const home = c.root.processor.?;
-    const p: *Processor = @ptrCast(@alignCast(home)); // safe: the root's processor is the home one
+    const p = Scheduler.processorOf(&c.root).?;
     p.remote.away.store(true, .seq_cst);
     if (p.hasWork()) p.loop.wake();
 }
@@ -321,7 +319,8 @@ pub fn io(c: *Core) Io {
 
 /// The core an `Io.userdata` is.
 pub fn of(userdata: ?*anyopaque) *Core {
-    return @ptrCast(@alignCast(userdata.?)); // safe: only `io` hands the vtable out, with a `Core`
+    // aegis: boundary: std.Io hands its vtable's functions the userdata `io` gave it, a `Core`, as `?*anyopaque`
+    return @ptrCast(@alignCast(userdata.?));
 }
 
 /// Fixed std.Io signatures require a successfully started runtime.

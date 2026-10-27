@@ -76,6 +76,7 @@ fn failure(comptime E: type, err: linux.E) E {
     return error.Unexpected;
 }
 
+// aegis: boundary: std.Io's vtable returns the opened File by value, to the caller of Dir.openFile, which owns it
 fn open(core: *Core, dir: Io.Dir, path: []const u8, flags: linux.O, mode: linux.mode_t) Io.File.OpenError!Io.File {
     var path_buffer: [std.posix.PATH_MAX]u8 = undefined;
     const terminated = try Io.Threaded.pathToPosix(path, &path_buffer);
@@ -95,6 +96,7 @@ fn lock(core: *Core, file: Io.File, selected: Io.File.Lock, nonblocking: bool) I
     } else try file.lock(core.io(), selected);
 }
 
+// aegis: boundary: std.Io's vtable returns the opened File by value, to the caller of Dir.openFile, which owns it
 fn openFile(core: *Core, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
     const file = try open(core, dir, path, .{ .ACCMODE = switch (options.mode) {
         .read_only => .RDONLY,
@@ -113,6 +115,7 @@ fn openFile(core: *Core, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFile
     return file;
 }
 
+// aegis: boundary: std.Io's vtable returns the created File by value, to the caller of Dir.createFile, which owns it
 fn createFile(core: *Core, dir: Io.Dir, path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
     const file = try open(core, dir, path, .{ .ACCMODE = if (options.read) .RDWR else .WRONLY, .CREAT = true, .TRUNC = options.truncate, .EXCL = options.exclusive, .CLOEXEC = true }, options.permissions.toMode());
     errdefer file.close(core.io());
@@ -120,6 +123,7 @@ fn createFile(core: *Core, dir: Io.Dir, path: []const u8, options: Io.Dir.Create
     return file;
 }
 
+// aegis: boundary: std.Io's vtable returns the opened Dir by value, to the caller of Dir.openDir, which owns it
 fn openDir(core: *Core, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
     const file = open(core, dir, path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = !options.follow_symlinks, .CLOEXEC = true, .PATH = !options.iterate }, 0) catch |err| {
         return narrow(Io.Dir.OpenError, err);

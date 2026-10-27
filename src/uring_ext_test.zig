@@ -446,7 +446,7 @@ fn acceptOnProcessor(io: Io, server: *Io.net.Server, owner: *Scheduler.Processor
     const Move = struct {
         fn run(raw: *anyopaque, task: *Task) void {
             const target: *Scheduler.Processor = @ptrCast(@alignCast(raw)); // safe: the target passed to park
-            task.processor = target;
+            task.processor_loop = &target.loop;
             target.pushRemote(task);
         }
     };

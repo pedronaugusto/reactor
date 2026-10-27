@@ -90,7 +90,7 @@ const Migration = struct {
         const Move = struct {
             fn run(raw: *anyopaque, task: *Task) void {
                 const processor: *Scheduler.Processor = @ptrCast(@alignCast(raw)); // safe: the target passed to park
-                task.processor = processor;
+                task.processor_loop = &processor.loop;
                 processor.pushRemote(task);
             }
         };
