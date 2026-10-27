@@ -13,6 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Windows named pipes (`net.pipe`): `net.connectPipe` opens a client's end, a busy pipe tried again until the timeout; `net.listenPipe` makes a server's, its security descriptor the caller's (SDDL, or the token's default named as such), clients of other machines refused, a fresh instance made as each client is accepted (`PipeListener.accept`); `pipe.disconnect` ends a server instance's client from any task, as `abort` ends a socket. Each handle is an `Io.File` opened for overlapped calls, so a runtime finishes its reads, writes and listens on its port. `pipe.readPipeWithin` waits a bounded time for bytes on a runtime. A pipe's deadlines are kept on a runtime; off one, `Deadlines.add` refuses a pipe's watch and its operations run unbounded. Off Windows each call is `NamedPipeUnsupported`.
+## [0.8.7] - 2026-10-27
+
+### Fixed
+
+- Windows: a task's switch no longer ends the process at a page edge. shuttle's switch set the next stack's bounds in the thread information block, then made calls on the stack it was leaving; a call that first touched that stack's guard page raised a guard page violation no handler took, and the process ended with no message. A runtime switches from task stacks to a scheduler stack below them, so a task that parked at such a depth crashed the program, in Debug builds where those calls are made (uplink's HTTP/2 server tests on IOCP). shuttle 0.3.4 exchanges the bounds as the stack pointer moves; it pins aegis 0.1.17, which reactor takes with it.
 
 ## [0.8.6] - 2026-10-27
 
