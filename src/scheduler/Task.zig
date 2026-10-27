@@ -65,6 +65,9 @@ slice_start: clocks.Awake = .fromRaw(0),
 cancel: std.atomic.Value(u32) = .init(0),
 /// The hook of the cancelable wait it is parked in; guarded by `locked`.
 wait: ?*Hook = null,
+/// While it waits on or drains a batch: where that batch's completions
+/// find it (ops/batch.zig).
+batch_wait: ?*BatchWait = null,
 /// Futures: 0 while running, `finished` once done, else the `*Awaiter`
 /// waiting for it.
 awaiter: std.atomic.Value(usize) = .init(0),
@@ -124,6 +127,12 @@ pub const Hook = struct {
 
 /// Someone waiting for a future or a group: a task, or a thread outside the
 /// runtime.
+/// A batch a task waits on or drains, kept in the record that waits, which
+/// the batch's completions find by `@fieldParentPtr`.
+pub const BatchWait = struct {
+    batch: *Io.Batch,
+};
+
 /// Work to do once a parked task is off its stack, kept in the record that
 /// does it, as a scheduler's errand is: `run` finds the record from it by
 /// `@fieldParentPtr`.

@@ -31,50 +31,36 @@ const perform = @import("perform.zig");
 
 const Index = Io.Operation.OptionalIndex;
 
-/// What `Batch.userdata` holds while operations are pending: the owning
-/// task, or, while it waits, its `Waiter`; and where cancelled operations go.
-const Owner = packed struct(usize) {
-    waiting: bool = false,
-    to_submitted: bool = false,
-    to_unused: bool = false,
-    address: @Int(.unsigned, @bitSizeOf(usize) - 3) = 0,
-
-    fn of(batch: *Io.Batch) Owner {
-        return @bitCast(@intFromPtr(batch.userdata)); // safe: only this file stores there, an `Owner`
-    }
-
-    fn store(o: Owner, batch: *Io.Batch) void {
-        batch.userdata = @ptrFromInt(@as(usize, @bitCast(o)));
-    }
-
-    fn pointer(o: Owner) usize {
-        return @as(usize, o.address) << 3;
-    }
-
-    fn task(o: Owner) *Task {
-        if (o.waiting) {
-            const w: *Waiter = @ptrFromInt(o.pointer());
-            return w.task;
-        }
-        return @ptrFromInt(o.pointer());
-    }
-
-    fn at(address: usize) @Int(.unsigned, @bitSizeOf(usize) - 3) {
-        assert(address & 7 == 0);
-        return @intCast(address >> 3);
-    }
-};
+/// The task a batch's pending operations hold on their processor, kept in the
+/// one word std's `Io.Batch` keeps for its implementation; null while
+/// nothing is pending.
+fn ownerOf(batch: *const Io.Batch) ?*Task {
+    // aegis: boundary: std's Io.Batch keeps one opaque word for its implementation, where this runtime keeps the task its pending operations hold
+    return @ptrCast(@alignCast(batch.userdata orelse return null));
+}
 
 const Until = enum { any, empty };
 
+/// How a wait on a batch ended, when not canceled.
+const Ended = enum { completed, timed_out };
+
+/// What a batch's completions do with an operation the kernel gave back
+/// cancelled: complete it, or, while its task drains the batch, return it
+/// to `submitted` or to `unused`.
+const Where = enum { complete, to_submitted, to_unused };
+
+/// A task waiting on or draining a batch, kept on the task (`Task.BatchWait`)
+/// while it does, where the batch's completions find it.
 const Waiter = struct {
+    node: Task.BatchWait,
     hook: Task.Hook = .{ .cancel = cancelHook },
     message: Scheduler.CancelMessage,
     task: *Task,
     processor: *Processor,
     scheduler: *Scheduler,
-    batch: *Io.Batch,
-    until: Until,
+    where: Where,
+    /// While it is parked: what it waits for.
+    parked: ?Until = null,
     woken: bool = false,
     outcome: enum { completed, canceled, timed_out } = .completed,
     deadline: perform.Deadline = .{ .fire = timedOut },
@@ -84,6 +70,58 @@ const Waiter = struct {
         w.woken = true;
         w.outcome = outcome;
         w.scheduler.ready(w.task, .completed);
+    }
+
+    /// The running task's, for `batch`.
+    fn of(s: *Scheduler, batch: *Io.Batch, where: Where) Waiter {
+        const p = Scheduler.processor().?;
+        const t = p.current.?;
+        return .{ .node = .{ .batch = batch }, .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .where = where };
+    }
+
+    /// Kept on the task, where the batch's completions find it, until `leave`.
+    fn enter(w: *Waiter) void {
+        assert(w.task.batch_wait == null);
+        w.task.batch_wait = &w.node;
+    }
+
+    fn leave(w: *Waiter) void {
+        w.task.batch_wait = null;
+    }
+
+    /// The waiter the batch's completions find on `t`, when `t` waits on
+    /// or drains `batch`.
+    fn on(t: *Task, batch: *const Io.Batch) ?*Waiter {
+        const node = t.batch_wait orelse return null;
+        if (node.batch != batch) return null;
+        return @alignCast(@fieldParentPtr("node", node)); // safe: the field belongs to this record
+    }
+
+    /// Parks until the batch has a completion (`any`) or nothing pending
+    /// (`empty`); `any` waits are cancelable, and end at `deadline`.
+    fn park(w: *Waiter, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!Ended {
+        const t = w.task;
+        if (until == .any) try t.enterWait(&w.hook);
+        w.woken = false;
+        w.outcome = .completed;
+        w.parked = until;
+        defer w.parked = null;
+        if (deadline) |d| {
+            // No room for the timer: timed out now (the task is running, so
+            // there is no one to wake).
+            if (!w.deadline.arm(w.scheduler, d)) {
+                w.woken = true;
+                w.outcome = .timed_out;
+            }
+        }
+        if (!w.woken) Scheduler.park(null);
+        w.deadline.disarm();
+        Scheduler.leaveWait(t);
+        return switch (w.outcome) {
+            .completed => .completed,
+            .timed_out => .timed_out,
+            .canceled => t.acknowledge(),
+        };
     }
 
     /// From any thread; acts on the batch's processor.
@@ -166,61 +204,28 @@ fn ready(batch: *const Io.Batch) bool {
 }
 
 /// Cancels every pending operation and waits until the kernel has given
-/// all of them back.
-fn drainAll(s: *Scheduler, batch: *Io.Batch, where: enum { to_submitted, to_unused }) void {
-    const p = Scheduler.processor().?;
-    var owner = Owner.of(batch);
-    switch (where) {
-        .to_submitted => owner.to_submitted = true,
-        .to_unused => owner.to_unused = true,
-    }
-    owner.store(batch);
+/// all of them back, each to `where`. The drain is kept on the task from
+/// the first cancel: under pressure, a cancel's submission can deliver
+/// completions at once.
+fn drainAll(s: *Scheduler, batch: *Io.Batch, where: Where) void {
+    var w: Waiter = .of(s, batch, where);
+    w.enter();
+    defer w.leave();
+    const p = w.processor;
     var index = batch.pending.head;
     while (index != .none) : (index = batch.storage[index.toIndex()].pending.node.next) {
         loop_internal.cancelPending(&p.loop, .of(batch, index.toIndex()));
     }
-    while (batch.pending.head != .none) _ = wait(s, batch, .empty, null) catch unreachable; // unreachable: not cancelable
-    batch.userdata = null;
+    while (batch.pending.head != .none) _ = w.park(.empty, null) catch unreachable; // unreachable: not cancelable
 }
 
 /// Parks until the batch has a completion (`any`) or nothing pending
 /// (`empty`); `any` waits are cancelable, and end at `deadline`.
-fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!enum { completed, timed_out } {
-    const p = Scheduler.processor().?;
-    const t = p.current.?;
-    var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .batch = batch, .until = until };
-    if (until == .any) try t.enterWait(&w.hook);
-    var owner = Owner.of(batch);
-    const saved = owner;
-    owner.waiting = true;
-    owner.address = Owner.at(@intFromPtr(&w)); // safe: read back by the processor's completions while this frame waits
-    owner.store(batch);
-    if (deadline) |d| {
-        // No room for the timer: timed out now (the task is running, so
-        // there is no one to wake).
-        if (!w.deadline.arm(s, d)) {
-            w.woken = true;
-            w.outcome = .timed_out;
-        }
-    }
-    if (!w.woken) Scheduler.park(null);
-    w.deadline.disarm();
-    Scheduler.leaveWait(t);
-    // The task owns the batch again, unless nothing is pending any more
-    // (the completions have let go of the task already).
-    if (batch.pending.head == .none) {
-        batch.userdata = null;
-    } else {
-        var after = Owner.of(batch);
-        after.waiting = false;
-        after.address = saved.address;
-        after.store(batch);
-    }
-    return switch (w.outcome) {
-        .completed => .completed,
-        .timed_out => .timed_out,
-        .canceled => t.acknowledge(),
-    };
+fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!Ended {
+    var w: Waiter = .of(s, batch, .complete);
+    w.enter();
+    defer w.leave();
+    return w.park(until, deadline);
 }
 
 /// Hands every submitted operation to the kernel, or completes it at
@@ -327,8 +332,7 @@ fn toPending(batch: *Io.Batch, t: *Task, index: Index, operation: Io.Operation) 
     if (was_empty) {
         // Held on this processor until the kernel has given everything back.
         t.pins += 1;
-        const owner: Owner = .{ .address = Owner.at(@intFromPtr(t)) }; // safe: read back by `Owner.task`
-        owner.store(batch);
+        batch.userdata = t;
     }
 }
 
@@ -375,10 +379,9 @@ fn unuse(batch: *Io.Batch, index: Index) void {
 /// The batch has nothing pending: let go of its task.
 fn release(batch: *Io.Batch) void {
     if (batch.pending.head != .none) return;
-    const owner = Owner.of(batch);
-    if (owner.address == 0) return;
-    owner.task().pins -= 1;
-    if (!owner.waiting) batch.userdata = null;
+    const t = ownerOf(batch) orelse return;
+    t.pins -= 1;
+    batch.userdata = null;
 }
 
 /// A completion from the kernel, on the batch's processor: the sink every
@@ -387,26 +390,24 @@ pub fn completed(context: *anyopaque, token: pending.Token, outcome: pending.Out
     _ = context;
     const batch = token.batch();
     const index: Index = .fromIndex(token.index());
-    const owner = Owner.of(batch);
+    const w = Waiter.on(ownerOf(batch).?, batch);
+    const where: Where = if (w) |x| x.where else .complete;
     const entry = batch.storage[index.toIndex()].pending;
     Scheduler.processor().?.release(perform.descriptorOf(.{ .io = pending.unpack(&entry) }).?);
     removePending(batch, index);
     switch (outcome) {
         .result => |result| complete(batch, index, result),
-        .canceled => if (owner.to_submitted) {
-            resubmit(batch, index, pending.unpack(&entry));
-        } else if (owner.to_unused) {
-            unuse(batch, index);
-        } else {
-            complete(batch, index, closedUnder(entry.tag));
+        .canceled => switch (where) {
+            .to_submitted => resubmit(batch, index, pending.unpack(&entry)),
+            .to_unused => unuse(batch, index),
+            .complete => complete(batch, index, closedUnder(entry.tag)),
         },
     }
     release(batch);
-    if (!owner.waiting) return;
-    const w: *Waiter = @ptrFromInt(owner.pointer());
-    switch (w.until) {
-        .any => if (ready(batch)) w.wake(.completed),
-        .empty => if (batch.pending.head == .none) w.wake(.completed),
+    const waiter = w orelse return;
+    switch (waiter.parked orelse return) {
+        .any => if (ready(batch)) waiter.wake(.completed),
+        .empty => if (batch.pending.head == .none) waiter.wake(.completed),
     }
 }
 
