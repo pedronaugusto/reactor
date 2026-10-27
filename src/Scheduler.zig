@@ -23,7 +23,7 @@ const run_queue = @import("scheduler/run_queue.zig");
 const RunQueue = run_queue.RunQueue(Task);
 const Inbox = @import("scheduler/inbox.zig").Inbox;
 pub const Monitor = @import("scheduler/Monitor.zig");
-pub const Spares = @import("scheduler/Spares.zig");
+pub const Spares = @import("scheduler/Spares.zig").Of(Processor);
 
 pub const Scheduling = enum { stealing, per_core };
 
@@ -1347,7 +1347,7 @@ pub fn serveThread(s: *Scheduler, first: ?*Processor) void {
     var fresh = first == null;
     var next = first;
     while (true) {
-        const p: *Processor = next orelse @ptrCast(@alignCast(s.spares.wait(&s.stopping, fresh) orelse return)); // safe: only processors are posted
+        const p: *Processor = next orelse s.spares.wait(&s.stopping, fresh) orelse return;
         fresh = false;
         next = null;
         enter(p);
