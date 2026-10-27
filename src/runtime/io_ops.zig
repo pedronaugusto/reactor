@@ -235,6 +235,9 @@ pub fn fileSync(userdata: ?*anyopaque, file: Io.File) Io.File.SyncError!void {
 
 pub fn fileClose(userdata: ?*anyopaque, files: []const Io.File) void {
     const r = Core.running(userdata);
+    // No ring makes a slot for these from here on; the close below takes
+    // down the slots they have.
+    if (comptime builtin.os.tag == .linux) for (files) |f| r.kept.forget(f.handle);
     if (iocp(r)) {
         for (files) |f| closeBound(f.handle);
         return;

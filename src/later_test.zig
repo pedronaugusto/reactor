@@ -871,8 +871,10 @@ test "later: fixed-buffer registrations survive worker adoption and owner teardo
 
 test "later: SQPOLL close captures published fixed-file references before unregister" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var kept = try Loop.Kept.init(testing.allocator);
+    defer kept.deinit(testing.allocator);
     var loop: Loop = undefined;
-    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .sqpoll = .{ .idle_ms = 1 } }) catch |err| switch (err) {
+    loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .sqpoll = .{ .idle_ms = 1 }, .kept = &kept }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
@@ -882,6 +884,7 @@ test "later: SQPOLL close captures published fixed-file references before unregi
     defer tmp.cleanup();
     for (0..32) |_| {
         const file = try tmp.dir.createFile(testing.io, "published", .{ .read = true });
+        kept.record(file.handle);
         try file.writePositionalAll(testing.io, "held", 0);
         var bytes: [4]u8 = undefined;
         var op: Loop.Op = .{ .backend = .{ .kind = .{ .read_at = .{ .file = file.handle, .buffer = &bytes, .offset = 0 } } } };
@@ -891,6 +894,7 @@ test "later: SQPOLL close captures published fixed-file references before unregi
         _ = ring.flush_sq();
         loop.backend.io_uring.files.remove(loop.backend.io_uring, file.handle);
         try testing.expectEqual(ring.sq.sqe_head, @atomicLoad(u32, ring.sq.head, .acquire));
+        kept.forget(file.handle);
         file.close(testing.io);
         var out: [1]*Loop.Op = undefined;
         while (loop.reap(&out).len == 0) _ = try loop.run(.once);

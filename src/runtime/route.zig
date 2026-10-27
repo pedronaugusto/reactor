@@ -62,6 +62,23 @@ pub fn files(comptime name: []const u8) *const SlotFn(name) {
     return generate(Impl, name);
 }
 
+/// `slot`, a call that opens a file, with the file it opened recorded as
+/// the runtime's (`Core.kept`): its rings may hold it as a fixed file until
+/// `fileClose` forgets it.
+pub fn opening(comptime name: []const u8, comptime slot: *const SlotFn(name)) *const SlotFn(name) {
+    const Impl = struct {
+        fn go(userdata: ?*anyopaque, rest: anytype) Return(name) {
+            const opened = try @call(.auto, slot, .{userdata} ++ rest);
+            if (comptime builtin.os.tag == .linux) Core.running(userdata).kept.record(fileOf(opened).handle);
+            return opened;
+        }
+        fn fileOf(opened: anytype) Io.File {
+            return if (@TypeOf(opened) == Io.File) opened else opened.file;
+        }
+    };
+    return generate(Impl, name);
+}
+
 /// `name`'s std code on the calling worker: for calls that never block
 /// and never call back into their own `Io`.
 pub fn borrowed(comptime name: []const u8) *const SlotFn(name) {

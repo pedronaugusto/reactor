@@ -1,17 +1,23 @@
 //! A bounded per-ring regular-file cache. Registering sockets or pipes can
 //! defer EOF until unrelated requests release a retired resource node.
 //! Entries are published for close
-//! routing; only the ring's owner updates the kernel table.
+//! routing; only the ring's owner updates the kernel table. Only a
+//! descriptor its owner keeps (`Kept`) gets a slot: a slot stands for the
+//! file it was made with, and only the owner sees when that file's number
+//! goes to another.
 const Files = @This();
 const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
+const Kept = @import("Kept.zig");
 
 slots: []std.atomic.Value(linux.fd_t),
 registered: []bool,
 enabled: bool,
+/// The descriptors a slot may be made for; none without it.
+kept: ?*const Kept,
 
-pub fn init(gpa: Allocator, ring: *linux.IoUring, count: u32, wanted: bool) Allocator.Error!Files {
+pub fn init(gpa: Allocator, ring: *linux.IoUring, count: u32, wanted: bool, kept: ?*const Kept) Allocator.Error!Files {
     const slots = try gpa.alloc(std.atomic.Value(linux.fd_t), count);
     errdefer gpa.free(slots);
     const registered = try gpa.alloc(bool, count);
@@ -21,7 +27,7 @@ pub fn init(gpa: Allocator, ring: *linux.IoUring, count: u32, wanted: bool) Allo
     if (wanted) ring.register_files_sparse(count) catch {
         enabled = false;
     };
-    return .{ .slots = slots, .registered = registered, .enabled = enabled };
+    return .{ .slots = slots, .registered = registered, .enabled = enabled and kept != null, .kept = kept };
 }
 
 pub fn deinit(f: *Files, gpa: Allocator) void {
@@ -43,6 +49,7 @@ pub fn contains(f: *const Files, fd: linux.fd_t) bool {
 /// Full or unsupported tables use the ordinary descriptor.
 pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
     if (!f.enabled or sqe.fd < 0) return;
+    if (!f.kept.?.contains(sqe.fd)) return;
     var vacant: ?u32 = null;
     const start = @as(u32, @bitCast(sqe.fd)) % f.slots.len;
     for (0..@min(8, f.slots.len)) |offset| {

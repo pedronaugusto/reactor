@@ -31,6 +31,7 @@ const Receive = @import("uring/Receive.zig");
 const Accept = @import("uring/Accept.zig");
 const Buffers = @import("uring/Buffers.zig");
 const Files = @import("uring/Files.zig");
+pub const Kept = @import("uring/Kept.zig");
 const Allocator = std.mem.Allocator;
 const results = @import("uring/results.zig");
 
@@ -57,6 +58,8 @@ pub const Options = struct {
     zero_copy_min: ?aegis.units.Bytes(usize) = null,
     registered_pools: u16 = 64,
     pending_bound: u32 = 1024,
+    /// The descriptors fixed-file slots may be made for; null: none.
+    kept: ?*const Kept = null,
 };
 
 pub const InitError = error{ BackendUnavailable, SystemResources, Unexpected };
@@ -150,7 +153,7 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
     u.features.zero_copy = !options.off.zero_copy and u.has(.SEND_ZC);
     u.accepts = try Accept.init(gpa, options.entries, !options.off.accept_ahead and u.has(.ACCEPT));
     errdefer u.accepts.deinit(gpa);
-    u.files = try Files.init(gpa, &u.ring, options.entries, !options.off.fixed_files);
+    u.files = try Files.init(gpa, &u.ring, options.entries, !options.off.fixed_files, options.kept);
     errdefer u.files.deinit(gpa);
     u.buffers = try Buffers.init(gpa, &u.ring, options.registered_pools);
     errdefer u.buffers.deinit(gpa);

@@ -30,5 +30,6 @@ test {
     _ = @import("resolve_test.zig");
     _ = @import("accept_test.zig");
     _ = @import("files_test.zig");
+    _ = @import("backend/uring/Kept.zig");
     _ = @import("uring_ext_test.zig");
 }

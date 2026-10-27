@@ -43,6 +43,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/backend/iocp/scratch.zig",
         "src/backend/uring/Accept.zig",
         "src/backend/uring/Receive.zig",
+        "src/backend/uring/Kept.zig",
         "src/backend/uring/Files.zig",
         "src/backend/uring/Buffers.zig",
         "src/backend/iocp/Notifications.zig",
