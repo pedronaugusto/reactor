@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `net.Deadlines.Watch` watches a socket or a named pipe: its `socket` field is `target`, a `Watch.Target`; `Watch.init(socket)` is as it was, and `Watch.initPipe(file)` makes a pipe's.
+
+### Added
+
+- Windows named pipes (`net.pipe`): `net.connectPipe` opens a client's end, a busy pipe tried again until the timeout; `net.listenPipe` makes a server's, its security descriptor the caller's (SDDL, or the token's default named as such), clients of other machines refused, a fresh instance made as each client is accepted (`PipeListener.accept`); `pipe.disconnect` ends a server instance's client from any task, as `abort` ends a socket. Each handle is an `Io.File` opened for overlapped calls, so a runtime finishes its reads, writes and listens on its port. `pipe.readPipeWithin` waits a bounded time for bytes on a runtime. A pipe's deadlines are kept on a runtime; off one, `Deadlines.add` refuses a pipe's watch and its operations run unbounded. Off Windows each call is `NamedPipeUnsupported`.
+
 ### Fixed
 
 - Windows: a listener that did not ask for `reuse_address` keeps its port. AFD's bind begins with how the port is shared, which std 0.17 calls a mode: its "passive" listener bind is a sharing one, so a later bind asking to reuse the port took it. reactor binds as Winsock does: sharing only when asked, a connect's own end as a wildcard (`afd.Share`). A reusing bind over a port held otherwise is `AccessDenied`, an ordinary one `AddressInUse`.
