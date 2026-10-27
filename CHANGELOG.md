@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-27
+
 ### Fixed
 
 - io_uring wrote one file's data into another file. A ring held each regular file it was handed as a fixed file, by its descriptor number, until a close through the runtime let it go; a file closed any other way kept its slot, and the next file opened outside the runtime with that number was read, written and synced as the closed one. airlock closes its temps that way (a raw `close`, for close's `EIO`), so on a `Runtime` with the io_uring backend (Linux's default where the kernel has it) a durable write after another could land in the earlier file and leave its own empty: every user of airlock there is affected (chronicle, relic, uplink's disk cache), and anything that opens or closes a file outside the `Io` and reads or writes it through it. A ring now holds as fixed files only the files the runtime opened itself, and lets each go when the runtime closes it; every other descriptor is used by its number, which the kernel resolves to the file that has it now. A file the runtime opens is closed through it, as std's `Io` asks. A bare `Loop` holds as fixed files only the descriptors its caller records in `Options.kept`.
