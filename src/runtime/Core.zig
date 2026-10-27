@@ -77,10 +77,15 @@ pub const Stderr = struct {
 pub const Construction = union(enum) {
     native,
     custom: struct {
-        context: *anyopaque,
-        backendFor: *const fn (context: *anyopaque, processor: u16) backend.Custom,
+        backends: *Backends,
         clock: clock.Source,
     },
+};
+
+/// What makes each processor's custom backend, kept in the record that
+/// makes them, which `backendFor` finds by `@fieldParentPtr`.
+pub const Backends = struct {
+    backendFor: *const fn (b: *Backends, processor: u16) *backend.Custom,
 };
 
 /// Builds everything: stacks reserved, tables, loops, lanes; starts no
@@ -224,7 +229,7 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
             .kept = if (builtin.os.tag == .linux) &c.kept else null,
             .owner = if (p.index == 0) .caller else .adopter,
         }),
-        .custom => |custom| loop_internal.initWith(&p.loop, .{ .custom = custom.backendFor(custom.context, p.index) }, custom.clock, 1 << 16),
+        .custom => |custom| loop_internal.initWith(&p.loop, .{ .custom = custom.backends.backendFor(custom.backends, p.index) }, custom.clock, 1 << 16),
     }
 }
 

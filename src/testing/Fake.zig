@@ -33,6 +33,8 @@ pub const Script = *const fn (context: ?*anyopaque, o: *op.Op, random: *Source) 
 
 gpa: Allocator,
 mode: Mode,
+/// The backend it is, as a loop holds it.
+interface: backend.Custom = .{ .vtable = &vtable },
 source: Source,
 /// Shared with check so scheduling and script choices shrink together.
 shared_source: ?*Source = null,
@@ -65,53 +67,55 @@ pub fn deinit(f: *Fake) void {
     f.* = undefined;
 }
 
-pub fn custom(f: *Fake) backend.Custom {
-    return .{ .context = f, .vtable = &.{
-        .submit = submit,
-        .cancel = cancel,
-        .submitPending = submitPending,
-        .cancelPending = cancelPending,
-        .poll = poll,
-        .wake = wake,
-    } };
+pub fn custom(f: *Fake) *backend.Custom {
+    return &f.interface;
 }
 
-fn of(context: *anyopaque) *Fake {
-    return @ptrCast(@alignCast(context)); // safe: the context is the fake, as `custom` made it
+const vtable: backend.Custom.VTable = .{
+    .submit = submit,
+    .cancel = cancel,
+    .submitPending = submitPending,
+    .cancelPending = cancelPending,
+    .poll = poll,
+    .wake = wake,
+};
+
+fn of(c: *backend.Custom) *Fake {
+    return @alignCast(@fieldParentPtr("interface", c)); // safe: the field belongs to this record
 }
 
-fn submit(context: *anyopaque, o: *op.Op) error{ SystemResources, Unexpected }!void {
-    const f = of(context);
+fn submit(c: *backend.Custom, o: *op.Op) error{ SystemResources, Unexpected }!void {
+    const f = of(c);
     try f.submitting();
     f.ops.append(f.gpa, o) catch @panic("reactor's fake: out of memory");
 }
 
-fn cancel(context: *anyopaque, o: *op.Op) void {
-    _ = context;
+fn cancel(c: *backend.Custom, o: *op.Op) void {
+    _ = c;
     _ = o; // `Loop.cancel` marked it; the next poll decides.
 }
 
-fn submitPending(context: *anyopaque, token: pending.Token, operation: Io.Operation) error{ SystemResources, Unexpected }!void {
-    const f = of(context);
+fn submitPending(c: *backend.Custom, token: pending.Token, operation: Io.Operation) error{ SystemResources, Unexpected }!void {
+    const f = of(c);
     try f.submitting();
     f.batch.append(f.gpa, .{ .token = token, .operation = operation }) catch @panic("reactor's fake: out of memory");
 }
 
-fn cancelPending(context: *anyopaque, token: pending.Token) void {
-    const f = of(context);
+fn cancelPending(c: *backend.Custom, token: pending.Token) void {
+    const f = of(c);
     for (f.batch.items) |*e| if (e.token.eql(token)) {
         e.canceled = true;
     };
 }
 
-fn wake(context: *anyopaque) void {
-    const f = of(context);
+fn wake(c: *backend.Custom) void {
+    const f = of(c);
     f.woken.store(1, .release);
     Io.Threaded.global_single_threaded.io().futexWake(u32, &f.woken.raw, 1);
 }
 
-fn poll(context: *anyopaque, wait: backend.Wait, sink: backend.Custom.Sink) void {
-    const f = of(context);
+fn poll(c: *backend.Custom, wait: backend.Wait, sink: *backend.Custom.Sink) void {
+    const f = of(c);
     switch (f.mode) {
         .seeded => |s| f.pollSeeded(wait, sink, s.virtual),
         .idle => f.pollIdle(wait, sink),
@@ -120,7 +124,7 @@ fn poll(context: *anyopaque, wait: backend.Wait, sink: backend.Custom.Sink) void
 
 /// Completes a seeded share of what is in flight, in a seeded order; when
 /// it completes nothing and may wait, moves virtual time to the deadline.
-fn pollSeeded(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink, virtual: *clock.Virtual) void {
+fn pollSeeded(f: *Fake, wait: backend.Wait, sink: *backend.Custom.Sink, virtual: *clock.Virtual) void {
     const random = f.shared_source orelse &f.source;
     var delivered: usize = 0;
     var i: usize = 0;
@@ -130,14 +134,14 @@ fn pollSeeded(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink, virtual: 
         if (o.state.canceled and decide != 3) {
             _ = f.ops.swapRemove(i);
             o.result = canceledResult(o);
-            sink.complete(sink.context, o);
+            sink.complete(sink, o);
             delivered += 1;
             continue;
         }
         if (decide == 0 or decide == 1) if (f.script(f.script_context, o, random)) |result| {
             _ = f.ops.swapRemove(i);
             o.result = result;
-            sink.complete(sink.context, o);
+            sink.complete(sink, o);
             delivered += 1;
             continue;
         };
@@ -156,14 +160,14 @@ fn pollSeeded(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink, virtual: 
     }
 }
 
-fn pollBatch(f: *Fake, sink: backend.Custom.Sink, random: *Source) usize {
+fn pollBatch(f: *Fake, sink: *backend.Custom.Sink, random: *Source) usize {
     var delivered: usize = 0;
     var i: usize = 0;
     while (i < f.batch.items.len) {
         const e = f.batch.items[i];
         if (e.canceled and random.below(1) == 0) {
             _ = f.batch.swapRemove(i);
-            sink.completePending(sink.context, e.token, .canceled);
+            sink.completePending(sink, e.token, .canceled);
             delivered += 1;
             continue;
         }
@@ -172,7 +176,7 @@ fn pollBatch(f: *Fake, sink: backend.Custom.Sink, random: *Source) usize {
             if (f.script(f.script_context, &o, random)) |result| {
                 _ = f.batch.swapRemove(i);
                 const r = result.io catch unreachable; // unreachable: a script completes an operation, it never cancels it
-                sink.completePending(sink.context, e.token, .{ .result = r });
+                sink.completePending(sink, e.token, .{ .result = r });
                 delivered += 1;
                 continue;
             }
@@ -183,7 +187,7 @@ fn pollBatch(f: *Fake, sink: backend.Custom.Sink, random: *Source) usize {
 }
 
 /// Delivers cancelled operations; otherwise waits for a wake or the time.
-fn pollIdle(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink) void {
+fn pollIdle(f: *Fake, wait: backend.Wait, sink: *backend.Custom.Sink) void {
     var delivered: usize = 0;
     var i: usize = 0;
     while (i < f.ops.items.len) {
@@ -191,7 +195,7 @@ fn pollIdle(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink) void {
         if (o.state.canceled) {
             _ = f.ops.swapRemove(i);
             o.result = canceledResult(o);
-            sink.complete(sink.context, o);
+            sink.complete(sink, o);
             delivered += 1;
             continue;
         }
@@ -202,7 +206,7 @@ fn pollIdle(f: *Fake, wait: backend.Wait, sink: backend.Custom.Sink) void {
         const e = f.batch.items[i];
         if (e.canceled) {
             _ = f.batch.swapRemove(i);
-            sink.completePending(sink.context, e.token, .canceled);
+            sink.completePending(sink, e.token, .canceled);
             delivered += 1;
             continue;
         }

@@ -14,10 +14,12 @@ const slots = @import("../runtime/slots.zig");
 const backend = @import("../backend.zig");
 const clock = @import("../clock.zig");
 const Fake = @import("Fake.zig");
+const Core = @import("../runtime/Core.zig");
 
 runtime: Runtime,
 fake: Fake,
 virtual: clock.Virtual,
+backends: Core.Backends = .{ .backendFor = backendFor },
 
 /// `d` must not move after this.
 pub fn init(d: *Driver, gpa: Allocator, seed: u64, options: Runtime.Options) !void {
@@ -42,16 +44,16 @@ fn build(d: *Driver, fake_gpa: Allocator, gpa: Allocator, seed: u64, options: Ru
     errdefer d.fake.deinit();
     var o = options;
     o.workers = 0;
+    d.backends = .{ .backendFor = backendFor };
     try d.runtime.core.init(gpa, o, .{ .custom = .{
-        .context = d,
-        .backendFor = backendFor,
+        .backends = &d.backends,
         .clock = .{ .virtual = &d.virtual },
     } }, &slots.vtable);
 }
 
-fn backendFor(context: *anyopaque, processor: u16) backend.Custom {
+fn backendFor(b: *Core.Backends, processor: u16) *backend.Custom {
     _ = processor;
-    const d: *Driver = @ptrCast(@alignCast(context)); // safe: `init` passed the driver
+    const d: *Driver = @alignCast(@fieldParentPtr("backends", b)); // safe: the field belongs to this record
     return d.fake.custom();
 }
 

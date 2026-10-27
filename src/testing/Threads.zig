@@ -11,10 +11,12 @@ const Runtime = @import("../Runtime.zig");
 const slots = @import("../runtime/slots.zig");
 const backend = @import("../backend.zig");
 const Fake = @import("Fake.zig");
+const Core = @import("../runtime/Core.zig");
 
 runtime: Runtime,
 fakes: []Fake,
 gpa: Allocator,
+backends: Core.Backends = .{ .backendFor = backendFor },
 
 /// `t` must not move after this. Starts the workers.
 pub fn init(t: *Threads, gpa: Allocator, options: Runtime.Options) !void {
@@ -25,17 +27,17 @@ pub fn init(t: *Threads, gpa: Allocator, options: Runtime.Options) !void {
     for (t.fakes) |*f| f.* = .init(gpa, .idle);
     var o = options;
     o.workers = count - 1;
+    t.backends = .{ .backendFor = backendFor };
     try t.runtime.core.init(gpa, o, .{ .custom = .{
-        .context = t,
-        .backendFor = backendFor,
+        .backends = &t.backends,
         .clock = .system,
     } }, &slots.vtable);
     errdefer t.runtime.deinit();
     try t.runtime.start();
 }
 
-fn backendFor(context: *anyopaque, processor: u16) backend.Custom {
-    const t: *Threads = @ptrCast(@alignCast(context)); // safe: `init` passed the harness
+fn backendFor(b: *Core.Backends, processor: u16) *backend.Custom {
+    const t: *Threads = @alignCast(@fieldParentPtr("backends", b)); // safe: the field belongs to this record
     return t.fakes[processor].custom();
 }
 

@@ -43,7 +43,7 @@ pub const Backend = union(enum) {
     epoll: if (has_epoll) *Epoll else void,
     /// Absent where the system has no kqueue.
     kqueue: if (has_kqueue) *Kqueue else void,
-    custom: Custom,
+    custom: *Custom,
 
     pub fn kind(b: *const Backend) ?Kind {
         return switch (b.*) {
@@ -87,7 +87,7 @@ pub const Backend = union(enum) {
             .epoll => |e| return if (has_epoll) e.submit(o) else unreachable, // unreachable: no such backend here
             .kqueue => |k| return if (has_kqueue) k.submit(o) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) return w.submit(o) else unreachable, // unreachable: no such backend here
-            .custom => |c| try c.vtable.submit(c.context, o),
+            .custom => |c| try c.vtable.submit(c, o),
         }
         return false;
     }
@@ -99,7 +99,7 @@ pub const Backend = union(enum) {
             .epoll => |e| if (has_epoll) e.cancel(o) else unreachable, // unreachable: no such backend here
             .kqueue => |k| if (has_kqueue) k.cancel(o) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) return w.cancel(o) else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.cancel(c.context, o),
+            .custom => |c| c.vtable.cancel(c, o),
         }
         return false;
     }
@@ -121,7 +121,7 @@ pub const Backend = union(enum) {
             .epoll => |e| if (has_epoll) try e.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .kqueue => |k| if (has_kqueue) try k.submitPending(token, operation) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) return w.submitPending(token, operation) else unreachable, // unreachable: no such backend here
-            .custom => |c| try c.vtable.submitPending(c.context, token, operation),
+            .custom => |c| try c.vtable.submitPending(c, token, operation),
         }
         return null;
     }
@@ -132,7 +132,7 @@ pub const Backend = union(enum) {
             .epoll => |e| if (has_epoll) e.cancelPending(token) else unreachable, // unreachable: no such backend here
             .kqueue => |k| if (has_kqueue) k.cancelPending(token) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) w.cancelPending(token) else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.cancelPending(c.context, token),
+            .custom => |c| c.vtable.cancelPending(c, token),
         }
     }
 
@@ -145,7 +145,10 @@ pub const Backend = union(enum) {
             .epoll => |e| if (has_epoll) try e.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .kqueue => |k| if (has_kqueue) try k.poll(wait, sink) else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) try w.poll(wait, sink) else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.poll(c.context, wait, CustomSink(@TypeOf(sink)).of(sink)),
+            .custom => |c| {
+                var adapter: CustomSink(@TypeOf(sink)) = .{ .inner = sink };
+                c.vtable.poll(c, wait, &adapter.sink);
+            },
         }
     }
 
@@ -156,7 +159,7 @@ pub const Backend = union(enum) {
             .epoll => |e| if (has_epoll) e.wake() else unreachable, // unreachable: no such backend here
             .kqueue => |k| if (has_kqueue) k.wake() else unreachable, // unreachable: no such backend here
             .iocp => |w| if (has_iocp) w.wake() else unreachable, // unreachable: no such backend here
-            .custom => |c| c.vtable.wake(c.context),
+            .custom => |c| c.vtable.wake(c),
         }
     }
 
@@ -187,18 +190,17 @@ pub const Backend = union(enum) {
 /// The sink a custom backend delivers to, over the loop's own.
 fn CustomSink(comptime SinkPtr: type) type {
     return struct {
-        fn of(sink: SinkPtr) Custom.Sink {
-            return .{ .context = sink, .complete = complete, .completePending = completePending };
+        sink: Custom.Sink = .{ .complete = complete, .completePending = completePending },
+        inner: SinkPtr,
+
+        fn complete(s: *Custom.Sink, o: *op.Op) void {
+            const adapter: *@This() = @alignCast(@fieldParentPtr("sink", s)); // safe: the field belongs to this record
+            adapter.inner.complete(o);
         }
 
-        fn complete(context: *anyopaque, o: *op.Op) void {
-            const sink: SinkPtr = @ptrCast(@alignCast(context)); // safe: `of` stored this sink
-            sink.complete(o);
-        }
-
-        fn completePending(context: *anyopaque, token: pending.Token, outcome: pending.Outcome) void {
-            const sink: SinkPtr = @ptrCast(@alignCast(context)); // safe: `of` stored this sink
-            sink.completePending(token, outcome);
+        fn completePending(s: *Custom.Sink, token: pending.Token, outcome: pending.Outcome) void {
+            const adapter: *@This() = @alignCast(@fieldParentPtr("sink", s)); // safe: the field belongs to this record
+            adapter.inner.completePending(token, outcome);
         }
     };
 }
