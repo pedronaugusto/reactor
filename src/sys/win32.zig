@@ -78,7 +78,8 @@ pub extern "kernel32" fn SetInformationJobObject(
 pub const job_object_associate_completion_port_information: c_int = 7;
 
 pub const JobObjectAssociateCompletionPort = extern struct {
-    CompletionKey: ?*anyopaque,
+    /// A pointer-sized value the kernel hands back and never reads through.
+    CompletionKey: usize,
     CompletionPort: ?windows.HANDLE,
 };
 

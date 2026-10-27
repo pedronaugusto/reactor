@@ -60,18 +60,19 @@ pub fn attach(io: Io, job: windows.HANDLE) AttachError!Job {
                 // Where the home loop binds handles: a port some thread
                 // serves even while the root is away from the runtime.
                 const port = core.processors[0].loop.backend.iocp.bindingPort();
-                try associate(duplicate, @ptrFromInt(record.key()), port); // safe: the kernel carries this integer key without dereferencing it
+                try associate(duplicate, record.key(), port);
                 return .{ .port = port, .job = duplicate, .record = record };
             }
         }
     }
     const port = win32.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, null, 0, 1) orelse return error.SystemResources;
     errdefer windows.CloseHandle(port);
-    try associate(duplicate, duplicate, port);
+    // Its own port: the key is the job handle's number.
+    try associate(duplicate, @intFromPtr(duplicate), port);
     return .{ .port = port, .job = duplicate };
 }
 
-fn associate(job: windows.HANDLE, key: ?*anyopaque, port: ?windows.HANDLE) AttachError!void {
+fn associate(job: windows.HANDLE, key: usize, port: ?windows.HANDLE) AttachError!void {
     const association: win32.JobObjectAssociateCompletionPort = .{ .CompletionKey = key, .CompletionPort = port };
     if (win32.SetInformationJobObject(job, win32.job_object_associate_completion_port_information, &association, @sizeOf(win32.JobObjectAssociateCompletionPort)) == .FALSE) return switch (win32.GetLastError()) {
         win32.error_invalid_parameter => error.AlreadyAttached,
@@ -84,7 +85,7 @@ fn associate(job: windows.HANDLE, key: ?*anyopaque, port: ?windows.HANDLE) Attac
 pub fn detach(j: *Job, io: Io) void {
     _ = io;
     if (is_windows) {
-        associate(j.job, null, null) catch |err| std.debug.panic("reactor: detaching a job failed: {t}", .{err});
+        associate(j.job, 0, null) catch |err| std.debug.panic("reactor: detaching a job failed: {t}", .{err});
         if (j.record) |record| record.release() else windows.CloseHandle(j.port);
         windows.CloseHandle(j.job);
     }
