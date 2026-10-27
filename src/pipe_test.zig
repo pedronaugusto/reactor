@@ -85,6 +85,38 @@ test "a pipe nobody made, a name outside the pipe namespace and SDDL the system 
     try testing.expectError(error.InvalidSecurityDescriptor, net.listenPipe("\\\\.\\pipe\\reactor-test-bad-sddl", .{ .security = .{ .sddl = "not sddl" } }));
 }
 
+test "a server's disconnect ends its client's read under way" {
+    try skipOffWindows();
+    const io = testing.io;
+    var name_buffer: [64]u8 = undefined;
+    const name = uniqueName(io, &name_buffer);
+    var listener = try net.listenPipe(name, .{ .security = .token_default });
+    defer listener.deinit(io);
+    const Accepted = struct {
+        fn run(task_io: Io, l: *net.PipeListener, out: *?Io.File) void {
+            out.* = l.accept(task_io) catch null;
+        }
+    };
+    var server: ?Io.File = null;
+    var accepting = io.concurrent(Accepted.run, .{ io, &listener, &server }) catch return error.SkipZigTest;
+    const client = try net.connectPipe(io, name, .{});
+    defer client.close(io);
+    accepting.await(io);
+    const conn = server orelse return error.AcceptFailed;
+    defer conn.close(io);
+    // The server's own read under way ends when it disconnects.
+    const Reading = struct {
+        fn run(task_io: Io, file: Io.File) anyerror!usize {
+            var buf: [8]u8 = undefined;
+            return file.readStreaming(task_io, &.{&buf});
+        }
+    };
+    var reading = io.concurrent(Reading.run, .{ io, conn }) catch return error.SkipZigTest;
+    try io.sleep(.fromMilliseconds(50), .awake);
+    pipe.disconnect(io, conn);
+    try testing.expect(std.meta.isError(reading.await(io)));
+}
+
 test "off a runtime a pipe's deadlines are refused, and its reads unbounded" {
     try skipOffWindows();
     const io = testing.io;

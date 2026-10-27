@@ -12,7 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Windows named pipes (`net.pipe`): `net.connectPipe` opens a client's end, a busy pipe tried again until the timeout; `net.listenPipe` makes a server's, its security descriptor the caller's (SDDL, or the token's default named as such), clients of other machines refused, a fresh instance made as each client is accepted (`PipeListener.accept`). Each handle is an `Io.File` opened for overlapped calls, so a runtime finishes its reads, writes and listens on its port. `pipe.readPipeWithin` waits a bounded time for bytes on a runtime. A pipe's deadlines are kept on a runtime; off one, `Deadlines.add` refuses a pipe's watch and its operations run unbounded. Off Windows each call is `NamedPipeUnsupported`.
+- Windows named pipes (`net.pipe`): `net.connectPipe` opens a client's end, a busy pipe tried again until the timeout; `net.listenPipe` makes a server's, its security descriptor the caller's (SDDL, or the token's default named as such), clients of other machines refused, a fresh instance made as each client is accepted (`PipeListener.accept`); `pipe.disconnect` ends a server instance's client from any task, as `abort` ends a socket. Each handle is an `Io.File` opened for overlapped calls, so a runtime finishes its reads, writes and listens on its port. `pipe.readPipeWithin` waits a bounded time for bytes on a runtime. A pipe's deadlines are kept on a runtime; off one, `Deadlines.add` refuses a pipe's watch and its operations run unbounded. Off Windows each call is `NamedPipeUnsupported`.
 
 ## [0.8.5] - 2026-10-25
 

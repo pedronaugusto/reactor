@@ -208,6 +208,19 @@ fn listenWindows(path: []const u8, options: ListenOptions) ListenError!PipeListe
     return l;
 }
 
+/// Ends a server instance's client, from any task: its reads and writes
+/// under way and after end with the pipe's disconnection, as `abort` ends
+/// a socket's. The instance stays open: its owner closes it. A refusal
+/// means it is ended already.
+pub fn disconnect(io: Io, server_end: Io.File) void {
+    if (supported) disconnectWindows(io, server_end);
+}
+
+fn disconnectWindows(io: Io, server_end: Io.File) void {
+    // glint-ignore: Z026 -- an instance that cannot be disconnected has no client, which is what this asks
+    _ = io.operate(.{ .device_io_control = .{ .file = server_end, .code = pipe_windows.fsctl_pipe_disconnect } }) catch {};
+}
+
 /// What `readPipeWithin` found.
 pub const Readiness = union(enum) {
     /// Bytes came, this many into the buffer; 0 is the pipe's end.
