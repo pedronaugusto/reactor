@@ -1,14 +1,14 @@
 //! A processor's inbox: any thread pushes, the owner takes everything at
 //! once. A Treiber stack whose consumer swaps the head out, so there is no
 //! ABA to guard against; `takeAll` returns the items oldest first.
-const std = @import("std");
+const aegis = @import("aegis");
 
 /// An inbox of `*T`, linked through `T.<field>`, a `?*T`.
 pub fn Inbox(comptime T: type, comptime field: []const u8) type {
     return struct {
         const Self = @This();
 
-        head: std.atomic.Value(?*T) = .init(null),
+        head: aegis.Atomic(?*T) = .init(null),
 
         /// From any thread. True when the inbox was empty: the caller then
         /// wakes the owner if it may be waiting.

@@ -43,7 +43,7 @@ pub fn RunQueue(comptime T: type) type {
 
         head: aegis.Atomic(HeadWord) align(std.atomic.cache_line) = .init(pack(.{ .real = 0, .steal = 0 })),
         tail: aegis.Atomic(Position) align(std.atomic.cache_line) = .init(at(0)),
-        buffer: [capacity]std.atomic.Value(?*T) align(std.atomic.cache_line) = @splat(.init(null)),
+        buffer: [capacity]aegis.Atomic(?*T) align(std.atomic.cache_line) = @splat(.init(null)),
 
         /// The tasks queued, as the owner sees them.
         pub fn len(q: *const Self) u32 {
