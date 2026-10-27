@@ -9,9 +9,19 @@ const Threaded = std.Io.Threaded;
 
 const afd = @import("../../sys/afd.zig");
 
+/// What a request's APC context is: where the kernel writes its outcome,
+/// and whose request it is. The port's entry hands the context back as it
+/// was given, and the request's holder is found from it by its place.
+pub const Status = struct {
+    owner: Owner,
+    iosb: windows.IO_STATUS_BLOCK = undefined,
+
+    pub const Owner = enum(u8) { operation, batch };
+};
+
 pub const Scratch = struct {
     /// Where the kernel writes the outcome.
-    iosb: windows.IO_STATUS_BLOCK = undefined,
+    status: Status = .{ .owner = .operation },
     /// The port of the loop that submitted it, which finishes it: the
     /// loop's own field, so its address tells the loops apart where they
     /// share a host's port.
