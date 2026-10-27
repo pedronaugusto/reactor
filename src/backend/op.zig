@@ -3,6 +3,7 @@
 //! backend sees it, which `Loop.Op` embeds beside its completion.
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Wheel = @import("../Wheel.zig");
 const uring = @import("uring/scratch.zig");
@@ -128,9 +129,45 @@ pub const Phase = enum(u8) {
     done,
 };
 
+/// What moves an operation from one phase to the next.
+pub const Move = enum(u8) {
+    /// A timer goes on the loop's wheel.
+    arm,
+    /// Handed to the backend.
+    hand,
+    /// The backend gave it back without holding it: refused, or made at once.
+    back,
+    /// Completed at submit, queued for delivery.
+    finish,
+    /// Completed by the kernel or its cancel, queued for delivery.
+    complete,
+    /// Delivered to its completion.
+    deliver,
+    /// Delivered with no completion: kept for `reap`.
+    keep,
+    /// Taken by `reap`.
+    reap,
+};
+
+/// The phases an operation goes through, and the moves between them.
+pub const Life = aegis.state.Machine(Phase, Move, .{ .initial = .idle, .edges = &.{
+    .{ .from = .idle, .on = .arm, .to = .timer },
+    .{ .from = .idle, .on = .hand, .to = .kernel },
+    .{ .from = .kernel, .on = .back, .to = .idle },
+    .{ .from = .idle, .on = .finish, .to = .done },
+    .{ .from = .kernel, .on = .complete, .to = .done },
+    .{ .from = .timer, .on = .deliver, .to = .idle },
+    .{ .from = .kernel, .on = .deliver, .to = .idle },
+    .{ .from = .done, .on = .deliver, .to = .idle },
+    .{ .from = .timer, .on = .keep, .to = .done },
+    .{ .from = .kernel, .on = .keep, .to = .done },
+    .{ .from = .done, .on = .keep, .to = .done },
+    .{ .from = .done, .on = .reap, .to = .idle },
+} });
+
 /// The loop's and the backend's, from `submit` to delivery.
 pub const State = struct {
-    phase: Phase = .idle,
+    phase: Life.Runtime(void) = .init({}),
     /// The owner asked the kernel to end it.
     canceled: bool = false,
     /// The link of whichever queue holds it: the loop's completions, a
@@ -147,6 +184,17 @@ pub const State = struct {
         node: Wheel.Node,
         scratch: Scratch,
     };
+
+    /// Where the operation is.
+    pub fn current(s: *const State) Phase {
+        return s.phase.current();
+    }
+
+    /// Moves the operation on; a move its phase does not have is a bug in the
+    /// loop, stopped in every build.
+    pub fn move(s: *State, m: Move) void {
+        _ = s.phase.step(m) catch std.debug.panic("reactor: an operation in phase {t} cannot {t}", .{ s.phase.current(), m });
+    }
 };
 
 /// What an operation keeps for its backend while the kernel holds it,

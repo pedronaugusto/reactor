@@ -286,7 +286,7 @@ pub fn kind(l: *const Loop) ?backends.Kind {
 pub fn submit(l: *Loop, o: *Op) SubmitError!void {
     if (!try l.start(o)) return;
     l.in_flight += 1;
-    o.backend.state.phase = .done;
+    o.backend.state.move(.finish);
     l.ready.push(o);
 }
 
@@ -296,12 +296,12 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     l.installPressure();
     l.assertOwner();
-    assert(o.backend.state.phase == .idle);
+    assert(o.backend.state.current() == .idle);
     if (l.in_flight == l.max_ops) return error.QueueFull;
     o.backend.state = .{};
     switch (o.backend.kind) {
         .timer => |deadline| if (l.backend.kind() == null or (deadline.clock != .real and deadline.clock != .boot)) {
-            o.backend.state.phase = .timer;
+            o.backend.state.move(.arm);
             l.wheel.arm(&o.backend.state.storage.node, l.deadlineTick(deadline));
             l.in_flight += 1;
             return false;
@@ -321,13 +321,13 @@ pub fn start(l: *Loop, o: *Op) SubmitError!bool {
         else => {},
     }
     o.backend.state.storage = .{ .scratch = undefined };
-    o.backend.state.phase = .kernel;
+    o.backend.state.move(.hand);
     const done = l.backend.submit(&o.backend) catch |err| {
-        o.backend.state.phase = .idle;
+        o.backend.state.move(.back);
         return err;
     };
     if (done) {
-        o.backend.state.phase = .idle;
+        o.backend.state.move(.back);
         return true;
     }
     l.in_flight += 1;
@@ -350,7 +350,7 @@ pub fn closing(fd: Io.File.Handle) void {
 /// this call.
 pub fn cancel(l: *Loop, o: *Op) void {
     l.assertOwner();
-    switch (o.backend.state.phase) {
+    switch (o.backend.state.current()) {
         .idle, .done => {},
         .timer => {
             l.wheel.disarm(&o.backend.state.storage.node);
@@ -367,7 +367,7 @@ fn cancelKernel(l: *Loop, o: *Op) void {
     if (o.backend.state.canceled) return;
     o.backend.state.canceled = true;
     if (l.backend.cancel(&o.backend)) {
-        o.backend.state.phase = .done;
+        o.backend.state.move(.complete);
         l.ready.push(o);
     }
 }
@@ -412,7 +412,7 @@ pub fn reap(l: *Loop, out: []*Op) []*Op {
     var n: usize = 0;
     while (n < out.len) : (n += 1) {
         const o = l.reaped.pop() orelse break;
-        o.backend.state.phase = .idle;
+        o.backend.state.move(.reap);
         out[n] = o;
     }
     return out[0..n];
@@ -548,10 +548,10 @@ fn deliverReady(l: *Loop) u32 {
 fn deliver(l: *Loop, o: *Op) void {
     l.in_flight -= 1;
     if (o.completion) |c| {
-        o.backend.state.phase = .idle;
+        o.backend.state.move(.deliver);
         c.run(c, l, o);
     } else {
-        o.backend.state.phase = .done;
+        o.backend.state.move(.keep);
         l.reaped.push(o);
     }
 }
@@ -610,7 +610,7 @@ const Pressure = struct {
         loop.backend.io_uring.complete(cqe, &sink);
     }
     pub fn complete(p: *Pressure, o: *op.Op) void {
-        o.state.phase = .done;
+        o.state.move(.complete);
         p.loop.ready.push(Op.of(o));
     }
     pub fn completePending(p: *Pressure, token: backends.pending.Token, outcome: backends.pending.Outcome) void {

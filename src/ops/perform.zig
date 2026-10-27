@@ -113,11 +113,11 @@ pub const Deadline = struct {
         d.armed = false;
         const p = d.processor;
         assert(Scheduler.processor() == p);
-        if (d.op.backend.state.phase != .idle) {
+        if (d.op.backend.state.current() != .idle) {
             p.loop.cancel(&d.op);
             // A wheel timer is delivered inside the cancel; the kernel's
             // comes back later.
-            if (d.op.backend.state.phase != .idle) {
+            if (d.op.backend.state.current() != .idle) {
                 d.waiting = true;
                 Scheduler.park(null);
             }
