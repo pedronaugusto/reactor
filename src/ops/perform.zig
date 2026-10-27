@@ -137,6 +137,8 @@ pub fn run(s: *Scheduler, o: *Loop.Op, options: Options) Error!void {
     defer t.operation = previous_operation;
     var w: Waiter = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .o = o };
     o.completion = &w.completion;
+    // The waiter is this frame's: the caller's op keeps no pointer to it.
+    defer o.completion = null;
     if (options.cancelable) try t.enterWait(&w.hook);
     const fd = descriptorOf(o.backend.kind);
     if (fd) |d| p.hold(d);
@@ -178,6 +180,8 @@ pub fn accept(s: *Scheduler, p: *Processor, o: *Loop.Op) Error!void {
     t.operation = .accept;
     defer t.operation = previous;
     var request: RemoteAccept = .{ .message = .{ .task = t }, .task = t, .processor = p, .scheduler = s, .op = o };
+    // The request is this frame's: the caller's op keeps no pointer to it.
+    defer o.completion = null;
     try t.enterWait(&request.hook);
     Scheduler.park(&request.after);
     Scheduler.leaveWait(t);
@@ -309,6 +313,8 @@ pub fn deadline(p: *Processor, timeout: Io.Timeout) ?Io.Clock.Timestamp {
 /// a deadline ends the operation as it does a task's.
 pub fn runElsewhere(p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ Timeout, SystemResources }!void {
     var e: Elsewhere = .{ .op = o, .deadline = at };
+    // The record is this frame's: the caller's op keeps no pointer to it.
+    defer o.completion = null;
     p.send(&e.errand);
     const system = Scheduler.system();
     while (e.done.load(.acquire) == 0) system.futexWaitUncancelable(u32, &e.done.raw, 0);
