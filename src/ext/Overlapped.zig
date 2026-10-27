@@ -90,7 +90,8 @@ pub fn start(o: *Overlapped, comptime begin: anytype, handle: windows.HANDLE, co
 /// writes the status block before it signals the event.
 pub fn ended(o: *const Overlapped) bool {
     if (!o.outstanding) return false;
-    const status: *const u32 = @ptrCast(&o.iosb.u.Status); // safe: an NTSTATUS is a u32, read whole as the kernel writes it
+    const status: *const u32 = @ptrCast(&o.iosb.u.Status); // aegis: boundary: an NTSTATUS is a u32, read whole as the kernel writes it
+    // aegis: boundary: the kernel writes the status block as the call ends, so it is read atomically where it lies
     return @atomicLoad(u32, status, .acquire) != @backingInt(windows.NTSTATUS.PENDING);
 }
 

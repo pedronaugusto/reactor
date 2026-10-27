@@ -23,6 +23,10 @@ const Io = std.Io;
 const clock = @import("../../clock.zig");
 const native = @import("../native.zig");
 const abort = @import("abort.zig").abort;
+const Raised = @import("../../backend/Raised.zig");
+
+/// Watches with an operation armed.
+const Armed = aegis.units.Count(Watch, u32);
 
 /// What the lock holds: the watched, and the task that keeps their
 /// deadlines. Held by the task while it scans.
@@ -33,15 +37,17 @@ const Watching = struct {
 
 watching: aegis.BlockingGuarded(Watching) = .init(.{}),
 /// Watches with an operation armed.
-armed: std.atomic.Value(u32) = .init(0),
+armed: aegis.Atomic(Armed) = .init(.fromRaw(0)),
 /// 1 while the task waits for an operation to be armed; the futex it
 /// waits on.
+// aegis: boundary: a futex word: the kernel waits on this u32's address
 parked: std.atomic.Value(u32) = .init(0),
-/// How often the task looks at the armed deadlines, in nanoseconds. It only
-/// shortens, and `tighten` is what does.
-tick: std.atomic.Value(i64),
+/// How often the task looks at the armed deadlines. It only shortens, and
+/// `tighten` is what does.
+tick: aegis.Atomic(clock.Span),
 /// Bumped to cut the task's wait between ticks short; the futex it waits
 /// on.
+// aegis: boundary: a futex word: the kernel waits on this u32's address
 nudge: std.atomic.Value(u32) = .init(0),
 
 const unarmed: clock.Awake = .fromRaw(0);
@@ -55,8 +61,8 @@ pub const Watch = struct {
     target: Target,
     /// The armed operation's deadline; `unarmed` when none is.
     deadline: aegis.Atomic(clock.Awake) = .init(unarmed),
-    /// Set once a deadline fired and the socket was aborted.
-    fired: std.atomic.Value(bool) = .init(false),
+    /// Raised once a deadline fired and the socket was aborted.
+    fired: Raised = .{},
 
     /// What the operations are on.
     pub const Target = union(enum) {
@@ -93,8 +99,13 @@ pub fn init(shortest: Io.Duration) Deadlines {
 }
 
 /// A tenth of `d`, between a millisecond and a second.
-fn tickFor(d: Io.Duration) i64 {
-    return @intCast(std.math.clamp(@divTrunc(d.nanoseconds, 10), std.time.ns_per_ms, std.time.ns_per_s)); // safe: clamped to between a millisecond and a second
+fn tickFor(d: Io.Duration) clock.Span {
+    const tenth = clock.spanOf(d).divTrunc(10) catch unreachable; // unreachable: the divisor is a constant
+    const shortest: clock.Span = .literal("1ms");
+    const longest: clock.Span = .literal("1s");
+    if (tenth.compare(shortest) == .lt) return shortest;
+    if (tenth.compare(longest) == .gt) return longest;
+    return tenth;
 }
 
 /// Keep deadlines as short as `d` too, which `init` was not told of: the
@@ -105,7 +116,7 @@ pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
     if (native.runtimeOf(io) != null) return;
     const want = tickFor(shorter);
     var current = d.tick.load(.monotonic);
-    while (want < current) {
+    while (want.compare(current) == .lt) {
         current = d.tick.cmpxchgWeak(current, want, .monotonic, .monotonic) orelse {
             _ = d.nudge.fetchAdd(1, .release);
             io.futexWake(u32, &d.nudge.raw, 1);
@@ -157,14 +168,14 @@ pub const OperateError = Io.Cancelable || error{Timeout};
 /// before the deadline is returned even when the deadline fired, though
 /// the socket is aborted then.
 pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
-    if (w.fired.load(.acquire)) return error.Timeout;
+    if (w.fired.raised()) return error.Timeout;
     if (native.runtimeOf(io) != null) {
         return io.operateTimeout(operation, .{ .deadline = deadline }) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             // Device control has no evented form: unbounded, as std's.
             error.ConcurrencyUnavailable => io.operate(operation),
             error.Timeout => {
-                w.fired.store(true, .release);
+                _ = w.fired.raise();
                 w.end(io);
                 return error.Timeout;
             },
@@ -176,7 +187,7 @@ pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadli
     const result = io.operate(operation);
     d.disarm(w);
     const r = try result;
-    if (w.fired.load(.acquire) and failed(r)) return error.Timeout;
+    if (w.fired.raised() and failed(r)) return error.Timeout;
     return r;
 }
 
@@ -194,11 +205,10 @@ fn failed(r: Io.Operation.Result) bool {
 
 fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
     // The watching task reads the awake clock.
-    const at: Io.Timestamp = if (deadline.clock == .awake) deadline.raw else .{ .nanoseconds = Io.Clock.awake.now(io).nanoseconds +| deadline.durationFromNow(io).raw.nanoseconds };
+    const stamp = if (deadline.clock == .awake) clock.awakeOf(deadline.raw) else clock.carried(deadline.raw, deadline.clock.now(io), Io.Clock.awake.now(io));
     // Zero means unarmed, so a deadline at the very start is the next tick.
-    const stamp = clock.awakeOf(at);
     w.deadline.store(if (stamp.eql(unarmed)) soonest else stamp, .release);
-    if (d.armed.fetchAdd(1, .seq_cst) == 0 and d.parked.load(.seq_cst) == 1) {
+    if (d.armed.fetchAddWrapping(.fromRaw(1), .seq_cst).eql(.fromRaw(0)) and d.parked.load(.seq_cst) == 1) {
         d.parked.store(0, .seq_cst);
         io.futexWake(u32, &d.parked.raw, 1);
     }
@@ -206,24 +216,24 @@ fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
 
 fn disarm(d: *Deadlines, w: *Watch) void {
     w.deadline.store(unarmed, .release);
-    _ = d.armed.fetchSub(1, .seq_cst);
+    _ = d.armed.fetchSubWrapping(.fromRaw(1), .seq_cst);
 }
 
 fn watch(d: *Deadlines, io: Io) void {
     var idle_ticks: u32 = 0;
     while (true) {
-        if (d.armed.load(.seq_cst) == 0) {
+        if (d.armed.load(.seq_cst).eql(.fromRaw(0))) {
             idle_ticks += 1;
             if (idle_ticks > 1) {
                 idle_ticks = 0;
                 d.parked.store(1, .seq_cst);
-                if (d.armed.load(.seq_cst) == 0) io.futexWait(u32, &d.parked.raw, 1) catch return;
+                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) io.futexWait(u32, &d.parked.raw, 1) catch return;
                 d.parked.store(0, .seq_cst);
                 continue;
             }
         } else idle_ticks = 0;
         const seen = d.nudge.load(.acquire);
-        const tick: Io.Duration = .fromNanoseconds(d.tick.load(.monotonic));
+        const tick = d.tick.load(.monotonic).toIoDuration();
         io.futexWaitTimeout(u32, &d.nudge.raw, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
         d.scan(io);
     }
@@ -237,8 +247,8 @@ fn scan(d: *Deadlines, io: Io) void {
     while (it) |node| : (it = node.next) {
         const w: *Watch = @fieldParentPtr("node", node);
         const deadline = w.deadline.load(.acquire);
-        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.load(.acquire)) continue;
-        w.fired.store(true, .release);
+        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.raised()) continue;
+        _ = w.fired.raise();
         w.end(io);
     }
 }

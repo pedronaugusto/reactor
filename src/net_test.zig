@@ -3,6 +3,7 @@
 //! and a lookup with too many answers.
 const builtin = @import("builtin");
 const std = @import("std");
+const timeline = @import("clock.zig");
 const testing = std.testing;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -229,15 +230,15 @@ test "a deadline passed aborts the operation's socket, and one disarmed in time 
     // A read that never gets an answer ends at its deadline.
     const start = Io.Clock.awake.now(io);
     try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
-    try testing.expect(watch.fired.load(.acquire));
+    try testing.expect(watch.fired.raised());
     // The socket is poisoned: the next operation reports the deadline.
     try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
 }
 
 test "the watching task ticks at a tenth of the shortest timeout, between a millisecond and a second" {
-    try testing.expectEqual(@as(i64, std.time.ns_per_ms), net.Deadlines.init(.fromMilliseconds(2)).tick.load(.monotonic));
-    try testing.expectEqual(@as(i64, 3 * std.time.ns_per_s / 10), net.Deadlines.init(.fromSeconds(3)).tick.load(.monotonic));
-    try testing.expectEqual(@as(i64, std.time.ns_per_s), net.Deadlines.init(.fromSeconds(300)).tick.load(.monotonic));
+    try testing.expectEqual(timeline.Span.literal("1ms"), net.Deadlines.init(.fromMilliseconds(2)).tick.load(.monotonic));
+    try testing.expectEqual(timeline.Span.literal("300ms"), net.Deadlines.init(.fromSeconds(3)).tick.load(.monotonic));
+    try testing.expectEqual(timeline.Span.literal("1s"), net.Deadlines.init(.fromSeconds(300)).tick.load(.monotonic));
 }
 
 test "tighten only shortens the tick, and wakes the task that waits out a longer one" {
@@ -245,9 +246,9 @@ test "tighten only shortens the tick, and wakes the task that waits out a longer
     var deadlines: net.Deadlines = .init(.fromSeconds(300));
     defer deadlines.deinit(io);
     deadlines.tighten(io, .fromMilliseconds(50));
-    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), deadlines.tick.load(.monotonic));
+    try testing.expectEqual(timeline.Span.literal("5ms"), deadlines.tick.load(.monotonic));
     deadlines.tighten(io, .fromSeconds(5));
-    try testing.expectEqual(@as(i64, 5 * std.time.ns_per_ms), deadlines.tick.load(.monotonic));
+    try testing.expectEqual(timeline.Span.literal("5ms"), deadlines.tick.load(.monotonic));
 
     // A task that has waited out one second between looks ends an operation
     // within a few ticks of the shorter deadline asked for afterwards.
