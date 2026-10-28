@@ -9,6 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Breaking
 
 - On the aegis 0.2 line: reactor pins aegis 0.2.3, shuttle 0.5.0 and airlock 0.6.0, whose types its own carry, so a consumer moves with it.
+- `net.Deadlines.Watch.fired` is a `sync.Raised`, read with `fired.raised(.acquire)`, where it was a `std.atomic.Value(bool)` read with `load`.
 - `Loop.Op.callback` is `Op.completion`, a `?*Loop.Completion`: an intrusive node, `Completion { run(*Completion, *Loop, *Op) }`, kept in the record that waits and found from it by `@fieldParentPtr`, where the callback found its record from an address in `user_data`. `user_data` stays the reaping caller's tag.
 
 - `net.Deadlines.Watch` watches a socket or a named pipe: its `socket` field is `target`, a `Watch.Target`; `Watch.init(socket)` is as it was, and `Watch.initPipe(file)` makes a pipe's.
