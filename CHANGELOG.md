@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
+
 ## [0.9.0] - 2026-10-28
 
 ### Breaking

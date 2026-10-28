@@ -31,7 +31,6 @@ const Lanes = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Raised = @import("sync/Raised.zig");
-const Done = @import("sync/Done.zig");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -360,7 +359,7 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
 /// pool until let go: the reserve a lane grows by.
 const Reserve = struct {
     state: enum { free, holding, let_go } = .free,
-    gate: Done = .{},
+    gate: Io.Event = .unset,
     /// Raised once it runs: whether its thread is one the executor made for it.
     entered: Raised = .{},
     /// Raised once it no longer touches the entry.

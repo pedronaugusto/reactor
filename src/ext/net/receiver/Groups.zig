@@ -2,7 +2,6 @@
 const Groups = @This();
 const builtin = @import("builtin");
 const std = @import("std");
-const Done = @import("../../../sync/Done.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -87,7 +86,7 @@ pub fn deinit(g: *Groups, gpa: Allocator, io: Io) void {
 // Before a disabled ring is enabled, it has no submitter and can be set up here.
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
-    ready: Done = .{},
+    ready: Io.Event = .unset,
     io: Io,
     action: union(enum) { register: struct { entries: BufferRing.Entries, id: BufferRing.Id }, unregister: *BufferRing },
     result: BufferRing.Error!BufferRing = undefined,

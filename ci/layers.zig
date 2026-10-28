@@ -32,7 +32,6 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/lanes/SlotPool.zig",
         "src/sync.zig",
         "src/sync/Raised.zig",
-        "src/sync/Done.zig",
         "src/sync/FreeList.zig",
     } },
     .{ .name = "backends", .patterns = &.{

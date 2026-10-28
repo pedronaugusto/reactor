@@ -2,7 +2,6 @@
 const Registrations = @This();
 const builtin = @import("builtin");
 const std = @import("std");
-const Done = @import("../../../sync/Done.zig");
 const Io = std.Io;
 const Scheduler = @import("../../../Scheduler.zig");
 const native = @import("../../native.zig");
@@ -41,7 +40,7 @@ fn unregister(io: Io, item: Item) void {
 
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
-    ready: Done = .{},
+    ready: Io.Event = .unset,
     awaiting: bool = false,
     io: Io,
     action: union(enum) { register: []u8, unregister: u16 },

@@ -4,7 +4,6 @@
 //! which the monitor can rescue by handing on the processor; or "borrowed": std's code run on the worker
 //! itself, for calls that never block.
 const std = @import("std");
-const Done = @import("../sync/Done.zig");
 
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
@@ -65,7 +64,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         func: @TypeOf(func),
         args: @TypeOf(args),
         result: R = undefined,
-        finished: Done = .{},
+        finished: std.Io.Event = .unset,
 
         fn run(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the waiting caller owns the record
@@ -83,7 +82,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
     };
     while (true) {
         c.job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ };
-        c.finished = .{};
+        c.finished = .unset;
         while (!lanes.admit(&c.job)) {
             if (comptime raw) return error.ConcurrencyUnavailable;
             std.Thread.yield() catch std.atomic.spinLoopHint();
