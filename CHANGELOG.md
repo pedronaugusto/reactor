@@ -23,6 +23,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The kernel is named by no address. An io_uring completion's `user_data` is a slot and its generation in the ring's table (`backend.Slab`), so a stale or forged completion is refused and counted rather than followed. An IOCP completion's context is its status header, from which its operation or batch is found by `@fieldParentPtr`. Every pointer conversion and foreign declaration left is one the kernel's or std's contract forces, named at its site.
 - The runtime's synchronization is aegis cells (`Atomic`, `Condition`, `BlockingGuarded`): its flags one `sync.Raised` naming each ordering, its counters Counts, its stack depths Bytes, and a run queue's slots, an inbox's head, a processor's owner and a future's awaiter pointer cells, at the orderings they had. An operation's phase is an aegis `state.Machine`, every move checked in every build.
+- Pins shuttle 0.5.0.
 
 ## [0.8.7] - 2026-10-27
 
