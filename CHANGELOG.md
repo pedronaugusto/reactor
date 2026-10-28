@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The runtime's synchronization is aegis cells (`Atomic`, `Condition`, `BlockingGuarded`): its flags one `sync.Raised` naming each ordering, its counters Counts, its stack depths Bytes, and a run queue's slots, an inbox's head, a processor's owner and a future's awaiter pointer cells, at the orderings they had. An operation's phase is an aegis `state.Machine`, every move checked in every build.
 - Pins shuttle 0.5.0.
 
+### Fixed
+
+- Eight expressions Zig 0.18 refuses as ambiguous operator precedence are parenthesized as Zig 0.17 reads them: a readiness key's generation and index, a slot's owner word, a hash's bucket, a deadline's test, and an error caught before an optional is unwrapped (glint's Z034).
+
 ## [0.8.7] - 2026-10-27
 
 ### Fixed

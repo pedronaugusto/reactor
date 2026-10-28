@@ -156,7 +156,7 @@ pub fn Records(comptime Waiter: type) type {
 
         fn home(t: *const Self, fd: posix.fd_t) usize {
             const h = @as(u64, @as(u32, @bitCast(fd))) *% 0x9E3779B97F4A7C15;
-            return @intCast(h >> 32 & (t.slots.len - 1));
+            return @intCast((h >> 32) & (t.slots.len - 1));
         }
 
         /// The record of `fd`, if there is one.

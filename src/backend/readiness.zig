@@ -273,10 +273,10 @@ pub fn Readiness(comptime Poller: type) type {
                     return self.park(w, fd, .read, .call);
                 },
                 .connect => |c| {
-                    w.restore = !c.nonblocking and calls.makeNonblocking(c.socket) catch |err| {
+                    w.restore = !c.nonblocking and (calls.makeNonblocking(c.socket) catch |err| {
                         o.result = .{ .connect = err };
                         return true;
-                    };
+                    });
                     if (calls.connect(c.socket, c.address)) |result| {
                         if (w.restore) calls.makeBlocking(c.socket);
                         o.result = .{ .connect = result };
@@ -434,7 +434,7 @@ pub fn Readiness(comptime Poller: type) type {
                 if (!counts(r)) return .unknown;
                 const generation = r.generation;
                 self.room() catch return .unknown;
-                r.registered = self.poller.register(fd, @as(u64, generation) << 32 | index, r.registered, .write) catch return .unknown;
+                r.registered = self.poller.register(fd, (@as(u64, generation) << 32) | index, r.registered, .write) catch return .unknown;
                 _ = self.pump(.nowait) catch return .unknown;
                 // Its event (or another's) may have let the record go.
                 if (self.records.find(fd) != index or r.generation != generation) return .unknown;
@@ -541,7 +541,7 @@ pub fn Readiness(comptime Poller: type) type {
             w.direction = direction;
             if (!r.registered.has(directions(direction))) {
                 try self.room();
-                const key = @as(u64, r.generation) << 32 | index;
+                const key = (@as(u64, r.generation) << 32) | index;
                 r.registered = self.poller.register(fd, key, r.registered, direction) catch |err| switch (err) {
                     error.Unpollable => {
                         // Always ready (a regular file): made in place.
@@ -576,7 +576,7 @@ pub fn Readiness(comptime Poller: type) type {
             const r = self.records.at(index);
             if (r.registered.has(directions(direction))) {
                 try self.room();
-                const key = @as(u64, r.generation) << 32 | index;
+                const key = (@as(u64, r.generation) << 32) | index;
                 r.registered = self.poller.register(fd, key, r.registered, direction) catch |err| switch (err) {
                     error.Unpollable => unreachable, // unreachable: it was registered this way before
                     error.SystemResources => return error.SystemResources,

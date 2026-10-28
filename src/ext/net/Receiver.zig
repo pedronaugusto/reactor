@@ -150,10 +150,10 @@ pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
             error.Unsupported, error.Unexpected => error.Unexpected,
         };
         const index = r.pool.take() orelse return error.SystemResources;
-        const n = read(io, r.socket, r.pool.buffer(index), deadline) catch |err| {
+        const n = (read(io, r.socket, r.pool.buffer(index), deadline) catch |err| {
             r.pool.give(index);
             return err;
-        } orelse {
+        }) orelse {
             // Readable, but someone else read it first: wait again.
             r.pool.give(index);
             continue;

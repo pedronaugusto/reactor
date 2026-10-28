@@ -424,7 +424,7 @@ fn random(userdata: ?*anyopaque, buffer: []u8) void {
 
 fn holderId() Core.Holder {
     if (Scheduler.current()) |t| return @fromBackingInt(@intFromPtr(t)); // safe: an identity, never dereferenced
-    return @fromBackingInt(@as(usize, std.Thread.getCurrentId()) << 1 | 1);
+    return @fromBackingInt((@as(usize, std.Thread.getCurrentId()) << 1) | 1);
 }
 
 fn lockStderr(userdata: ?*anyopaque, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {

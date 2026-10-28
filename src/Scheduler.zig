@@ -657,7 +657,7 @@ pub const Processor = struct {
         const done = switch (s.mode) {
             .nowait => s.polled,
             .once => s.delivered > 0 or s.polled,
-            .within => |deadline| s.delivered > 0 or s.polled and p.passed(deadline),
+            .within => |deadline| s.delivered > 0 or (s.polled and p.passed(deadline)),
             .until => |deadline| p.passed(deadline),
         };
         if (done) {
