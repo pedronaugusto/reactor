@@ -330,7 +330,7 @@ const Native = struct {
         defer held.deinit(system());
         while (true) {
             if (try state.take(held.value())) |bytes| return bytes;
-            state.changed.wait(io, &held, deadline) catch |err| switch (err) {
+            held.wait(&state.changed, io, deadline) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.Timeout => return try state.take(held.value()) orelse error.Timeout,
                 error.WaiterLimit => return error.SystemResources,
@@ -343,7 +343,7 @@ const Native = struct {
         var held = state.mailbox.acquireUncancelable(system());
         defer held.deinit(system());
         // One closer, and no deadline: it waits until the request is over.
-        while (!held.value().ended) state.changed.waitUncancelable(io, &held, .none) catch unreachable; // unreachable: one closer waits, with no deadline
+        while (!held.value().ended) held.waitUncancelable(&state.changed, io, .none) catch unreachable; // unreachable: one closer waits, with no deadline
         const mailbox = held.value();
         const pool = state.receiver.pool;
         while (mailbox.head) |index| {

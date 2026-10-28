@@ -53,7 +53,7 @@ pub const Record = struct {
         defer held.deinit(system());
         while (true) {
             if (try take(held.value())) |message| return message;
-            record.arrived.wait(io, &held, deadline) catch |err| switch (err) {
+            held.wait(&record.arrived, io, deadline) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.Timeout => return if (try take(held.value())) |message| message else error.Timeout,
                 error.WaiterLimit => return error.SystemResources,
