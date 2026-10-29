@@ -27,8 +27,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock?ref=v0.6.0#0931b6512b1d7c2e03e822bc82870ec8f98fa91e",
-            .hash = "airlock-0.6.0-rfvu6JUEBwD8DeigCmlj5NDNiglUZzUy2HSsKAeYRs3E",
+            .url = "git+https://github.com/pedronaugusto/airlock#143aa8d926caef4b20952cb6c1ebfad3867e472d",
+            .hash = "airlock-0.6.0-rfvu6HCOBwBbkofxjONchXCxn3uFxeLq2vs3JavLtNIK",
         },
     },
 }
