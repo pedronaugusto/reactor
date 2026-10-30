@@ -804,8 +804,8 @@ test "r6: refused IPv6 connect followed by IPv4 reuses readiness" {
         const refused: net.IpAddress = .{ .ip6 = .loopback(server.socket.address.getPort()) };
         const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
         try testing.expectError(error.ConnectionRefused, timed.connect(io, &refused, .{ .timeout = timeout }));
-        const connected = try timed.connect(io, &server.socket.address, .{ .timeout = timeout });
-        defer connected.stream.close(io);
+        var connected = try timed.connect(io, &server.socket.address, .{ .timeout = timeout });
+        defer connected.stream.deinit(io);
     }
 }
 

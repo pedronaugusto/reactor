@@ -711,10 +711,10 @@ fn connects(r: Report, io: Io, c: Config) !void {
     const n: usize = if (c.smoke) 20 else 10_000;
     const t0 = now(io);
     for (0..n) |_| {
-        const connected = try reactor.net.connect(io, &server.socket.address, .{});
+        var connected = try reactor.net.connect(io, &server.socket.address, .{});
         const accepted = try server.accept(io);
         accepted.close(io);
-        connected.stream.close(io);
+        connected.stream.deinit(io);
     }
     try r.line("connect", "loopback connect, accept and close", @as(f64, @floatFromInt(n)) * std.time.ns_per_s / nsBetween(t0, now(io)), "conn/s");
 }
@@ -730,7 +730,7 @@ const Setting = enum { none, before, after };
 
 /// A client connection as `setting` makes it: plain, its options set by
 /// `net.connect` before the connect, or by `net.setOptions` after std's.
-fn connectAs(io: Io, address: *const Io.net.IpAddress, setting: Setting) !Io.net.Stream {
+fn connectAs(io: Io, address: *const Io.net.IpAddress, setting: Setting) !reactor.net.owned.Stream {
     return switch (setting) {
         .none => (try reactor.net.connect(io, address, .{})).stream,
         .before => (try reactor.net.connect(io, address, .{ .socket = bench_options })).stream,
@@ -738,7 +738,7 @@ fn connectAs(io: Io, address: *const Io.net.IpAddress, setting: Setting) !Io.net
             const stream = try address.connect(io, .{ .mode = .stream });
             errdefer stream.close(io);
             try reactor.net.setOptions(stream.socket, bench_options);
-            break :after stream;
+            break :after .init(stream);
         },
     };
 }
@@ -751,12 +751,13 @@ fn connectOptions(r: Report, io: Io, c: Config) !void {
         const t0 = now(io);
         var acceptor = try io.concurrent(acceptLoop, .{ io, &server, n });
         for (0..n) |_| {
-            const stream = try connectAs(io, &server.socket.address, row[0]);
+            var connected = try connectAs(io, &server.socket.address, row[0]);
+            const stream = connected.borrow().*;
             var byte: [1]u8 = undefined;
             var data: [1][]u8 = .{&byte};
             // glint-ignore: Z026 -- the server closed first, so the read ends in end of stream or a reset, and either is the end this wants
             _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
-            stream.close(io);
+            connected.deinit(io);
         }
         try acceptor.await(io);
         try r.line("connect-options", row[1], @as(f64, @floatFromInt(n)) / (nsBetween(t0, now(io)) / std.time.ns_per_s), "conn/s");

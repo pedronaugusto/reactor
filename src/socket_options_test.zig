@@ -58,12 +58,12 @@ fn everyOption(io: Io) !void {
     }
     var server = try net.listen(io, &.{ .ip4 = .loopback(0) }, .{ .reuse_address = true, .socket = listener_asks });
     defer server.deinit(io);
-    try expectAsked(server.socket.handle, .listener);
-    const connected = try net.connect(io, &server.socket.address, .{ .socket = asked, .timeout = ms(5000) });
-    defer connected.stream.close(io);
-    try expectAsked(connected.stream.socket.handle, .connection);
-    try testing.expect(connected.stream.socket.address.getPort() != 0);
-    const accepted = try server.accept(io);
+    try expectAsked(server.borrow().socket.handle, .listener);
+    var connected = try net.connect(io, &server.borrow().socket.address, .{ .socket = asked, .timeout = ms(5000) });
+    defer connected.stream.deinit(io);
+    try expectAsked(connected.stream.borrow().socket.handle, .connection);
+    try testing.expect(connected.stream.borrow().socket.address.getPort() != 0);
+    const accepted = try server.borrowMut().accept(io);
     defer accepted.close(io);
     try net.setOptions(accepted.socket, .{ .nodelay = false, .keepalive = .off, .send_buffer = .fromRaw(96 << 10) });
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.nodelay));
@@ -99,9 +99,9 @@ test "IPv6 takes its traffic class as IPV6_TCLASS" {
         else => return err,
     };
     defer server.deinit(io);
-    const connected = try net.connect(io, &server.socket.address, .{ .socket = .{ .traffic_class = 0x48 } });
-    defer connected.stream.close(io);
-    try testing.expectEqual(@as(c_int, 0x48), try sys.get(connected.stream.socket.handle, sys.tclass));
+    var connected = try net.connect(io, &server.socket.address, .{ .socket = .{ .traffic_class = 0x48 } });
+    defer connected.stream.deinit(io);
+    try testing.expectEqual(@as(c_int, 0x48), try sys.get(connected.stream.borrow().socket.handle, sys.tclass));
 }
 
 test "an option the system has none of is OptionUnsupported, and fails the connect" {
@@ -124,13 +124,13 @@ test "a fixed local port binds twice with reuse_address, and is AddressUnavailab
     defer first_server.deinit(io);
     var second_server = try (IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer second_server.deinit(io);
-    const first = try net.connect(io, &first_server.socket.address, .{ .local_address = .{ .ip4 = .loopback(0) }, .reuse_address = true });
-    defer first.stream.close(io);
-    const port = first.stream.socket.address.getPort();
+    var first = try net.connect(io, &first_server.socket.address, .{ .local_address = .{ .ip4 = .loopback(0) }, .reuse_address = true });
+    defer first.stream.deinit(io);
+    const port = first.stream.borrow().socket.address.getPort();
     var local: IpAddress = .{ .ip4 = .loopback(port) };
-    const second = try net.connect(io, &second_server.socket.address, .{ .local_address = local, .reuse_address = true });
-    defer second.stream.close(io);
-    try testing.expectEqual(port, second.stream.socket.address.getPort());
+    var second = try net.connect(io, &second_server.socket.address, .{ .local_address = local, .reuse_address = true });
+    defer second.stream.deinit(io);
+    try testing.expectEqual(port, second.stream.borrow().socket.address.getPort());
     local = .{ .ip4 = .loopback(port) };
     try testing.expectError(error.AddressUnavailable, net.connect(io, &second_server.socket.address, .{ .local_address = local }));
 }
@@ -140,9 +140,9 @@ test "on Apple's systems a socket given its options never raises SIGPIPE, which 
     const io = testing.io;
     var server = try (IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer server.deinit(io);
-    const connected = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true } });
-    defer connected.stream.close(io);
-    try testing.expect(try sys.get(connected.stream.socket.handle, sys.no_sigpipe) != 0);
+    var connected = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true } });
+    defer connected.stream.deinit(io);
+    try testing.expect(try sys.get(connected.stream.borrow().socket.handle, sys.no_sigpipe) != 0);
     const accepted = try server.accept(io);
     defer accepted.close(io);
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.no_sigpipe));
@@ -164,12 +164,12 @@ test "a connect asking only for nodelay and keepalive goes through the Io's own 
     const io = layer.io();
     var server = try (IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
     defer server.deinit(testing.io);
-    const light = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{ .idle = .literal(30) } } } });
-    defer light.stream.close(testing.io);
+    var light = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{ .idle = .literal(30) } } } });
+    defer light.stream.deinit(testing.io);
     try testing.expectEqual(@as(u32, 1), Counting.connects.load(.monotonic));
-    try testing.expect(try sys.get(light.stream.socket.handle, sys.nodelay) != 0);
-    try testing.expectEqual(@as(c_int, 30), try sys.get(light.stream.socket.handle, sys.keep_idle));
-    const buffered = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .receive_buffer = .fromRaw(96 << 10) } });
-    defer buffered.stream.close(testing.io);
+    try testing.expect(try sys.get(light.stream.borrow().socket.handle, sys.nodelay) != 0);
+    try testing.expectEqual(@as(c_int, 30), try sys.get(light.stream.borrow().socket.handle, sys.keep_idle));
+    var buffered = try net.connect(io, &server.socket.address, .{ .socket = .{ .nodelay = true, .receive_buffer = .fromRaw(96 << 10) } });
+    defer buffered.stream.deinit(testing.io);
     try testing.expectEqual(@as(u32, 1), Counting.connects.load(.monotonic));
 }

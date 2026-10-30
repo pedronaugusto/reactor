@@ -255,16 +255,16 @@ test "later: explicitly requested SQPOLL stays enabled and wakes after idle" {
 fn boundPair(io: Io, interface: Io.net.Interface) !void {
     var listener = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer listener.deinit(io);
-    const connected = try reactor.net.connect(io, &listener.socket.address, .{
+    var connected = try reactor.net.connect(io, &listener.socket.address, .{
         .local_address = .{ .ip4 = .loopback(0) },
         .interface = interface,
         .timeout = ms(1000),
     });
-    defer connected.stream.close(io);
+    defer connected.stream.deinit(io);
     const accepted = try listener.accept(io);
     defer accepted.close(io);
     try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &accepted.socket.address.ip4.bytes);
-    try testing.expectEqual(connected.stream.socket.address.getPort(), accepted.socket.address.getPort());
+    try testing.expectEqual(connected.stream.borrow().socket.address.getPort(), accepted.socket.address.getPort());
     try testing.expect(connected.timeout_enforced);
 }
 
@@ -525,22 +525,24 @@ test "later: native linked connect deadline drains timer and socket before relea
     defer for (held) |slot| if (slot) |stream| stream.close(io);
     var expired = false;
     for (&held) |*slot| {
-        const connected = reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(50) }) catch |err| switch (err) {
+        var connected = reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(50) }) catch |err| switch (err) {
             error.Timeout => {
                 expired = true;
                 break;
             },
             else => return err,
         };
-        slot.* = connected.stream;
+        var stream: Io.net.Stream = undefined;
+        connected.stream.take(&stream);
+        slot.* = stream;
     }
     if (!expired) return error.SkipZigTest;
     try testing.expectEqual(@as(u32, 0), r.core.processors[0].loop.in_flight);
     // The ring is whole afterwards: a connect with room in the queue works.
     const peer = try server.accept(io);
     peer.close(io);
-    const later = try reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(1000) });
-    later.stream.close(io);
+    var later = try reactor.net.connect(io, &server.socket.address, .{ .timeout = ms(1000) });
+    later.stream.deinit(io);
 }
 
 test "later: a read under a deadline drains timer and read before releasing the frame" {

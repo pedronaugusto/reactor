@@ -9,6 +9,7 @@ const afd = @import("../../sys/afd.zig");
 const options_file = @import("options.zig");
 const Io = std.Io;
 const net = Io.net;
+const owned = @import("owned.zig");
 
 /// std's `ListenOptions`, and the socket options.
 pub const Options = struct {
@@ -26,11 +27,11 @@ pub const Error = net.IpAddress.ListenError;
 
 /// A listener at `address`. With no socket option asked for it is std's
 /// `IpAddress.listen` on `io`; with any, reactor makes the socket itself,
-/// sets them, binds and listens.
-// aegis: boundary(A015): std's IpAddress.listen's shape: the server by value, the caller's to close
-pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!net.Server {
+/// sets them, binds and listens. The listener is the caller's, closed with
+/// `deinit(io)`.
+pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!owned.Server {
     const plain: net.IpAddress.ListenOptions = .{ .kernel_backlog = options.kernel_backlog, .reuse_address = options.reuse_address, .mode = options.mode, .protocol = options.protocol };
-    if (!options.socket.any()) return address.listen(io, plain);
+    if (!options.socket.any()) return .init(try address.listen(io, plain));
     // A listener's send buffer would be dropped, unsaid (see the flag).
     if (options_file.send_buffer_when_connected and options.socket.send_buffer != null) return error.OptionUnsupported;
     try io.checkCancel();
@@ -44,8 +45,8 @@ pub fn listen(io: Io, address: *const net.IpAddress, options: Options) Error!net
         try afd.listen(handle, options.kernel_backlog);
         break :bound at;
     } else try sys_socket.bindListen(handle, address, options.kernel_backlog);
-    return .{
+    return .init(.{
         .socket = .{ .handle = handle, .address = bound },
         .options = if (net.Server.AcceptOptions != void) .{ .mode = options.mode, .protocol = options.protocol },
-    };
+    });
 }

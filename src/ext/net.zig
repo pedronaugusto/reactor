@@ -8,6 +8,10 @@ const resolve_file = @import("net/resolve.zig");
 const options_file = @import("net/options.zig");
 const listen_file = @import("net/listen.zig");
 
+/// The handles `connect`, `connectUnix`, `listen` and the pipes hand back,
+/// each with its one owner: `deinit(io)` closes it.
+pub const owned = @import("net/owned.zig");
+
 pub const ConnectOptions = connect_file.Options;
 pub const Connected = connect_file.Connected;
 pub const ConnectError = connect_file.Error;

@@ -7,7 +7,6 @@
 //! `NamedPipeUnsupported`.
 const builtin = @import("builtin");
 const std = @import("std");
-const aegis = @import("aegis");
 const clock = @import("../../clock.zig");
 const Io = std.Io;
 const windows = std.os.windows;
@@ -22,15 +21,10 @@ pub const supported = builtin.os.tag == .windows;
 /// on a pipe's name is 256 after its `\\.\pipe\`.
 pub const max_path = 268;
 
+const OwnedFile = @import("owned.zig").File;
+
 /// How long a connect waits before it tries a busy pipe again: every
 /// instance was taken, and a free one is made when the server accepts.
-/// A pipe instance the listener holds until a client takes it.
-const OwnedFile = aegis.own.OwnedIo(Io.File, closeFile);
-
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
-
 const busy_retry: Io.Duration = .fromMilliseconds(10);
 
 pub const ConnectOptions = struct {
@@ -54,22 +48,20 @@ pub const ConnectError = Io.Cancelable || error{
 };
 
 /// A client's end of the pipe at `path`, `\\.\pipe\<name>`: an `Io.File`
-/// opened for overlapped reads and writes, the caller's to close. A busy
-/// pipe is tried again until `options.timeout`.
-// aegis: boundary(A015): a connection is handed back as std's connects hand theirs, a handle by value the caller closes
-pub fn connectPipe(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
+/// opened for overlapped reads and writes, owned by the caller, who closes
+/// it with `deinit(io)`. A busy pipe is tried again until `options.timeout`.
+pub fn connectPipe(io: Io, path: []const u8, options: ConnectOptions) ConnectError!OwnedFile {
     return if (supported) connectWindows(io, path, options) else error.NamedPipeUnsupported;
 }
 
-// aegis: boundary(A015): `connectPipe`'s connection, handed back as it hands it
-fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
+fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectError!OwnedFile {
     var buffer: [max_path:0]u16 = undefined;
     const name = try pipeName(path, &buffer);
     const deadline = options.timeout.toTimestamp(io);
     while (true) {
         try io.checkCancel();
         const handle = pipe_windows.CreateFileW(name, pipe_windows.generic_read | pipe_windows.generic_write, 0, null, pipe_windows.open_existing, pipe_windows.file_flag_overlapped, null);
-        if (handle != windows.INVALID_HANDLE_VALUE) return .{ .handle = handle, .flags = .{ .nonblocking = true } };
+        if (handle != windows.INVALID_HANDLE_VALUE) return .init(.{ .handle = handle, .flags = .{ .nonblocking = true } });
         switch (pipe_windows.GetLastError()) {
             pipe_windows.error_pipe_busy => {
                 var wait = busy_retry;
@@ -137,15 +129,13 @@ pub const PipeListener = struct {
     /// failed after the last accept, and the next accept makes it.
     next: ?OwnedFile,
 
-    /// The next client: its instance, connected, an `Io.File` the caller
-    /// closes. A canceled accept leaves the instance waiting for the next.
-    // aegis: boundary(A015): an accepted connection is handed back as std's accepts hand theirs, a handle by value the caller closes
-    pub fn accept(l: *PipeListener, io: Io) AcceptError!Io.File {
+    /// The next client: its instance, connected, an `Io.File` owned by the
+    /// caller. A canceled accept leaves the instance waiting for the next.
+    pub fn accept(l: *PipeListener, io: Io) AcceptError!OwnedFile {
         if (supported) return l.acceptWindows(io) else unreachable; // unreachable: a listener is made on Windows alone
     }
 
-    // aegis: boundary(A015): `accept`'s connection, handed back as it hands it
-    fn acceptWindows(l: *PipeListener, io: Io) AcceptError!Io.File {
+    fn acceptWindows(l: *PipeListener, io: Io) AcceptError!OwnedFile {
         if (l.next == null) l.next = l.instance(false) catch |err| return switch (err) {
             error.SystemResources => error.SystemResources,
             else => error.Unexpected,
@@ -159,8 +149,7 @@ pub const PipeListener = struct {
             else => return error.Unexpected,
         }
         // The connected instance is the caller's from here.
-        var waiting: Io.File = undefined;
-        owned.take(&waiting);
+        const waiting = owned.move();
         // The next client's instance; one not made now is made by the
         // next accept, and this client is served regardless.
         l.next = l.instance(false) catch null;

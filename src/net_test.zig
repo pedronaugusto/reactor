@@ -36,11 +36,11 @@ test "connect with a timeout on Threaded connects, the timeout kept by a racing 
     const io = testing.io;
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
-    const connected = try net.connect(io, &listener.socket.address, .{ .timeout = ms(5000) });
-    defer connected.stream.close(io);
+    var connected = try net.connect(io, &listener.socket.address, .{ .timeout = ms(5000) });
+    defer connected.stream.deinit(io);
     try testing.expect(connected.timeout_enforced);
-    const plain = try net.connect(io, &listener.socket.address, .{});
-    plain.stream.close(io);
+    var plain = try net.connect(io, &listener.socket.address, .{});
+    plain.stream.deinit(io);
 }
 
 test "connect with no task to spare runs unbounded and says so" {
@@ -48,8 +48,8 @@ test "connect with no task to spare runs unbounded and says so" {
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var serial: Serial = .init(io, 0);
-    const connected = try net.connect(serial.io(), &listener.socket.address, .{ .timeout = ms(5000) });
-    defer connected.stream.close(io);
+    var connected = try net.connect(serial.io(), &listener.socket.address, .{ .timeout = ms(5000) });
+    defer connected.stream.deinit(io);
     try testing.expect(!connected.timeout_enforced);
 }
 
@@ -349,8 +349,8 @@ test "connect keeps a successful attempt when no task can run its timer" {
     var layer: OnlyConnect = .init(testing.io, 0);
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(testing.io, .{ .reuse_address = true });
     defer listener.deinit(testing.io);
-    const result = try net.connect(layer.io(), &listener.socket.address, .{ .timeout = ms(5000) });
-    defer result.stream.close(testing.io);
+    var result = try net.connect(layer.io(), &listener.socket.address, .{ .timeout = ms(5000) });
+    defer result.stream.deinit(testing.io);
     try testing.expect(!result.timeout_enforced);
 }
 
@@ -358,10 +358,10 @@ test "connect binds its requested local endpoint" {
     const io = testing.io;
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
-    const result = try net.connect(io, &listener.socket.address, .{ .local_address = .{ .ip4 = .loopback(0) }, .timeout = ms(5000) });
-    defer result.stream.close(io);
-    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &result.stream.socket.address.ip4.bytes);
-    try testing.expect(result.stream.socket.address.getPort() != 0);
+    var result = try net.connect(io, &listener.socket.address, .{ .local_address = .{ .ip4 = .loopback(0) }, .timeout = ms(5000) });
+    defer result.stream.deinit(io);
+    try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &result.stream.borrow().socket.address.ip4.bytes);
+    try testing.expect(result.stream.borrow().socket.address.getPort() != 0);
 }
 
 /// A Unix listener: std's on POSIX; on Windows Winsock's, as Git for
@@ -445,8 +445,9 @@ test "connectUnix reaches a listener, and names a refused connect and a missing 
     defer gpa.free(path);
     const address = try Io.net.UnixAddress.init(path);
     // No path: a missing file on POSIX; Windows answers it as refused.
-    if (net.connectUnix(io, &address)) |stream| {
-        stream.close(io);
+    var refused = net.connectUnix(io, &address);
+    if (refused) |*stream| {
+        stream.deinit(io);
         return error.TestUnexpectedResult;
     } else |err| switch (err) {
         error.FileNotFound => {},
@@ -461,10 +462,10 @@ test "connectUnix reaches a listener, and names a refused connect and a missing 
     {
         var listener: UnixListener = try .open(io, &address);
         defer listener.close(io);
-        const stream = try net.connectUnix(io, &address);
-        defer stream.close(io);
+        var stream = try net.connectUnix(io, &address);
+        defer stream.deinit(io);
         var buffer: [16]u8 = undefined;
-        var writer = stream.writer(io, &buffer);
+        var writer = stream.borrow().writer(io, &buffer);
         try writer.interface.writeAll("hello");
         try writer.interface.flush();
         var got: [5]u8 = undefined;

@@ -39,8 +39,9 @@ const Served = struct {
 
     /// Accept one client, read its line, answer with the line reversed.
     fn serve(io: Io, listener: *net.PipeListener) !void {
-        const conn = try listener.accept(io);
-        defer conn.close(io);
+        var accepted = try listener.accept(io);
+        defer accepted.deinit(io);
+        const conn = accepted.borrow().*;
         var buffer: [64]u8 = undefined;
         var r = conn.readerStreaming(io, &buffer);
         const line = try r.interface.takeDelimiterInclusive('\n');
@@ -61,8 +62,9 @@ fn roundTrip(io: Io, security: pipe.Security) !void {
     try testing.expectError(error.AddressInUse, net.listenPipe(name, .{ .security = .token_default }));
     var served: anyerror!void = {};
     var task = io.concurrent(Served.echoOnce, .{ io, &listener, &served }) catch return error.SkipZigTest;
-    const client = try net.connectPipe(io, name, .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
-    defer client.close(io);
+    var connected = try net.connectPipe(io, name, .{ .timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } } });
+    defer connected.deinit(io);
+    const client = connected.borrow().*;
     try client.writeStreamingAll(io, "named pipe\n");
     var buffer: [64]u8 = undefined;
     var r = client.readerStreaming(io, &buffer);
@@ -93,17 +95,18 @@ test "a server's disconnect ends its client's read under way" {
     var listener = try net.listenPipe(name, .{ .security = .token_default });
     defer listener.deinit(io);
     const Accepted = struct {
-        fn run(task_io: Io, l: *net.PipeListener, out: *?Io.File) void {
+        fn run(task_io: Io, l: *net.PipeListener, out: *?net.owned.File) void {
             out.* = l.accept(task_io) catch null;
         }
     };
-    var server: ?Io.File = null;
+    var server: ?net.owned.File = null;
     var accepting = io.concurrent(Accepted.run, .{ io, &listener, &server }) catch return error.SkipZigTest;
-    const client = try net.connectPipe(io, name, .{});
-    defer client.close(io);
+    var connected = try net.connectPipe(io, name, .{});
+    defer connected.deinit(io);
     accepting.await(io);
-    const conn = server orelse return error.AcceptFailed;
-    defer conn.close(io);
+    var accepted = server orelse return error.AcceptFailed;
+    defer accepted.deinit(io);
+    const conn = accepted.borrow().*;
     // The server's own read under way ends when it disconnects.
     const Reading = struct {
         fn run(task_io: Io, file: Io.File) anyerror!usize {
@@ -124,8 +127,9 @@ test "off a runtime a pipe's deadlines are refused, and its reads unbounded" {
     const name = uniqueName(io, &name_buffer);
     var listener = try net.listenPipe(name, .{ .security = .token_default });
     defer listener.deinit(io);
-    const client = try net.connectPipe(io, name, .{});
-    defer client.close(io);
+    var connected = try net.connectPipe(io, name, .{});
+    defer connected.deinit(io);
+    const client = connected.borrow().*;
     var deadlines: net.Deadlines = .init(.fromMilliseconds(100));
     defer deadlines.deinit(io);
     var watch: net.Deadlines.Watch = .initPipe(client);
@@ -155,17 +159,19 @@ test "on the IOCP runtime a pipe speaks, and a read waits a bounded time without
     var listener = try net.listenPipe(name, .{ .security = .token_default });
     defer listener.deinit(io);
     const Accepted = struct {
-        fn run(task_io: Io, l: *net.PipeListener, out: *?Io.File) void {
+        fn run(task_io: Io, l: *net.PipeListener, out: *?net.owned.File) void {
             out.* = l.accept(task_io) catch null;
         }
     };
-    var server: ?Io.File = null;
+    var server: ?net.owned.File = null;
     var accepting = io.concurrent(Accepted.run, .{ io, &listener, &server }) catch return error.SkipZigTest;
-    const client = try net.connectPipe(io, name, .{});
-    defer client.close(io);
+    var connected = try net.connectPipe(io, name, .{});
+    defer connected.deinit(io);
+    const client = connected.borrow().*;
     accepting.await(io);
-    const conn = server orelse return error.AcceptFailed;
-    defer conn.close(io);
+    var accepted = server orelse return error.AcceptFailed;
+    defer accepted.deinit(io);
+    const conn = accepted.borrow().*;
     var buffer: [8]u8 = undefined;
     try testing.expectEqual(pipe.Readiness.timed_out, try pipe.readPipeWithin(io, client, &buffer, .fromMilliseconds(20)));
     try conn.writeStreamingAll(io, "ok");

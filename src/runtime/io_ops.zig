@@ -509,7 +509,7 @@ pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
 /// The wait/kill owns the child exclusively; each detached pipe stays live
 /// until std has finished with the child, then native pending work is drained
 /// and readiness registrations are invalidated before its number is reusable.
-// aegis: boundary(A015): std.process.Child holds its pipes as Files by value; this moves them out of it to the close path that owns them from here
+// aegis: boundary(A015): std.Io implementation contract: childWait and childKill are handed std.process.Child, which holds its pipes as Files by value; this moves them out of it to the close path that owns them from here
 fn takePipes(child: *std.process.Child) [3]?Io.File {
     const pipes = .{ child.stdin, child.stdout, child.stderr };
     child.stdin = null;

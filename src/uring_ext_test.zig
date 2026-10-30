@@ -126,9 +126,11 @@ fn tcpPair(io: Io) ![2]Io.net.Stream {
     defer server.deinit(io);
     var connecting = try io.concurrent(reactor.net.connect, .{ io, &server.socket.address, .{ .timeout = ms(5000) } });
     const accepted = try server.accept(io);
-    const connected = try connecting.await(io);
+    var connected = try connecting.await(io);
     try testing.expect(connected.timeout_enforced);
-    return .{ accepted, connected.stream };
+    var stream: Io.net.Stream = undefined;
+    connected.stream.take(&stream);
+    return .{ accepted, stream };
 }
 
 test "a receiver on io_uring reads into the pool once the socket is readable" {

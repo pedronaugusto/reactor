@@ -106,11 +106,11 @@ test "R1 Linux dialing binds an interface without Threaded name lookup" {
     const selected = try name.resolve(testing.io);
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
     defer server.deinit(testing.io);
-    const connected = try reactor.net.connect(testing.io, &server.socket.address, .{ .interface = selected });
-    defer connected.stream.close(testing.io);
+    var connected = try reactor.net.connect(testing.io, &server.socket.address, .{ .interface = selected });
+    defer connected.stream.deinit(testing.io);
     const peer = try server.accept(testing.io);
     defer peer.close(testing.io);
-    try testing.expectEqual(connected.stream.socket.address.getPort(), peer.socket.address.getPort());
+    try testing.expectEqual(connected.stream.borrow().socket.address.getPort(), peer.socket.address.getPort());
 }
 
 fn groupDeep(io: Io) void {

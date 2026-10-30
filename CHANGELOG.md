@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- A handle reactor's own calls hand back comes with its one owner, an `aegis.own.OwnedIo`, where it was a bare `Io.File`, `Io.net.Stream` or `Io.net.Server` the caller was told to close: `net.connectPipe` and `PipeListener.accept` give a `net.owned.File`, `net.connectUnix` and `net.Connected.stream` a `net.owned.Stream`, `net.listen` a `net.owned.Server`. `deinit(io)` closes it; `borrow()` lends the handle; `take` moves it out to be kept.
+
 ### Changed
 
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.

@@ -17,6 +17,7 @@ const perform = @import("../../ops/perform.zig");
 const wait = @import("../wait.zig");
 const Io = std.Io;
 const net = Io.net;
+const owned = @import("owned.zig");
 
 const native = @import("../native.zig");
 const Core = @import("../../runtime/Core.zig");
@@ -43,8 +44,8 @@ pub const Options = struct {
 };
 
 pub const Connected = struct {
-    // aegis: boundary(A015): the connected stream, by value, as std's connect gives it: the caller closes it
-    stream: net.Stream,
+    /// The caller's to close, with `deinit(io)`.
+    stream: owned.Stream,
     /// False when a timeout was asked for and this `Io` could not keep it.
     timeout_enforced: bool = true,
 };
@@ -60,31 +61,28 @@ fn onTask(core: *Core) bool {
 }
 
 pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
-    if (options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.beforeConnect()) {
-        const connected = try made(io, address, options);
-        if (options.socket.connected().any()) options_file.apply(connected.stream.socket.handle, address.*, options.socket.connected()) catch |err| {
-            connected.stream.close(io);
-            return err;
-        };
-        return connected;
-    }
-    const connected = try throughIo(io, address, options);
-    if (options.socket.any()) options_file.setOptions(connected.stream.socket, options.socket) catch |err| {
-        connected.stream.close(io);
-        return err;
-    };
-    return connected;
+    const own_socket = options.local_address != null or !options.interface.isNone() or options.reuse_address or options.socket.beforeConnect();
+    var connected = if (own_socket) try made(io, address, options) else try throughIo(io, address, options);
+    // The options are set on the stream before its owner is handed back:
+    // an owner once borrowed is not copied.
+    var stream: net.Stream = undefined;
+    connected.stream.take(&stream);
+    errdefer stream.close(io);
+    if (own_socket) {
+        if (options.socket.connected().any()) try options_file.apply(stream.socket.handle, address.*, options.socket.connected());
+    } else if (options.socket.any()) try options_file.setOptions(stream.socket, options.socket);
+    return .{ .stream = .init(stream), .timeout_enforced = connected.timeout_enforced };
 }
 
 /// A connection made by `io`'s own connect, with `options.timeout` kept as
 /// this `Io` best can.
 fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
     const plain: net.IpAddress.ConnectOptions = .{ .mode = options.mode, .protocol = options.protocol };
-    if (options.timeout == .none) return .{ .stream = try address.connect(io, plain) };
+    if (options.timeout == .none) return .{ .stream = .init(try address.connect(io, plain)) };
     if (native.runtimeOf(io)) |core| if (onTask(core)) {
         var timed = plain;
         timed.timeout = options.timeout;
-        return .{ .stream = try address.connect(io, timed) };
+        return .{ .stream = .init(try address.connect(io, timed)) };
     };
     const deadline = options.timeout.toDeadline(io);
     const Race = union(enum) {
@@ -98,22 +96,22 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
         .expired => {},
     };
     race.concurrent(.connected, net.IpAddress.connect, .{ address, io, plain }) catch
-        return .{ .stream = try address.connect(io, plain), .timeout_enforced = false };
+        return .{ .stream = .init(try address.connect(io, plain)), .timeout_enforced = false };
     race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, io }) catch {
         // The connect runs already: wait for it, unbounded.
         return switch (try race.await()) {
-            .connected => |result| .{ .stream = try result, .timeout_enforced = false },
+            .connected => |result| .{ .stream = .init(try result), .timeout_enforced = false },
             .expired => unreachable, // unreachable: no timer task was started
         };
     };
     return switch (try race.await()) {
-        .connected => |result| .{ .stream = try result },
+        .connected => |result| .{ .stream = .init(try result) },
         .expired => |result| expired: {
             try result;
             // A connection already made remains the caller's, even if the
             // timer's result reached the select first.
             while (race.cancel()) |late| switch (late) {
-                .connected => |connected| if (connected) |stream| break :expired .{ .stream = stream } else |_| {},
+                .connected => |connected| if (connected) |stream| break :expired .{ .stream = .init(stream) } else |_| {},
                 .expired => {},
             };
             break :expired error.Timeout;
@@ -128,12 +126,11 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
 /// any other `Io` connects through Winsock (`sys/unix_windows.zig`), where
 /// std 0.17's `Io.Threaded` drives AFD itself and the system refuses it.
 /// The connect does not wait: a Unix socket is answered at once.
-// aegis: boundary(A015): std's UnixAddress.connect's shape: the stream by value, the caller's to close
-pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Stream {
-    if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return address.connect(io);
+pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!owned.Stream {
+    if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return .init(try address.connect(io));
     try io.checkCancel();
     const handle = try unix_windows.connectUnix(address);
-    return .{ .socket = .{ .handle = handle, .address = .{ .ip4 = .loopback(0) } } };
+    return .init(.{ .socket = .{ .handle = handle, .address = .{ .ip4 = .loopback(0) } } });
 }
 
 /// The runtime `io` is, when the caller is one of its tasks and it has a
@@ -176,7 +173,7 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
         // Where a send ignores `MSG_DONTWAIT` (Darwin) a readiness loop
         // writes only to sockets in non-blocking mode: it stays so.
         if (start == .nonblocking and sys_socket.send_honors_dontwait) try sys_socket.setBlocking(socket.handle);
-        return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } };
+        return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }) };
     }
     if (builtin.os.tag == .windows) {
         const Race = union(enum) { connected: Error!void, expired: Io.Cancelable!void };
@@ -185,19 +182,19 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
         defer while (race.cancel()) |_| {};
         race.concurrent(.connected, dial.windowsConnect, .{ io, socket.handle, address }) catch {
             try dial.windowsConnect(io, socket.handle, address);
-            return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }, .timeout_enforced = options.timeout == .none };
+            return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }), .timeout_enforced = options.timeout == .none };
         };
         if (options.timeout != .none) race.concurrent(.expired, Io.Timeout.sleep, .{ options.timeout.toDeadline(io), io }) catch {
             const outcome = try race.await();
             try outcome.connected;
-            return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }, .timeout_enforced = false };
+            return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }), .timeout_enforced = false };
         };
         switch (try race.await()) {
             .connected => |result| try result,
             .expired => |result| {
                 try result;
                 while (race.cancel()) |late| switch (late) {
-                    .connected => |connected| if (connected) |_| return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } } else |_| {},
+                    .connected => |connected| if (connected) |_| return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }) } else |_| {},
                     .expired => {},
                 };
                 return error.Timeout;
@@ -214,7 +211,7 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
         }
         try sys_socket.setBlocking(socket.handle);
     }
-    return .{ .stream = .{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } } };
+    return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }) };
 }
 
 /// A socket for a connection to `peer`, its options set and its local end
