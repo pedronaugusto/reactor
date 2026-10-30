@@ -14,15 +14,15 @@ const net = std.Io.net;
 const Socket = windows.HANDLE;
 const invalid_socket: Socket = @ptrFromInt(std.math.maxInt(usize));
 
-// aegis: boundary: ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's socket, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's socket, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn socket(family: c_int, kind: c_int, protocol: c_int) callconv(.winapi) Socket;
-// aegis: boundary: ws2_32's connect, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's connect, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn connect(s: Socket, name: *const anyopaque, len: c_int) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's closesocket, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's closesocket, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn closesocket(s: Socket) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's WSAGetLastError, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's WSAGetLastError, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
 
 /// Winsock started once for the process and left running: a socket made

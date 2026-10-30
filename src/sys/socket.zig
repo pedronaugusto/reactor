@@ -67,7 +67,7 @@ pub fn open(family: posix.sa_family_t, mode: net.Socket.Mode, protocol: ?net.Pro
                     try setCloexec(fd);
                     if (@hasDecl(posix.SO, "NOSIGPIPE")) {
                         const on: c_int = 1;
-                        if (posix.errno(posix.system.setsockopt(fd, posix.SOL.SOCKET, posix.SO.NOSIGPIPE, @ptrCast(&on), @sizeOf(c_int))) != .SUCCESS) return error.Unexpected; // aegis: boundary: the option is an int, its length given
+                        if (posix.errno(posix.system.setsockopt(fd, posix.SOL.SOCKET, posix.SO.NOSIGPIPE, @ptrCast(&on), @sizeOf(c_int))) != .SUCCESS) return error.Unexpected; // aegis: boundary(A019): the option is an int, its length given
                     }
                     if (start == .nonblocking) try setStatusFlags(fd, nonblock_flag);
                 }

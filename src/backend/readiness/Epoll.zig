@@ -185,13 +185,13 @@ pub fn decode(event: *const linux.epoll_event) readiness.Decoded {
 pub fn wake(e: *Epoll) void {
     if (e.wake_pending.raise(.acq_rel)) return;
     const one: u64 = 1;
-    _ = linux.write(e.wake_fd, @ptrCast(&one), 8); // aegis: boundary: eight bytes, as an eventfd is written
+    _ = linux.write(e.wake_fd, @ptrCast(&one), 8); // aegis: boundary(A019): eight bytes, as an eventfd is written
 }
 
 /// After a wake event: the next wake writes again.
 pub fn woken(e: *Epoll) void {
     var count: u64 = 0;
-    _ = linux.read(e.wake_fd, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as an eventfd reads
+    _ = linux.read(e.wake_fd, @ptrCast(&count), 8); // aegis: boundary(A019): eight bytes, as an eventfd reads
     e.wake_pending.clear(.release);
 }
 
@@ -235,5 +235,5 @@ pub fn armClock(e: *Epoll, clock: readiness.Clock, deadline: ?kernel_time.Kernel
 pub fn clockFired(e: *Epoll, clock: readiness.Clock) void {
     const fd = e.clock_fds[@backingInt(clock)] orelse return;
     var count: u64 = 0;
-    _ = linux.read(fd, @ptrCast(&count), 8); // aegis: boundary: eight bytes, as a timerfd reads
+    _ = linux.read(fd, @ptrCast(&count), 8); // aegis: boundary(A019): eight bytes, as a timerfd reads
 }

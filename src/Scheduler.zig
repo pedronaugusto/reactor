@@ -179,7 +179,7 @@ pub const Processor = struct {
     /// What the monitor did with the processor (`Lease`), its generation
     /// moving at every change of owner, so a word one owner held it with
     /// never matches under the next.
-    // aegis: boundary: a futex word: the kernel waits on this u32's address
+    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
     lease: std.atomic.Value(u32) = .init(0),
     /// The seat of the thread holding the processor, which the monitor
     /// reads to see whether it is lent.
@@ -904,7 +904,7 @@ const Lending = aegis.units.Count(Scheduler, u32);
 /// task was never offered to an idle processor). The address passes through
 /// an assembly statement, which the compiler cannot see through.
 pub noinline fn seatNow() *Seat {
-    // aegis: design: the seat's address passes through an assembly statement the compiler cannot see through, so a switch does not merge it with an earlier read (above)
+    // aegis: boundary(A019): the seat's address passes through an assembly statement the compiler cannot see through, so a switch does not merge it with an earlier read (above)
     return asm volatile (""
         : [address] "=r" (-> *Seat),
         : [seat] "0" (&seat),
@@ -1522,7 +1522,7 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
         return p.pushLocal(t, .spawned);
     };
     if (s.scheduling == .per_core) {
-        // aegis: no-danger: a round robin: the count wraps, and only its remainder picks a processor
+        // aegis: no-danger(A004): a round robin: the count wraps, and only its remainder picks a processor
         const i = s.shared.placement.fetchAddWrapping(.fromRaw(1), .monotonic).raw() % s.processors.len;
         const p = &s.processors[i];
         t.processor_loop = &p.loop;

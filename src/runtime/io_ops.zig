@@ -80,7 +80,7 @@ fn run(r: *Core, o: *Loop.Op, options: perform.Options) perform.Error!void {
 /// the workers in turn, or the home processor when there are none.
 fn elsewhere(r: *Core) *Processor {
     if (r.processors.len == 1) return &r.processors[0];
-    // aegis: no-danger: a round robin: the count wraps, and only its remainder picks a processor
+    // aegis: no-danger(A004): a round robin: the count wraps, and only its remainder picks a processor
     return &r.processors[1 + r.scheduler.shared.placement.fetchAddWrapping(.fromRaw(1), .monotonic).raw() % (r.processors.len - 1)];
 }
 
@@ -336,7 +336,7 @@ const Abort = struct {
     completion: Loop.Completion = .{ .run = done },
     op: Loop.Op,
     task: ?*Task,
-    // aegis: boundary: a futex word: the kernel waits on this u32's address
+    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
     finished: std.atomic.Value(u32) = .init(0),
     scheduler: *Scheduler,
     target: *Processor = undefined,
@@ -509,7 +509,7 @@ pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
 /// The wait/kill owns the child exclusively; each detached pipe stays live
 /// until std has finished with the child, then native pending work is drained
 /// and readiness registrations are invalidated before its number is reusable.
-// aegis: boundary: std.process.Child holds its pipes as Files by value; this moves them out of it to the close path that owns them from here
+// aegis: boundary(A015): std.process.Child holds its pipes as Files by value; this moves them out of it to the close path that owns them from here
 fn takePipes(child: *std.process.Child) [3]?Io.File {
     const pipes = .{ child.stdin, child.stdout, child.stderr };
     child.stdin = null;

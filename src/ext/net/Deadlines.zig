@@ -40,14 +40,14 @@ watching: aegis.BlockingGuarded(Watching) = .init(.{}),
 armed: aegis.Atomic(Armed) = .init(.fromRaw(0)),
 /// 1 while the task waits for an operation to be armed; the futex it
 /// waits on.
-// aegis: boundary: a futex word: the kernel waits on this u32's address
+// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
 parked: std.atomic.Value(u32) = .init(0),
 /// How often the task looks at the armed deadlines. It only shortens, and
 /// `tighten` is what does.
 tick: aegis.Atomic(clock.Span),
 /// Bumped to cut the task's wait between ticks short; the futex it waits
 /// on.
-// aegis: boundary: a futex word: the kernel waits on this u32's address
+// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
 nudge: std.atomic.Value(u32) = .init(0),
 
 const unarmed: clock.Awake = .fromRaw(0);

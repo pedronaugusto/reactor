@@ -151,7 +151,7 @@ pub const Awaiter = struct {
     /// the group's `state` gives up to the awaiter.
     members: ?*Task = null,
     /// Set to 1 when the future finishes, for a waiting thread.
-    // aegis: boundary: a futex word: the kernel waits on this u32's address
+    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
     done: std.atomic.Value(u32) = .init(0),
 };
 
@@ -317,7 +317,7 @@ comptime {
 fn tokenOf(g: *Io.Group) *aegis.Atomic(GroupToken) {
     comptime assert(@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token)));
     comptime assert(@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token)));
-    // aegis: boundary: std's Io.Group keeps its token in an atomic word whose null it reads as no members; this runtime keeps its GroupToken there, in an aegis cell of the same layout, none being null
+    // aegis: boundary(A019): std's Io.Group keeps its token in an atomic word whose null it reads as no members; this runtime keeps its GroupToken there, in an aegis cell of the same layout, none being null
     return @ptrCast(&g.token);
 }
 
@@ -359,14 +359,14 @@ pub fn unlockGroup(g: *Io.Group) void {
 /// in its awaiter. Under the lock.
 fn listedOf(g: *Io.Group) *?*Task {
     if (awaiterOf(g)) |a| return &a.members;
-    // aegis: boundary: std's Io.Group gives the implementation one word, `state`, where this runtime keeps the first listed member while the group is not awaited
+    // aegis: boundary(A019): std's Io.Group gives the implementation one word, `state`, where this runtime keeps the first listed member while the group is not awaited
     return @ptrCast(&g.state);
 }
 
 /// The group's awaiter, if it is awaited. Under the lock.
 fn awaiterOf(g: *Io.Group) ?*Awaiter {
     if (g.state & group_awaited == 0) return null;
-    // aegis: boundary: std's Io.Group gives the implementation one word, `state`, where this runtime keeps the awaiter, its low bit set, while the group is awaited
+    // aegis: boundary(A019): std's Io.Group gives the implementation one word, `state`, where this runtime keeps the awaiter, its low bit set, while the group is awaited
     return @ptrFromInt(g.state & ~group_awaited);
 }
 

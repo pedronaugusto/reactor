@@ -29,24 +29,24 @@ const wait_packet_all_access: u32 = 0x1f0003;
 
 const TimerType = enum(c_int) { notification = 0, synchronization = 1 };
 
-// aegis: boundary: ntdll's NtCreateIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtCreateIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateIoCompletion(handle: *Handle, access: u32, attributes: ?*anyopaque, threads: u32) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtSetIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtSetIoCompletion, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtSetIoCompletion(port: Handle, key: usize, context: usize, status: Status, information: usize) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtRemoveIoCompletionEx, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtRemoveIoCompletionEx, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtRemoveIoCompletionEx(port: Handle, entries: [*]Entry, count: u32, removed: *u32, timeout: ?*const i64, alertable: Boolean) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtCreateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtCreateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateWaitCompletionPacket(handle: *Handle, access: u32, attributes: ?*anyopaque) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtAssociateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtAssociateWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtAssociateWaitCompletionPacket(packet: Handle, port: Handle, target: Handle, key: usize, context: usize, status: Status, information: usize, already_signaled: ?*Boolean) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtCancelWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtCancelWaitCompletionPacket, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCancelWaitCompletionPacket(packet: Handle, remove_signaled: Boolean) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtCreateTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtCreateTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtCreateTimer(handle: *Handle, access: u32, attributes: ?*anyopaque, kind: TimerType) callconv(.winapi) Status;
-// aegis: boundary: ntdll's NtSetTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
+// aegis: boundary(A019): ntdll's NtSetTimer, declared as the NT native API (ntdll) has it, as the Windows driver kit's headers declare it
 extern "ntdll" fn NtSetTimer(timer: Handle, due: *const i64, apc: ?*anyopaque, context: ?*anyopaque, resume_system: Boolean, period: i32, previous: ?*Boolean) callconv(.winapi) Status;
 /// Windows 10 1803 and later: `flags` may ask for a high-resolution timer.
-// aegis: boundary: kernel32's CreateWaitableTimerExW, declared as Microsoft's Win32 documentation gives it
+// aegis: boundary(A019): kernel32's CreateWaitableTimerExW, declared as Microsoft's Win32 documentation gives it
 extern "kernel32" fn CreateWaitableTimerExW(attributes: ?*anyopaque, name: ?[*:0]const u16, flags: u32, access: u32) callconv(.winapi) ?Handle;
 
 const create_waitable_timer_high_resolution: u32 = 0x2;

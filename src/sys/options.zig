@@ -97,7 +97,7 @@ pub fn get(handle: Handle, option: ?Option) Error!c_int {
     }
     var value: c_int = 0;
     var len: posix.socklen_t = @sizeOf(c_int);
-    while (true) switch (posix.errno(posix.system.getsockopt(handle, o.level, o.name, @ptrCast(&value), &len))) { // aegis: boundary: the option is a c_int, its length given
+    while (true) switch (posix.errno(posix.system.getsockopt(handle, o.level, o.name, @ptrCast(&value), &len))) { // aegis: boundary(A019): the option is a c_int, its length given
         .SUCCESS => return value,
         .INTR => continue,
         .NOPROTOOPT, .INVAL, .OPNOTSUPP => return error.OptionUnsupported,

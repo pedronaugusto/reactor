@@ -34,7 +34,7 @@ pub fn Of(comptime Item: type) type {
         /// The most spares that may be started.
         cap: u32,
         /// Moves on every post and at stop: what waiting threads wait on.
-        // aegis: boundary: a futex word: the kernel waits on this u32's address
+        // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
         signal: std.atomic.Value(u32) = .init(0),
 
         pub fn init(gpa: Allocator, processors: usize, cap: u16) Allocator.Error!Spares {

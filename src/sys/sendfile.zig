@@ -128,7 +128,7 @@ pub fn blocking(socket: Io.net.Socket.Handle) error{Unexpected}!bool {
 pub fn room(socket: Io.net.Socket.Handle) error{Unexpected}!usize {
     var size: c_int = 0;
     var len: posix.socklen_t = @sizeOf(c_int);
-    switch (posix.errno(posix.system.getsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDBUF, @ptrCast(&size), &len))) { // aegis: boundary: SO_SNDBUF writes one int
+    switch (posix.errno(posix.system.getsockopt(socket, posix.SOL.SOCKET, posix.SO.SNDBUF, @ptrCast(&size), &len))) { // aegis: boundary(A019): SO_SNDBUF writes one int
         .SUCCESS => {},
         else => |e| return posix.unexpectedErrno(e),
     }

@@ -60,7 +60,7 @@ const darwin = builtin.os.tag.isDarwin();
 /// The descriptors `select` takes in its default sets.
 const select_limit = 1024;
 
-// aegis: boundary: libc's select, declared as its POSIX manual page gives it
+// aegis: boundary(A019): libc's select, declared as its POSIX manual page gives it
 extern "c" fn select(nfds: c_int, readfds: ?*[select_limit / 32]u32, writefds: ?*[select_limit / 32]u32, errorfds: ?*[select_limit / 32]u32, timeout: ?*posix.timeval) c_int;
 
 /// A look on Darwin through `select`, whose `poll(2)` waits off the CPU for

@@ -208,7 +208,7 @@ const Registry = struct {
 // The process-wide table: written under the registry's lock, read by the
 // handlers.
 
-// aegis: boundary: the listeners a signal handler reaches, which may take no lock: each is reserved and released under the registry's lock, and a handler reads only its notifier and its delivered bits
+// aegis: boundary(A007): the listeners a signal handler reaches, which may take no lock: each is reserved and released under the registry's lock, and a handler reads only its notifier and its delivered bits
 var listeners: [max_listeners]Listener = @splat(.{});
 // What a signal handler reads to find its listeners, which may take no
 // lock: atomic slots, written under the registry's lock.

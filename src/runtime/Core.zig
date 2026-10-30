@@ -63,7 +63,7 @@ const home_stack_size = 256 << 10;
 pub const Holder = enum(usize) { none = 0, _ };
 
 pub const Stderr = struct {
-    // aegis: boundary: std.Io's lockStderr and unlockStderr contract: the lock is taken by one vtable call and let go by another, so no guard of a scope can hold it
+    // aegis: boundary(A007): std.Io's lockStderr and unlockStderr contract: the lock is taken by one vtable call and let go by another, so no guard of a scope can hold it
     mutex: Io.Mutex = .init,
     /// Who holds it, so a holder may lock it again (`depth`).
     holder: aegis.Atomic(Holder) = .init(.none),
@@ -332,7 +332,7 @@ pub fn io(c: *Core) Io {
 
 /// The core an `Io.userdata` is.
 pub fn of(userdata: ?*anyopaque) *Core {
-    // aegis: boundary: std.Io hands its vtable's functions the userdata `io` gave it, a `Core`, as `?*anyopaque`
+    // aegis: boundary(A019): std.Io hands its vtable's functions the userdata `io` gave it, a `Core`, as `?*anyopaque`
     return @ptrCast(@alignCast(userdata.?));
 }
 

@@ -56,12 +56,12 @@ pub const ConnectError = Io.Cancelable || error{
 /// A client's end of the pipe at `path`, `\\.\pipe\<name>`: an `Io.File`
 /// opened for overlapped reads and writes, the caller's to close. A busy
 /// pipe is tried again until `options.timeout`.
-// aegis: boundary: a connection is handed back as std's connects hand theirs, a handle by value the caller closes
+// aegis: boundary(A015): a connection is handed back as std's connects hand theirs, a handle by value the caller closes
 pub fn connectPipe(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
     return if (supported) connectWindows(io, path, options) else error.NamedPipeUnsupported;
 }
 
-// aegis: boundary: `connectPipe`'s connection, handed back as it hands it
+// aegis: boundary(A015): `connectPipe`'s connection, handed back as it hands it
 fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectError!Io.File {
     var buffer: [max_path:0]u16 = undefined;
     const name = try pipeName(path, &buffer);
@@ -139,12 +139,12 @@ pub const PipeListener = struct {
 
     /// The next client: its instance, connected, an `Io.File` the caller
     /// closes. A canceled accept leaves the instance waiting for the next.
-    // aegis: boundary: an accepted connection is handed back as std's accepts hand theirs, a handle by value the caller closes
+    // aegis: boundary(A015): an accepted connection is handed back as std's accepts hand theirs, a handle by value the caller closes
     pub fn accept(l: *PipeListener, io: Io) AcceptError!Io.File {
         if (supported) return l.acceptWindows(io) else unreachable; // unreachable: a listener is made on Windows alone
     }
 
-    // aegis: boundary: `accept`'s connection, handed back as it hands it
+    // aegis: boundary(A015): `accept`'s connection, handed back as it hands it
     fn acceptWindows(l: *PipeListener, io: Io) AcceptError!Io.File {
         if (l.next == null) l.next = l.instance(false) catch |err| return switch (err) {
             error.SystemResources => error.SystemResources,

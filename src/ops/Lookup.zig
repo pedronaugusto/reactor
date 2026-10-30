@@ -19,7 +19,7 @@ const State = enum(u8) { pending, completed, canceled };
 
 const Record = struct {
     occupied: Raised = .{},
-    // aegis: boundary: a futex word: the kernel waits on this u32's address
+    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
     finished: std.atomic.Value(u32) = .init(1),
     published: Raised = .{},
     notified: Raised = .{},

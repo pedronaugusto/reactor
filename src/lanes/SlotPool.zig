@@ -50,7 +50,7 @@ pub fn allocator(p: *SlotPool) Allocator {
 
 fn alloc(context: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
     _ = ret_addr;
-    // aegis: boundary: std.mem.Allocator's vtable hands back as `*anyopaque` the pool `allocator` gave it
+    // aegis: boundary(A019): std.mem.Allocator's vtable hands back as `*anyopaque` the pool `allocator` gave it
     const p: *SlotPool = @ptrCast(@alignCast(context));
     if (len > p.size or alignment.compare(.gt, slot_alignment)) return null;
     const index = p.pop() orelse return null;
@@ -60,7 +60,7 @@ fn alloc(context: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize)
 fn free(context: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
     _ = alignment;
     _ = ret_addr;
-    // aegis: boundary: std.mem.Allocator's vtable hands back as `*anyopaque` the pool `allocator` gave it
+    // aegis: boundary(A019): std.mem.Allocator's vtable hands back as `*anyopaque` the pool `allocator` gave it
     const p: *SlotPool = @ptrCast(@alignCast(context));
     const offset = @intFromPtr(memory.ptr) - @intFromPtr(p.buffer.ptr); // safe: addresses inside the pool's buffer
     p.push(@intCast(offset / p.size));

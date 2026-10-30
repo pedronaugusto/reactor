@@ -72,7 +72,6 @@ pub fn opening(comptime name: []const u8, comptime slot: *const SlotFn(name)) *c
             if (comptime builtin.os.tag == .linux) Core.running(userdata).kept.record(fileOf(opened).handle);
             return opened;
         }
-        // aegis: boundary: a view of what std.Io's vtable returned, to read its handle; the caller of the slot owns the File
         fn fileOf(opened: anytype) Io.File {
             return if (@TypeOf(opened) == Io.File) opened else opened.file;
         }

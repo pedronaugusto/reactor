@@ -63,7 +63,7 @@ report_after: ?clocks.Span,
 handoff: bool,
 thread: ?std.Thread = null,
 /// What the monitor sleeps on: moved to wake it early.
-// aegis: boundary: a futex word: the kernel waits on this u32's address
+// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
 word: std.atomic.Value(u32) = .init(0),
 /// Sleeping longer than the shortest interval, or parked: a blocking call
 /// or a processor waking up wakes it.
@@ -204,7 +204,7 @@ fn doubled(delay: clocks.Span) clocks.Span {
 fn record(m: *Monitor, stall: Stall) void {
     // The monitor's thread alone records: a plain step, published.
     const n = m.stalls.load(.monotonic);
-    // aegis: no-danger: a ring of the last stalls: only the count's remainder picks the slot to overwrite
+    // aegis: no-danger(A004): a ring of the last stalls: only the count's remainder picks the slot to overwrite
     m.records[n.raw() % records_kept] = stall;
     m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // unreachable: no program records 2^64 stalls
     if (builtin.mode != .debug and builtin.mode != .safe) return;

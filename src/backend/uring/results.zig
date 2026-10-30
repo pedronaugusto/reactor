@@ -91,7 +91,7 @@ fn fillMessage(message: *net.IncomingMessage, data: []u8, address: *const Thread
     message.* = .{
         .from = Threaded.addressFromPosix(address),
         .data = data,
-        .control = if (header.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..header.controllen] else message.control, // aegis: boundary: the control buffer the caller gave, as the kernel filled it
+        .control = if (header.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..header.controllen] else message.control, // aegis: boundary(A019): the control buffer the caller gave, as the kernel filled it
         .flags = .{
             .eor = header.flags & posix.MSG.EOR != 0,
             .trunc = header.flags & posix.MSG.TRUNC != 0,
@@ -326,7 +326,7 @@ pub fn attempt(operation: Io.Operation) ?Io.Operation.Result {
             var iovecs: [Threaded.max_iovecs_len]posix.iovec = undefined;
             var splat: [Threaded.splat_buffer_size]u8 = undefined;
             const count = scatterWrite(&iovecs, &splat, w.header, w.data, w.splat);
-            const msg: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = @ptrCast(&iovecs), .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // aegis: boundary: the kernel only reads what a send gives it, through the same layout
+            const msg: linux.msghdr_const = .{ .name = null, .namelen = 0, .iov = @ptrCast(&iovecs), .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // aegis: boundary(A019): the kernel only reads what a send gives it, through the same layout
             // One piece and no control messages: `send`, which copies no
             // message header in.
             const rc = if (count == 1 and w.control.len == 0)
@@ -341,7 +341,7 @@ pub fn attempt(operation: Io.Operation) ?Io.Operation.Result {
             var address: Threaded.PosixAddress = undefined;
             var iov: posix.iovec = .{ .base = r.data_buffer.ptr, .len = r.data_buffer.len };
             const message = &r.message_buffer[0];
-            var msg: linux.msghdr = .{ .name = &address.any, .namelen = @sizeOf(Threaded.PosixAddress), .iov = @ptrCast(&iov), .iovlen = 1, .control = message.control.ptr, .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary: one iovec as an array of one
+            var msg: linux.msghdr = .{ .name = &address.any, .namelen = @sizeOf(Threaded.PosixAddress), .iov = @ptrCast(&iov), .iovlen = 1, .control = message.control.ptr, .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary(A019): one iovec as an array of one
             const flags = @as(u32, if (r.flags.oob) posix.MSG.OOB else 0) | @as(u32, if (r.flags.peek) posix.MSG.PEEK else 0) | @as(u32, if (r.flags.trunc) posix.MSG.TRUNC else 0);
             const rc = linux.recvmsg(r.socket_handle, &msg, flags | posix.MSG.DONTWAIT);
             const e = linux.errno(rc);
@@ -367,8 +367,8 @@ fn sendMany(fd: linux.fd_t, messages: []net.OutgoingMessage, flags: u32) (net.So
     var iovecs: [64]posix.iovec = undefined;
     const n = @min(messages.len, headers.len);
     for (messages[0..n], headers[0..n], addresses[0..n], iovecs[0..n]) |*m, *h, *a, *v| {
-        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len }; // aegis: boundary: the kernel only reads what a send gives it
-        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined }; // aegis: boundary: the kernel only reads what a send gives it
+        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len }; // aegis: boundary(A019): the kernel only reads what a send gives it
+        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined }; // aegis: boundary(A019): the kernel only reads what a send gives it
     }
     const rc = linux.sendmmsg(fd, &headers, @intCast(n), flags);
     const e = linux.errno(rc);
@@ -383,7 +383,7 @@ fn scatterWrite(iovecs: []posix.iovec, splat_buffer: *[Threaded.splat_buffer_siz
     const add = struct {
         fn f(v: []posix.iovec, count: *usize, bytes: []const u8) void {
             if (bytes.len == 0 or count.* == v.len) return;
-            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len }; // aegis: boundary: the kernel only reads what a send gives it
+            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len }; // aegis: boundary(A019): the kernel only reads what a send gives it
             count.* += 1;
         }
     }.f;

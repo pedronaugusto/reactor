@@ -97,7 +97,7 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
             return;
         }
         u.consumePublished();
-        // aegis: boundary: the ring's head is the kernel's to move, in memory it shares with the ring's owner
+        // aegis: boundary(A007): the ring's head is the kernel's to move, in memory it shares with the ring's owner
         var head = @atomicLoad(u32, u.ring.sq.head, .acquire);
         while (head != u.ring.sq.sqe_tail) : (head +%= 1) {
             const sqe = &u.ring.sq.sqes[head & u.ring.sq.mask];

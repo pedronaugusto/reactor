@@ -26,17 +26,17 @@ const Info = extern struct {
     next: ?*Info = null,
 };
 
-// aegis: boundary: ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's WSACleanup, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's WSACleanup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSACleanup() callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's GetAddrInfoExW, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's GetAddrInfoExW, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExW(name: [*:0]const u16, service: [*:0]const u16, namespace: u32, provider: ?*anyopaque, hints: *const Info, result: *?*Info, timeout: ?*anyopaque, overlapped: *Overlapped, completion: ?*anyopaque, cancel_handle: *?windows.HANDLE) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's GetAddrInfoExCancel, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's GetAddrInfoExCancel, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExCancel(handle: *?windows.HANDLE) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's GetAddrInfoExOverlappedResult, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's GetAddrInfoExOverlappedResult, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExOverlappedResult(overlapped: *Overlapped) callconv(.winapi) c_int;
-// aegis: boundary: ws2_32's FreeAddrInfoExW, declared as Microsoft's Winsock documentation gives it
+// aegis: boundary(A019): ws2_32's FreeAddrInfoExW, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn FreeAddrInfoExW(info: *Info) callconv(.winapi) void;
 
 pub const Error = error{ NameNotResolved, SystemResources, Unexpected };

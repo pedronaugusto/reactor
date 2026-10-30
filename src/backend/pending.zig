@@ -85,11 +85,11 @@ const Packed = if (is_windows) extern union {
 };
 
 fn packedOf(p: *Pending) *Packed {
-    return @ptrCast(&p.userdata); // aegis: boundary: std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
+    return @ptrCast(&p.userdata); // aegis: boundary(A019): std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
 }
 
 fn packedOfConst(p: *const Pending) *const Packed {
-    return @ptrCast(&p.userdata); // aegis: boundary: std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
+    return @ptrCast(&p.userdata); // aegis: boundary(A019): std's Io.Batch gives the backend its pending entry's userdata as untyped words; `Packed` fits in them and is no more aligned
 }
 
 /// Keeps `operation` in `p`. A splat beyond 2^32 - 1 is clamped: the

@@ -73,7 +73,7 @@ pub fn start(socket: net.Socket.Handle, address: *const net.IpAddress) Error!boo
 pub fn finish(socket: net.Socket.Handle) Error!void {
     var value: i32 = 0;
     var len: posix.socklen_t = @sizeOf(i32);
-    while (true) switch (posix.errno(posix.system.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&value), &len))) { // aegis: boundary: SO_ERROR writes one int
+    while (true) switch (posix.errno(posix.system.getsockopt(socket, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&value), &len))) { // aegis: boundary(A019): SO_ERROR writes one int
         .SUCCESS => break,
         .INTR => continue,
         else => return error.Unexpected,

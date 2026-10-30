@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const windows = std.os.windows;
 
-// aegis: boundary: kernel32's WriteFile, declared as Microsoft's Win32 documentation gives it
+// aegis: boundary(A019): kernel32's WriteFile, declared as Microsoft's Win32 documentation gives it
 extern "kernel32" fn WriteFile(handle: windows.HANDLE, buffer: [*]const u8, length: windows.DWORD, written: *windows.DWORD, overlapped: ?*anyopaque) callconv(.winapi) windows.BOOL;
 
 pub fn write(bytes: []const u8) void {

@@ -44,12 +44,12 @@ pub fn init(fd: linux.fd_t, entries: Entries, id: Id) Error!BufferRing {
     const bytes = ringBytes(entries);
     const offset: u64 = 0x80000000 | (@as(u64, id.raw()) << 16);
     const memory = posix.mmap(null, bytes, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, offset) catch return error.SystemResources;
-    return .{ .br = @ptrCast(memory.ptr), .entries = entries, .id = id, .fd = fd }; // aegis: boundary: the kernel maps an array of io_uring_buf entries here
+    return .{ .br = @ptrCast(memory.ptr), .entries = entries, .id = id, .fd = fd }; // aegis: boundary(A019): the kernel maps an array of io_uring_buf entries here
 }
 
 pub fn deinit(ring: *BufferRing) void {
     unregister(ring.fd, ring.id);
-    const memory: [*]align(std.heap.page_size_min) u8 = @ptrCast(ring.br); // aegis: boundary: init mapped this buffer ring
+    const memory: [*]align(std.heap.page_size_min) u8 = @ptrCast(ring.br); // aegis: boundary(A019): init mapped this buffer ring
     posix.munmap(memory[0..ringBytes(ring.entries)]);
     ring.* = undefined;
 }
