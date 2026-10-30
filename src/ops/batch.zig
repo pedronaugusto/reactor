@@ -35,7 +35,7 @@ const Index = Io.Operation.OptionalIndex;
 /// one word std's `Io.Batch` keeps for its implementation; null while
 /// nothing is pending.
 fn ownerOf(batch: *const Io.Batch) ?*Task {
-    // aegis: boundary(A019): std's Io.Batch keeps one opaque word for its implementation, where this runtime keeps the task its pending operations hold
+    // aegis: boundary(A019): std.Io implementation contract: Io.Batch keeps one opaque word for its implementation, where this runtime keeps the task its pending operations hold
     return @ptrCast(@alignCast(batch.userdata orelse return null));
 }
 

@@ -261,18 +261,18 @@ fn async(userdata: ?*anyopaque, result: []u8, result_alignment: Alignment, conte
         if (Scheduler.current()) |t| Scheduler.callOut(t, start, .{ context.ptr, result.ptr }) else start(context.ptr, result.ptr);
         return null;
     };
-    // aegis: boundary(A019): std.Io's future is opaque; this runtime's futures are its tasks
+    // aegis: boundary(A019): std.Io implementation contract: the future is opaque; this runtime's futures are its tasks
     return @ptrCast(t);
 }
 
 fn concurrent(userdata: ?*anyopaque, result_len: usize, result_alignment: Alignment, context: []const u8, context_alignment: Alignment, start: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
     const r = Core.running(userdata);
-    // aegis: boundary(A019): std.Io's future is opaque; this runtime's futures are its tasks
+    // aegis: boundary(A019): std.Io implementation contract: the future is opaque; this runtime's futures are its tasks
     return @ptrCast(try tasks.concurrent(&r.scheduler, result_len, result_alignment, context, context_alignment, start, @returnAddress()));
 }
 
 fn taskOf(future: *Io.AnyFuture) *Task {
-    // aegis: boundary(A019): std.Io's future is opaque; `async` and `concurrent` hand out tasks as futures
+    // aegis: boundary(A019): std.Io implementation contract: the future is opaque; `async` and `concurrent` hand out tasks as futures
     return @ptrCast(@alignCast(future));
 }
 
