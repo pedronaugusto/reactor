@@ -121,12 +121,16 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
 
 /// A Unix stream socket connected to `address` on any `Io`, its errors
 /// std's names for them everywhere: `ConnectionRefused` where nothing
-/// listens at the path, `FileNotFound` where there is none. A runtime, and
+/// listens at the path, `FileNotFound` where there is none or the path is
+/// longer than the system's socket address holds. A runtime, and
 /// every system but Windows, connects by `UnixAddress.connect`; on Windows
 /// any other `Io` connects through Winsock (`sys/unix_windows.zig`), where
 /// std 0.17's `Io.Threaded` drives AFD itself and the system refuses it.
 /// The connect does not wait: a Unix socket is answered at once.
 pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!owned.Stream {
+    // A path the system's address cannot hold names no socket; std's
+    // `Io.Threaded` would overrun its address with it (`unixPathFits`).
+    if (!sys_socket.unixPathFits(address)) return error.FileNotFound;
     if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return .init(try address.connect(io));
     try io.checkCancel();
     const handle = try unix_windows.connectUnix(address);

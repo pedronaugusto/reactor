@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A handle reactor's own calls hand back comes with its one owner, an `aegis.own.OwnedIo`, where it was a bare `Io.File`, `Io.net.Stream` or `Io.net.Server` the caller was told to close: `net.connectPipe` and `PipeListener.accept` give a `net.owned.File`, `net.connectUnix` and `net.Connected.stream` a `net.owned.Stream`, `net.listen` a `net.owned.Server`. `deinit(io)` closes it; `borrow()` lends the handle; `take` moves it out to be kept.
 
+### Fixed
+
+- A Unix socket path is connected whole. The readiness and io_uring backends cut a path to one byte short of the system's socket address, so one that filled it (Linux's 108 bytes) connected to another path. One longer than the address holds names no socket and is `FileNotFound`, on a runtime and through `net.connectUnix` on any `Io`, where std's own `Io.Threaded` overran its address with it on Apple's systems and the BSDs (std's `UnixAddress.max_len` is Linux's 108 there; their address holds 104).
+
 ### Changed
 
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.

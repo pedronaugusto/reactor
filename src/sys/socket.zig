@@ -187,6 +187,15 @@ pub fn bindIp(address: *const net.IpAddress, options: net.IpAddress.BindOptions)
 
 pub const OpenUnixError = OpenError || error{FileNotFound};
 
+/// Whether the system's socket address holds `address`'s path. One it cannot
+/// hold names no socket. std does not check it everywhere: its
+/// `UnixAddress.max_len` is Linux's 108 on every POSIX system, where Apple's
+/// and the BSDs' hold 104. On Windows AFD takes the path as a socket option.
+pub fn unixPathFits(address: *const net.UnixAddress) bool {
+    if (is_windows) return true;
+    return address.path.len <= @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
+}
+
 /// A Unix stream socket to connect to `address`. On Windows AFD takes the
 /// target from a socket option, the address a connect names being only
 /// informational, and the socket is bound to no path first, as std does.

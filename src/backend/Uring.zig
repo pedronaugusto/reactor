@@ -1035,9 +1035,10 @@ fn receiveFlags(flags: net.ReceiveFlags) u32 {
 
 fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.socklen_t {
     storage.* = .{ .family = posix.AF.UNIX, .path = @splat(0) };
-    const n = @min(a.path.len, storage.path.len - 1);
-    @memcpy(storage.path[0..n], a.path[0..n]);
-    return @intCast(@offsetOf(posix.sockaddr.un, "path") + n + 1);
+    // Whole: the runtime's `netConnectUnix` refused a path the address cannot hold. A
+    // path that fills it goes without its terminating zero, as the kernel takes it.
+    @memcpy(storage.path[0..a.path.len], a.path);
+    return @intCast(@offsetOf(posix.sockaddr.un, "path") + @min(a.path.len + 1, storage.path.len));
 }
 
 /// `at` as an absolute `timespec` on its clock.

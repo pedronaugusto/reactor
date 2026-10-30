@@ -1025,3 +1025,48 @@ test "a priority wait on the loop alone is a readiness operation where the kerne
         }
     }
 }
+
+/// A Unix socket path `len` bytes long: `root`, then one name filling the rest.
+fn unixPath(gpa: std.mem.Allocator, root: []const u8, len: usize) ![]u8 {
+    const path = try gpa.alloc(u8, len);
+    @memcpy(path[0..root.len], root);
+    path[root.len] = '/';
+    @memset(path[root.len + 1 ..], 's');
+    return path;
+}
+
+test "a Unix path that fills the system's socket address is connected whole on each backend, and a longer one names no socket" {
+    if (!net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const held = @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+    defer gpa.free(root);
+    if (root.len + 2 > held) return error.SkipZigTest; // no name fits under this directory
+    const full = try unixPath(gpa, root, held);
+    defer gpa.free(full);
+    const address = try net.UnixAddress.init(full);
+    var server = try address.listen(testing.io, .{});
+    defer server.deinit(testing.io);
+    // Where std's `max_len` (Linux's 108) passes the system's, std takes a
+    // path the system cannot.
+    const long: ?[]u8 = if (held < net.UnixAddress.max_len) try unixPath(gpa, root, held + 1) else null;
+    defer if (long) |path| gpa.free(path);
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 1);
+        defer r.deinit();
+        const io = r.io();
+        var connecting = try io.concurrent(net.UnixAddress.connect, .{ &address, io });
+        const connected = try connecting.await(io);
+        connected.close(io);
+        const accepted = try server.accept(testing.io);
+        accepted.close(testing.io);
+        if (long) |path| {
+            const past = try net.UnixAddress.init(path);
+            var refusing = try io.concurrent(net.UnixAddress.connect, .{ &past, io });
+            try testing.expectError(error.FileNotFound, refusing.await(io));
+        }
+    }
+}
