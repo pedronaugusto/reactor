@@ -125,6 +125,9 @@ pub const NextError = error{ Timeout, Unexpected } || Io.Cancelable;
 /// The next signal delivered since the last `next`, lowest first when
 /// several were; waits until `timeout` for one.
 pub fn next(s: *Signals, io: Io, timeout: Io.Timeout) NextError!Signal {
+    // A canceled task gets Canceled whether or not a signal is waiting, as std's operations
+    // do (Threaded's `Syscall.start`): a loop on signals that keep coming is still canceled.
+    try io.checkCancel();
     const l = s.listener;
     const deadline = timeout.toDeadline(io);
     while (true) {

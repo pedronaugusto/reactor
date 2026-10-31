@@ -97,6 +97,9 @@ pub const NextError = error{ Timeout, SystemResources, Unexpected } || Io.Cancel
 /// The next message, waiting until `timeout` for one.
 pub fn next(j: *Job, io: Io, timeout: Io.Timeout) NextError!Message {
     if (!is_windows) unreachable; // unreachable: `attach` makes no job here
+    // A canceled task gets Canceled whether or not a message is waiting, as std's operations
+    // do (Threaded's `Syscall.start`): a loop on a job's messages is still canceled.
+    try io.checkCancel();
     const deadline = timeout.toDeadline(io);
     if (j.record) |record| {
         while (true) {

@@ -145,6 +145,9 @@ pub fn wait(io: Io, what: Waitable, timeout: Io.Timeout) WaitError!void {
 pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
     assert(set.len > 0);
     assert(set.len <= max);
+    // A canceled task gets Canceled whether or not a member is ready, as std's operations
+    // do (Threaded's `Syscall.start`): a loop on a set that stays ready is still canceled.
+    try io.checkCancel();
     const index = try waitFirst(io, set, timeout);
     switch (set[index]) {
         .wake => |w| w.notify.clear(),

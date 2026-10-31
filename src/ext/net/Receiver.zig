@@ -130,6 +130,9 @@ pub const NextError = Io.Operation.NetRead.Error || error{ Timeout, EndOfStream 
 /// until `timeout` for them. `SystemResources` when every buffer is lent.
 /// The bytes are borrowed until `release` or the next `next`.
 pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
+    // A canceled task gets Canceled whether or not bytes are waiting, as std's operations
+    // do (Threaded's `Syscall.start`): a loop on a socket that keeps sending is still canceled.
+    try io.checkCancel();
     r.giveBack();
     if (builtin.os.tag == .linux) if (r.pool.groups) |*groups| {
         const core = native.runtimeOf(io) orelse return error.Unexpected;

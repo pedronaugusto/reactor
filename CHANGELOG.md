@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A canceled task's wait is `Canceled` whether or not its set is ready: `waitAny`, `wait`, `Wake.wait`, `Job.next`, `Signals.next` and `net.Receiver.next` check for a cancel as they start, as std's own operations do. They returned a ready member, a waiting message, signal or bytes first, so a task looping on a set that stayed ready was never canceled.
 - A Unix socket path is connected whole. The readiness and io_uring backends cut a path to one byte short of the system's socket address, so one that filled it (Linux's 108 bytes) connected to another path. One longer than the address holds names no socket and is `FileNotFound`, on a runtime and through `net.connectUnix` on any `Io`, where std's own `Io.Threaded` overran its address with it on Apple's systems and the BSDs (std's `UnixAddress.max_len` is Linux's 108 there; their address holds 104).
 
 ### Changed

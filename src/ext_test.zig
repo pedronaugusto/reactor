@@ -87,6 +87,53 @@ test "a cancel ends a wait on Threaded" {
     try testing.expectError(error.Canceled, waiting.cancel(io));
 }
 
+/// A task that computes until its cancel is in, then waits: what a task
+/// looping on a wait whose set is always ready does, once canceled.
+const Late = struct {
+    var go: std.atomic.Value(bool) = .init(false);
+    fn waitReady(io: Io, w: *reactor.Wake) reactor.WaitError!usize {
+        while (!go.load(.acquire)) std.atomic.spinLoopHint();
+        return reactor.waitAny(io, &.{.{ .wake = w }}, .none);
+    }
+    fn nextReady(io: Io, s: *reactor.Signals) reactor.Signals.NextError!reactor.Signals.Signal {
+        while (!go.load(.acquire)) std.atomic.spinLoopHint();
+        return s.next(io, .none);
+    }
+    fn release() void {
+        var threaded: Io.Threaded = .init_single_threaded;
+        // glint-ignore: Z026 -- a sleep cut short releases the task sooner, which the test reads the same way
+        threaded.io().sleep(.fromMilliseconds(10), .awake) catch {};
+        go.store(true, .release);
+    }
+};
+
+test "a canceled task's wait is Canceled even when its set is ready, as std's operations are" {
+    const io = testing.io;
+    var wake = try reactor.Wake.init(io);
+    defer wake.deinit(io);
+    wake.signal();
+    Late.go.store(false, .release);
+    var waiting = io.concurrent(Late.waitReady, .{ io, &wake }) catch return error.SkipZigTest;
+    const releaser = try std.Thread.spawn(.{}, Late.release, .{});
+    defer releaser.join();
+    try testing.expectError(error.Canceled, waiting.cancel(io));
+}
+
+test "a canceled task's next signal is Canceled even when one is waiting" {
+    if (is_windows) return error.SkipZigTest;
+    const io = testing.io;
+    var s = try reactor.Signals.start(io, &.{.user1});
+    defer s.stop(io);
+    try posix.raise(.USR1);
+    // Delivered: the listener holds it before the task asks.
+    try testing.expectEqual(@as(usize, 0), try reactor.waitAny(io, &.{.{ .wake = s.wake() }}, ms(5000)));
+    Late.go.store(false, .release);
+    var asking = io.concurrent(Late.nextReady, .{ io, &s }) catch return error.SkipZigTest;
+    const releaser = try std.Thread.spawn(.{}, Late.release, .{});
+    defer releaser.join();
+    try testing.expectError(error.Canceled, asking.cancel(io));
+}
+
 fn contextSwitches() i64 {
     const usage = posix.getrusage(posix.rusage.SELF);
     return @intCast(usage.nvcsw + usage.nivcsw);
