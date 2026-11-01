@@ -47,7 +47,8 @@ pub const Config = struct {
 
     pub fn read(io: Io) Error!Config {
         var c: Config = .{};
-        const f = Io.Dir.openFileAbsolute(io, "/etc/resolv.conf", .{}) catch {
+        const f = Io.Dir.openFileAbsolute(io, "/etc/resolv.conf", .{}) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             c.servers[0] = .{ .ip4 = .loopback(53) };
             c.server_count = 1;
             return c;
@@ -55,7 +56,7 @@ pub const Config = struct {
         defer f.close(io);
         var buffer: [4096]u8 = undefined;
         var reader = f.reader(io, &buffer);
-        while (reader.interface.takeDelimiter('\n') catch return error.NameNotResolved) |text| {
+        while (reader.interface.takeDelimiter('\n') catch return unread(&reader)) |text| {
             c.line(text);
         }
         if (c.server_count == 0) {
@@ -100,6 +101,13 @@ pub const Config = struct {
     }
 };
 
+/// A configuration file that could not be read to its end: canceled, or
+/// no name resolved from it.
+fn unread(reader: *const Io.File.Reader) Error {
+    if (reader.err) |err| if (err == error.Canceled) return error.Canceled;
+    return error.NameNotResolved;
+}
+
 /// `value` taken into `R`'s range, as resolv.conf's options are read.
 fn clamped(comptime R: type, value: R.Representation) R {
     return R.init(value) catch if (value < R.minimum) .literal(R.minimum) else .literal(R.maximum);
@@ -136,12 +144,12 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
 }
 
 fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress, canonical: *Name) Error!?usize {
-    const file = Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch return null;
+    const file = Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch |err| return if (err == error.Canceled) error.Canceled else null;
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
     var n: usize = 0;
-    lines: while (reader.interface.takeDelimiter('\n') catch return error.NameNotResolved) |line| {
+    lines: while (reader.interface.takeDelimiter('\n') catch return unread(&reader)) |line| {
         var words = std.mem.tokenizeAny(u8, line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len], " \t\r");
         const text = words.next() orelse continue;
         const primary = words.next() orelse continue;

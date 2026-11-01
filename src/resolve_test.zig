@@ -3,6 +3,7 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 const stub = @import("ops/resolve.zig");
+const shakedown = @import("shakedown");
 
 fn response(buffer: []u8, query: []const u8, count: u16) []u8 {
     const header_len = query.len - 11;
@@ -229,4 +230,33 @@ test "DNS address selection honors usable routes matching scopes and precedence"
     try testing.expect(order.before(order.rank(global, global), order.rank(v4, v4)));
     try testing.expect(order.before(order.rank(v4, v4), order.rank(v6, global)));
     try testing.expect(!order.before(order.rank(v4, v4), order.rank(v4, v4)));
+}
+
+test "a cancel that stops the read of resolv.conf or the hosts file is Canceled, not a name unresolved" {
+    const gpa = testing.allocator;
+    const Read = struct {
+        fn config(io: Io) !void {
+            _ = try stub.Config.read(io);
+        }
+        fn hosts(io: Io) !void {
+            var out: [4]Io.net.IpAddress = undefined;
+            _ = try stub.lookup(io, try Io.net.HostName.init("localhost"), 80, null, &out);
+        }
+    };
+    inline for (.{ Read.config, Read.hosts }) |read| {
+        for ([_]shakedown.IoCall{ .dirOpenFile, .fileReadPositional, .file_read_streaming }) |call| {
+            const made = made: {
+                const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
+                defer faults.deinit();
+                read(faults.io()) catch {};
+                break :made faults.count(call);
+            };
+            // A file the machine does not have is not read.
+            if (made == 0) continue;
+            const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = call, .n = 1 } }, .fault = .cancel, .times = 1 }};
+            const faults = try shakedown.FaultIo.init(gpa, testing.io, .{ .plan = &plan });
+            defer faults.deinit();
+            try testing.expectError(error.Canceled, read(faults.io()));
+        }
+    }
 }
