@@ -21,6 +21,7 @@ const E = posix.E;
 const op = @import("../op.zig");
 const file = @import("../../sys/file.zig");
 const sys_poll = @import("../../sys/poll.zig");
+const sys_socket = @import("../../sys/socket.zig");
 
 const Direction = @import("records.zig").Direction;
 const How = @import("Waiter.zig").How;
@@ -609,9 +610,9 @@ fn connectError(e: E) ConnectError {
 fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.socklen_t {
     storage.* = std.mem.zeroes(posix.sockaddr.un);
     storage.family = posix.AF.UNIX;
-    const n = @min(a.path.len, storage.path.len - 1);
-    @memcpy(storage.path[0..n], a.path[0..n]);
-    return @intCast(@offsetOf(posix.sockaddr.un, "path") + n + 1);
+    std.debug.assert(sys_socket.unixPathFits(a.path)); // openUnix refused a path past the room
+    @memcpy(storage.path[0..a.path.len], a.path);
+    return @intCast(@offsetOf(posix.sockaddr.un, "path") + a.path.len + 1);
 }
 
 // Positional file calls, made in place: a regular file has no readiness.

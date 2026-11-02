@@ -437,10 +437,15 @@ test "connectUnix reaches a listener, and names a refused connect and a missing 
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    // On POSIX from the working directory, where tmpDir made it, so the path
+    // fits a socket address wherever the tree is. AFD takes an absolute
+    // path, written with /, as git writes a socket path; Windows takes either.
+    const root = if (builtin.os.tag == .windows) root: {
+        const real = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+        std.mem.replaceScalar(u8, real, '\\', '/');
+        break :root real;
+    } else try gpa.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
     defer gpa.free(root);
-    // Written with /, as git writes a socket path; Windows takes either.
-    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, root, '\\', '/');
     const path = try gpa.print("{s}/socket", .{root});
     defer gpa.free(path);
     const address = try Io.net.UnixAddress.init(path);
@@ -473,4 +478,15 @@ test "connectUnix reaches a listener, and names a refused connect and a missing 
     }
     // The path a listener left behind, with nothing listening at it.
     try testing.expectError(error.ConnectionRefused, net.connectUnix(io, &address));
+}
+
+test "connectUnix names a path past the system's socket address NameTooLong before std copies it, on Threaded too" {
+    if (!Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = testing.io;
+    const room = @typeInfo(@FieldType(std.posix.sockaddr.un, "path")).array.len;
+    // std's limit is Linux's 108 everywhere; macOS and the BSDs hold 104.
+    const long: [room]u8 = @splat('a');
+    try testing.expectError(error.NameTooLong, net.connectUnix(io, &try Io.net.UnixAddress.init(&long)));
+    const over: [Io.net.UnixAddress.max_len]u8 = @splat('a');
+    try testing.expectError(error.NameTooLong, net.connectUnix(io, &try Io.net.UnixAddress.init(&over)));
 }

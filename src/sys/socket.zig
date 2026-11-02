@@ -187,10 +187,23 @@ pub fn bindIp(address: *const net.IpAddress, options: net.IpAddress.BindOptions)
 
 pub const OpenUnixError = OpenError || error{FileNotFound};
 
+/// Whether `path` fits a socket address with the zero that ends it. std's
+/// `UnixAddress.max_len` is Linux's 108 on every POSIX system, where macOS
+/// and the BSDs hold 104. On Windows AFD takes the path itself, the socket
+/// address only informational.
+pub fn unixPathFits(path: []const u8) bool {
+    if (is_windows) return true;
+    return path.len < @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
+}
+
 /// A Unix stream socket to connect to `address`. On Windows AFD takes the
 /// target from a socket option, the address a connect names being only
 /// informational, and the socket is bound to no path first, as std does.
+/// A path that does not fit a socket address is `FileNotFound`, as on
+/// Windows: std's `ConnectError` has no name for it, and the path cut to
+/// fit would name another.
 pub fn openUnix(address: *const net.UnixAddress, start: Start) OpenUnixError!Handle {
+    if (!unixPathFits(address.path)) return error.FileNotFound;
     if (!is_windows) return open(posix.AF.UNIX, .stream, null, start);
     const path = if (!address.isAbstract()) Threaded.sliceToPrefixedFileW(null, address.path, .{ .allow_relative = false }) catch |err| return switch (err) {
         error.NameTooLong, error.BadPathName => error.FileNotFound,

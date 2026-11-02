@@ -121,15 +121,20 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
     };
 }
 
+pub const UnixError = net.UnixAddress.ConnectError || error{NameTooLong};
+
 /// A Unix stream socket connected to `address` on any `Io`, its errors
 /// std's names for them everywhere: `ConnectionRefused` where nothing
 /// listens at the path, `FileNotFound` where there is none. A runtime, and
 /// every system but Windows, connects by `UnixAddress.connect`; on Windows
 /// any other `Io` connects through Winsock (`sys/unix_windows.zig`), where
 /// std 0.17's `Io.Threaded` drives AFD itself and the system refuses it.
-/// The connect does not wait: a Unix socket is answered at once.
+/// The connect does not wait: a Unix socket is answered at once. A path
+/// that does not fit the system's socket address is `NameTooLong`, before
+/// any socket is made: std 0.17's `Io.Threaded` copies one past the room.
 // aegis: boundary: std's UnixAddress.connect's shape: the stream by value, the caller's to close
-pub fn connectUnix(io: Io, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Stream {
+pub fn connectUnix(io: Io, address: *const net.UnixAddress) UnixError!net.Stream {
+    if (!sys_socket.unixPathFits(address.path)) return error.NameTooLong;
     if (builtin.os.tag != .windows or native.runtimeOf(io) != null) return address.connect(io);
     try io.checkCancel();
     const handle = try unix_windows.connectUnix(address);

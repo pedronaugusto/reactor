@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking
+
+- `net.connectUnix` returns `net.ConnectUnixError`, std's `UnixAddress.ConnectError` with `NameTooLong`.
+
+### Fixed
+
+- A Unix socket path that does not fit the system's socket address, 104 bytes with its ending zero on macOS and the BSDs and 108 on Linux, is `NameTooLong` from `net.connectUnix` before any socket is made, where std 0.17's `Io.Threaded` copied it past the room (std's `UnixAddress.max_len` is 108 everywhere). A runtime's own Unix connect answers it `FileNotFound`, as on Windows, where it cut the path to fit and could reach another socket.
+
 ## [0.9.0] - 2026-10-28
 
 ### Breaking
