@@ -636,6 +636,37 @@ test "a connect to a port nobody listens on is refused" {
     }
 }
 
+test "a Unix path past a socket address's room is not found on each backend, never cut short to name another" {
+    if (!net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // From the working directory, where tmpDir made it: the path's length
+    // is the test's, wherever the tree is.
+    const room = @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
+    const dir = try gpa.print(".zig-cache/tmp/{s}/", .{&tmp.sub_path});
+    defer gpa.free(dir);
+    // The longest path that fits, a listener there, and that path and one
+    // byte more, which cut to fit would reach the listener.
+    const short = try gpa.alloc(u8, room - 1);
+    defer gpa.free(short);
+    @memcpy(short[0..dir.len], dir);
+    @memset(short[dir.len..], 'a');
+    const long = try std.mem.concat(gpa, u8, &.{ short, "a" });
+    defer gpa.free(long);
+    var listener = try (try net.UnixAddress.init(short)).listen(testing.io, .{});
+    defer listener.deinit(testing.io);
+    const address = try net.UnixAddress.init(long);
+    for (all) |backend| {
+        var r: Runtime = undefined;
+        try runtime(&r, backend, 0);
+        defer r.deinit();
+        const io = r.io();
+        try testing.expectError(error.FileNotFound, address.connect(io));
+        try testing.expectError(error.NameTooLong, reactor.net.connectUnix(io, &address));
+    }
+}
+
 // The loop alone.
 
 fn loopOf(l: *Loop, backend: Loop.Backend) !void {

@@ -12,6 +12,7 @@
 //! pipe takes whole (a write may always be short).
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
@@ -21,6 +22,7 @@ const E = posix.E;
 const op = @import("../op.zig");
 const file = @import("../../sys/file.zig");
 const sys_poll = @import("../../sys/poll.zig");
+const sys_socket = @import("../../sys/socket.zig");
 
 const Direction = @import("records.zig").Direction;
 const How = @import("Waiter.zig").How;
@@ -609,10 +611,9 @@ fn connectError(e: E) ConnectError {
 fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.socklen_t {
     storage.* = std.mem.zeroes(posix.sockaddr.un);
     storage.family = posix.AF.UNIX;
-    // Whole: the runtime's `netConnectUnix` refused a path the address cannot hold. A
-    // path that fills it goes without its terminating zero, as the kernel takes it.
+    aegis.assert.invariant(sys_socket.unixPathFits(a.path), "openUnix refused a path past the room");
     @memcpy(storage.path[0..a.path.len], a.path);
-    return @intCast(@offsetOf(posix.sockaddr.un, "path") + @min(a.path.len + 1, storage.path.len));
+    return @intCast(@offsetOf(posix.sockaddr.un, "path") + a.path.len + 1);
 }
 
 // Positional file calls, made in place: a regular file has no readiness.

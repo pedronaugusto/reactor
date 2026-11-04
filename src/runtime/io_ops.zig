@@ -440,7 +440,7 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
     const r = Core.running(userdata);
     // Before either way: std's own call would overrun its address with a
     // path the system's cannot hold, which names no socket.
-    if (!socket.unixPathFits(address)) return error.FileNotFound;
+    if (!socket.unixPathFits(address.path)) return error.FileNotFound;
     if (outsideBorrowed(r)) return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;

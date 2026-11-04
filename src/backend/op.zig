@@ -72,6 +72,8 @@ pub const Connect = struct {
 
     pub const Address = union(enum) {
         ip: Io.net.IpAddress,
+        /// A path that fits a socket address (`sys/socket.zig`'s
+        /// `unixPathFits`), which `openUnix` checked.
         unix: *const Io.net.UnixAddress,
     };
 };

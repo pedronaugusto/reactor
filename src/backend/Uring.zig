@@ -39,6 +39,7 @@ const Files = @import("uring/Files.zig");
 pub const Kept = @import("uring/Kept.zig");
 const Allocator = std.mem.Allocator;
 const BufferRing = @import("../sys/BufferRing.zig");
+const sys_socket = @import("../sys/socket.zig");
 const results = @import("uring/results.zig");
 const slab = @import("slab.zig");
 
@@ -1035,10 +1036,9 @@ fn receiveFlags(flags: net.ReceiveFlags) u32 {
 
 fn unixToPosix(a: *const net.UnixAddress, storage: *posix.sockaddr.un) posix.socklen_t {
     storage.* = .{ .family = posix.AF.UNIX, .path = @splat(0) };
-    // Whole: the runtime's `netConnectUnix` refused a path the address cannot hold. A
-    // path that fills it goes without its terminating zero, as the kernel takes it.
+    aegis.assert.invariant(sys_socket.unixPathFits(a.path), "openUnix refused a path past the room");
     @memcpy(storage.path[0..a.path.len], a.path);
-    return @intCast(@offsetOf(posix.sockaddr.un, "path") + @min(a.path.len + 1, storage.path.len));
+    return @intCast(@offsetOf(posix.sockaddr.un, "path") + a.path.len + 1);
 }
 
 /// `at` as an absolute `timespec` on its clock.

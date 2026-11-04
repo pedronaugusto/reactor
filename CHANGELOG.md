@@ -14,12 +14,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A lookup canceled while it opened or read `/etc/resolv.conf` or `/etc/hosts` is `error.Canceled`, where the open's cancel read as no file (the default server, no hosts entry) and the read's as `NameNotResolved`.
 - A canceled task's wait is `Canceled` whether or not its set is ready: `waitAny`, `wait`, `Wake.wait`, `Job.next`, `Signals.next` and `net.Receiver.next` check for a cancel as they start, as std's own operations do. They returned a ready member, a waiting message, signal or bytes first, so a task looping on a set that stayed ready was never canceled.
-- A Unix socket path is connected whole. The readiness and io_uring backends cut a path to one byte short of the system's socket address, so one that filled it (Linux's 108 bytes) connected to another path. One longer than the address holds names no socket and is `FileNotFound`, on a runtime and through `net.connectUnix` on any `Io`, where std's own `Io.Threaded` overran its address with it on Apple's systems and the BSDs (std's `UnixAddress.max_len` is Linux's 108 there; their address holds 104).
+- A Unix socket path that does not fit the system's socket address, 104 bytes with its ending zero on macOS and the BSDs and 108 on Linux, is `NameTooLong` from `net.connectUnix` before any socket is made, where std 0.17's `Io.Threaded` copied it past the room (std's `UnixAddress.max_len` is 108 everywhere). A runtime's own Unix connect answers it `FileNotFound`, as on Windows, where it cut the path to fit and could reach another socket.
 
 ### Changed
 
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.
 - A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
+- `net.connectUnix` returns `net.ConnectUnixError`, std's `UnixAddress.ConnectError` with `NameTooLong`.
+
 
 ## [0.9.0] - 2026-10-28
 
