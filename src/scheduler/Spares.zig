@@ -107,6 +107,7 @@ pub fn Of(comptime Item: type) type {
             state.idle += 1;
             while (true) {
                 var p: *Item = undefined;
+                // glint-ignore: Z026 -- an empty queue holds no processor yet: the thread waits below for one
                 if (state.waiting.pop(&p)) {
                     state.idle -= 1;
                     held.deinit(system());

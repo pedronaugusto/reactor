@@ -924,6 +924,7 @@ fn finishOp(u: *Uring, o: *op.Op, cqe: linux.io_uring_cqe) void {
     _ = cqe;
     switch (o.kind) {
         .io => |operation| switch (operation) {
+            // glint-ignore: Z026 -- a send that failed has no rest to send: its error is the result already
             .net_send => |s| if (o.result.io) |r| if (r.net_send[0] == null and s.messages.len > 1) {
                 o.result = .{ .io = .{ .net_send = results.sendRest(s, 1) } };
             } else {} else |_| {},

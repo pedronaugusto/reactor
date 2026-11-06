@@ -116,7 +116,7 @@ const trim_gap = 64 << 10;
 /// reads zero only before the machine has run.
 const no_slice: clocks.Awake = .fromRaw(0);
 
-const spin_for: clocks.Span = .fromRaw(20 * std.time.ns_per_us);
+const spin_for: clocks.Span = .literal("20us");
 
 /// A processor: a loop, the tasks ready to run on it, and the context its
 /// scheduler runs in. Exactly one thread holds a processor at a time.

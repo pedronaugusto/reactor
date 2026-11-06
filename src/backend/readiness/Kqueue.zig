@@ -257,8 +257,7 @@ pub fn wake(k: *Kqueue) void {
     if (k.wake_pending.raise(.acq_rel)) return;
     if (has_user) {
         const trigger = [1]Event{change(0, c.EVFILT.USER, 0, c.NOTE.TRIGGER, 0, wake_key)};
-        // A kqueue that cannot take the trigger has no room left: the
-        // waiter wakes at its next event or deadline instead.
+        // glint-ignore: Z026 -- a kqueue that cannot take the trigger has no room left: the waiter wakes at its next event or deadline instead
         k.apply(&trigger) catch |err| switch (err) {
             error.SystemResources, error.Unexpected, error.OutOfMemory, error.BackendUnavailable => {},
         };

@@ -304,6 +304,7 @@ fn tcp(r: Request, server: net.IpAddress, q: []const u8, deadline: Io.Timeout) E
         .expired => |expired| done: {
             try expired;
             while (race.cancel()) |late| switch (late) {
+                // glint-ignore: Z026 -- a late reply that failed resolved nothing: the timeout's answer stands
                 .reply => |reply| if (reply) |n| break :done n else |_| {},
                 .expired => {},
             };

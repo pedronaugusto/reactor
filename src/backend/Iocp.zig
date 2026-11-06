@@ -662,7 +662,7 @@ fn hectoNanoseconds(span: timeline.Span) u64 {
 
 /// A timer armed this close before the deadline asked for is kept: the
 /// early wake costs a pass, re-arming costs two calls.
-const timer_slack: timeline.Span = .fromRaw(50 * std.time.ns_per_us);
+const timer_slack: timeline.Span = .literal("50us");
 
 /// Arms the precise timer to fire in `span`; false when it cannot be now
 /// (its last entry is on its way).

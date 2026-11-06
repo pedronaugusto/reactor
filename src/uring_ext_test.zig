@@ -238,6 +238,7 @@ test "a native deadline ends a read in the kernel, poisons the socket, and nothi
     const sent = (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &send } })).net_write;
     // The peer was aborted: the write may be refused. Either way nothing
     // may reach the buffer.
+    // glint-ignore: Z026 -- the peer was aborted, so the write may be refused; the test checks the buffer, not the write
     if (sent) |_| {} else |_| {}
     try io.sleep(.fromMilliseconds(5), .awake);
     for (buffer) |byte| try testing.expectEqual(@as(u8, 0xdd), byte);

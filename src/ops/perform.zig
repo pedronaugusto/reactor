@@ -103,6 +103,7 @@ pub const Deadline = struct {
             d.waiting = false;
             return d.scheduler.ready(d.task, .completed);
         }
+        // glint-ignore: Z026 -- a timer that ended in an error was canceled, so the deadline does not fire
         if (o.backend.result.timer) |_| d.fire(d) else |_| {}
     }
 
@@ -373,6 +374,7 @@ const Elsewhere = struct {
 
     fn expired(c: *Loop.Completion, l: *Loop, t: *Loop.Op) void {
         const e: *Elsewhere = @alignCast(@fieldParentPtr("expiring", c)); // safe: the field belongs to this record
+        // glint-ignore: Z026 -- a timer that ended in an error was canceled, so the operation did not time out
         if (t.backend.result.timer) |_| {
             e.timed_out = true;
             l.cancel(e.op);

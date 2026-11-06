@@ -93,6 +93,7 @@ test "a ring keeps at most eight accepted sockets between accepts" {
     var first = try io.concurrent(accept, .{ io, &server });
     var first_live = true;
     defer if (first_live) {
+        // glint-ignore: Z026 -- an accept that the cleanup's cancel ends in an error made no stream to close
         if (first.cancel(io)) |stream| stream.close(io) else |_| {}
     };
     try io.sleep(.fromMilliseconds(1), .awake);
@@ -135,6 +136,7 @@ test "accepting a burst keeps every connected peer" {
     var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
     var first = try io.concurrent(accept, .{ io, &server });
+    // glint-ignore: Z026 -- an accept that the cleanup's cancel ends in an error made no stream to close
     defer if (first.cancel(io)) |stream| stream.close(io) else |_| {};
     runtime.run(.nowait);
     var clients: [32]Io.net.Stream = undefined;

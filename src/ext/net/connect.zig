@@ -92,6 +92,7 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
     var buffer: [2]Race = undefined;
     var race: Io.Select(Race) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
+        // glint-ignore: Z026 -- a late connect that failed made no stream to close
         .connected => |result| if (result) |stream| stream.close(io) else |_| {},
         .expired => {},
     };
@@ -111,6 +112,7 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
             // A connection already made remains the caller's, even if the
             // timer's result reached the select first.
             while (race.cancel()) |late| switch (late) {
+                // glint-ignore: Z026 -- a late connect that failed made no stream: the timeout stands
                 .connected => |connected| if (connected) |stream| break :expired .{ .stream = .init(stream) } else |_| {},
                 .expired => {},
             };
@@ -199,6 +201,7 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
             .expired => |result| {
                 try result;
                 while (race.cancel()) |late| switch (late) {
+                    // glint-ignore: Z026 -- a late connect that failed made no stream: the timeout stands
                     .connected => |connected| if (connected) |_| return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }) } else |_| {},
                     .expired => {},
                 };

@@ -731,7 +731,7 @@ pub fn Readiness(comptime Poller: type) type {
                     if (e.priority) r.ready = r.ready.with(.{ .priority = true });
                     if (r.idle()) {
                         r.idle_events += 1;
-                        // No room to deregister now: the next event tries again.
+                        // glint-ignore: Z026 -- no room to deregister now: the next event tries again
                         if (r.idle_events >= 2) self.letGo(index) catch |err| switch (err) {
                             error.SystemResources, error.Unexpected => {},
                         };

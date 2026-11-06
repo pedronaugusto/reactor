@@ -248,6 +248,7 @@ test "a cancel that stops the read of resolv.conf or the hosts file is Canceled,
             const made = made: {
                 const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
                 defer faults.deinit();
+                // glint-ignore: Z026 -- a read under faults may fail; the test counts the calls it made, not its result
                 read(faults.io()) catch {};
                 break :made faults.count(call);
             };

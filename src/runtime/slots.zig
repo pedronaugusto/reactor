@@ -465,8 +465,8 @@ fn lockedStderr(r: *Core, mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr
 fn unlockStderr(userdata: ?*anyopaque) void {
     const r = Core.running(userdata);
     const s = &r.stderr;
+    // glint-ignore: Z026 -- the file writer keeps the cause in `err`, read next
     if (s.writer.err == null) s.writer.interface.flush() catch |err| switch (err) {
-        // The file writer keeps the cause in `err`, read next.
         error.WriteFailed => {},
     };
     if (s.writer.err) |err| {

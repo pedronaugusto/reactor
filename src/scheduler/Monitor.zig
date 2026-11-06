@@ -53,9 +53,9 @@ pub const Stall = struct {
 
 pub const records_kept = 32;
 const sites_logged = 64;
-const shortest: clocks.Span = .fromRaw(20 * std.time.ns_per_us);
+const shortest: clocks.Span = .literal("20us");
 const no_site = std.math.maxInt(usize);
-const longest: clocks.Span = .fromRaw(10 * std.time.ns_per_ms);
+const longest: clocks.Span = .literal("10ms");
 
 samples: []Sample,
 handoff_after: clocks.Span,

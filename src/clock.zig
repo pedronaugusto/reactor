@@ -114,7 +114,7 @@ pub fn resolution(clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
 pub const Virtual = struct {
     at: aegis.Atomic(Awake) = .init(.fromRaw(0)),
     /// `real` minus the timeline.
-    real_offset: aegis.Atomic(Offset) = .init(.fromRaw(1_700_000_000 * std.time.ns_per_s)),
+    real_offset: aegis.Atomic(Offset) = .init(.literal("1700000000s")),
 
     pub fn now(v: *const Virtual, clock: Io.Clock) Io.Timestamp {
         const Point = aegis.units.Instant(.any, .nanosecond, i96);
