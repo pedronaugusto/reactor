@@ -74,8 +74,8 @@ fn futureDone(t: *Task) void {
 
 fn wakeAwaiter(s: *Scheduler, a: *Task.Awaiter) void {
     if (a.task) |waiter| return s.ready(waiter, .woken);
-    a.done.store(1, .release);
-    Scheduler.system().futexWake(u32, &a.done.raw, 1);
+    a.done.store(.done, .release);
+    a.done.wake(Scheduler.system(), 1);
 }
 
 /// An awaiter, and the work that registers it once its task is off its stack.
@@ -103,7 +103,7 @@ pub fn await(s: *Scheduler, t: *Task, result: []u8) void {
             const old = t.awaiter.swap(a, .acq_rel);
             if (old != finished) {
                 const sys = Scheduler.system();
-                while (a.done.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &a.done.raw, 0);
+                while (a.done.load(.acquire) == .waiting) a.done.waitUncancelable(sys, .waiting);
             }
         }
     }
@@ -240,7 +240,7 @@ fn waitGroupThread(g: *Io.Group) void {
     Task.awaitGroup(g, &a);
     Task.unlockGroup(g);
     const sys = Scheduler.system();
-    while (a.done.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &a.done.raw, 0);
+    while (a.done.load(.acquire) == .waiting) a.done.waitUncancelable(sys, .waiting);
 }
 
 // Cancel protection.

@@ -33,9 +33,9 @@ pub fn Of(comptime Item: type) type {
         state: aegis.BlockingGuarded(State),
         /// The most spares that may be started.
         cap: u32,
-        /// Moves on every post and at stop: what waiting threads wait on.
-        // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-        signal: std.atomic.Value(u32) = .init(0),
+        /// Moves on every post and at stop, a count that wraps: what waiting
+        /// threads wait on.
+        signal: aegis.Atomic(aegis.units.Count(Spares, u32)) = .init(.fromRaw(0)),
 
         pub fn init(gpa: Allocator, processors: usize, cap: u16) Allocator.Error!Spares {
             var waiting = try fixed(*Item, gpa, processors);
@@ -93,9 +93,9 @@ pub fn Of(comptime Item: type) type {
             var pointer = p;
             var held = sp.state.acquireUncancelable(system());
             held.value().waiting.append(&pointer) catch aegis.assert.invariant(false, "a processor was posted that no spare was promised for");
-            _ = sp.signal.fetchAdd(1, .release);
+            _ = sp.signal.fetchAddWrapping(.fromRaw(1), .release);
             held.deinit(system());
-            system().futexWake(u32, &sp.signal.raw, 1);
+            sp.signal.wake(system(), 1);
         }
 
         /// A processor for the calling thread, or null once `stopping` is set.
@@ -120,15 +120,15 @@ pub fn Of(comptime Item: type) type {
                 }
                 const seen = sp.signal.load(.acquire);
                 held.deinit(system());
-                system().futexWaitUncancelable(u32, &sp.signal.raw, seen);
+                sp.signal.waitUncancelable(system(), seen);
                 held = sp.state.acquireUncancelable(system());
             }
         }
 
         /// At stop: every waiting thread returns, and every started spare is joined.
         pub fn stop(sp: *Spares) void {
-            _ = sp.signal.fetchAdd(1, .release);
-            system().futexWake(u32, &sp.signal.raw, std.math.maxInt(u32));
+            _ = sp.signal.fetchAddWrapping(.fromRaw(1), .release);
+            sp.signal.wake(system(), std.math.maxInt(u32));
             while (true) {
                 var thread: std.Thread = undefined;
                 {

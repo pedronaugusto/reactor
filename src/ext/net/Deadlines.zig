@@ -38,17 +38,18 @@ const Watching = struct {
 watching: aegis.BlockingGuarded(Watching) = .init(.{}),
 /// Watches with an operation armed.
 armed: aegis.Atomic(Armed) = .init(.fromRaw(0)),
-/// 1 while the task waits for an operation to be armed; the futex it
-/// waits on.
-// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-parked: std.atomic.Value(u32) = .init(0),
+/// Whether the task waits for an operation to be armed; the futex it waits
+/// on.
+parked: aegis.Atomic(Parked) = .init(.running),
 /// How often the task looks at the armed deadlines. It only shortens, and
 /// `tighten` is what does.
 tick: aegis.Atomic(clock.Span),
-/// Bumped to cut the task's wait between ticks short; the futex it waits
-/// on.
-// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-nudge: std.atomic.Value(u32) = .init(0),
+/// Bumped to cut the task's wait between ticks short, a count that wraps;
+/// the futex it waits on.
+nudge: aegis.Atomic(Nudges) = .init(.fromRaw(0)),
+
+const Parked = enum(u32) { running, parked };
+const Nudges = aegis.units.Count(Deadlines, u32);
 
 const unarmed: clock.Awake = .fromRaw(0);
 /// What an `Awake` of zero is armed as: the first nanosecond.
@@ -118,8 +119,8 @@ pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
     var current = d.tick.load(.monotonic);
     while (want.compare(current) == .lt) {
         current = d.tick.cmpxchgWeak(current, want, .monotonic, .monotonic) orelse {
-            _ = d.nudge.fetchAdd(1, .release);
-            io.futexWake(u32, &d.nudge.raw, 1);
+            _ = d.nudge.fetchAddWrapping(.fromRaw(1), .release);
+            d.nudge.wake(io, 1);
             return;
         };
     }
@@ -208,9 +209,9 @@ fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
     const stamp = if (deadline.clock == .awake) clock.awakeOf(deadline.raw) else clock.carried(deadline.raw, deadline.clock.now(io), Io.Clock.awake.now(io));
     // Zero means unarmed, so a deadline at the very start is the next tick.
     w.deadline.store(if (stamp.eql(unarmed)) soonest else stamp, .release);
-    if (d.armed.fetchAddWrapping(.fromRaw(1), .seq_cst).eql(.fromRaw(0)) and d.parked.load(.seq_cst) == 1) {
-        d.parked.store(0, .seq_cst);
-        io.futexWake(u32, &d.parked.raw, 1);
+    if (d.armed.fetchAddWrapping(.fromRaw(1), .seq_cst).eql(.fromRaw(0)) and d.parked.load(.seq_cst) == .parked) {
+        d.parked.store(.running, .seq_cst);
+        d.parked.wake(io, 1);
     }
 }
 
@@ -226,15 +227,15 @@ fn watch(d: *Deadlines, io: Io) void {
             idle_ticks += 1;
             if (idle_ticks > 1) {
                 idle_ticks = 0;
-                d.parked.store(1, .seq_cst);
-                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) io.futexWait(u32, &d.parked.raw, 1) catch return;
-                d.parked.store(0, .seq_cst);
+                d.parked.store(.parked, .seq_cst);
+                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) d.parked.wait(io, .parked) catch return;
+                d.parked.store(.running, .seq_cst);
                 continue;
             }
         } else idle_ticks = 0;
         const seen = d.nudge.load(.acquire);
         const tick = d.tick.load(.monotonic).toIoDuration();
-        io.futexWaitTimeout(u32, &d.nudge.raw, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
+        d.nudge.waitTimeout(io, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
         d.scan(io);
     }
 }

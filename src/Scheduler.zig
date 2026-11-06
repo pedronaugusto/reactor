@@ -179,8 +179,7 @@ pub const Processor = struct {
     /// What the monitor did with the processor (`Lease`), its generation
     /// moving at every change of owner, so a word one owner held it with
     /// never matches under the next.
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    lease: std.atomic.Value(u32) = .init(0),
+    lease: aegis.Atomic(Lease) = .init(.first),
     /// The seat of the thread holding the processor, which the monitor
     /// reads to see whether it is lent.
     owner: aegis.Atomic(?*Seat) = .init(null),
@@ -742,12 +741,12 @@ pub const Processor = struct {
         const word = seatNow().lease;
         // A look of the monitor's may be under way: it ends with the word
         // as it found it.
-        while (p.lease.cmpxchgWeak(word, Lease.with(word, Lease.home_back), .release, .monotonic)) |seen| {
-            assert(seen == word or seen == Lease.with(word, Lease.claimed));
+        while (p.lease.cmpxchgWeak(word, word.with(.home_back), .release, .monotonic)) |seen| {
+            assert(seen == word or seen == word.with(.claimed));
             std.atomic.spinLoopHint();
         }
         leave();
-        system().futexWake(u32, &p.lease.raw, 1);
+        p.lease.wake(system(), 1);
     }
 
     /// The calling thread takes this processor over.
@@ -763,7 +762,7 @@ pub const Processor = struct {
     /// The thread at `holder` holds `p` from here, in the runtime, in a new
     /// generation: no word the last owner held it with matches again.
     pub fn holdFrom(p: *Processor, holder: *Seat) void {
-        const word = Lease.next(p.lease.load(.monotonic)) | Lease.held;
+        const word = p.lease.load(.monotonic).next();
         holder.lease = word;
         holder.stage.store(holder.stage.load(.monotonic).moved(.inside), .monotonic);
         // The owner before the word: a monitor that reads the new word reads
@@ -875,7 +874,7 @@ pub const Seat = struct {
     /// The processor's `lease` word while this thread holds it, its
     /// generation this thread's: any other word says the monitor claimed
     /// it or handed it on.
-    lease: u32 = 0,
+    lease: Lease = .first,
 };
 
 threadlocal var seat: Seat = .{};
@@ -1154,28 +1153,46 @@ pub fn allIdle(s: *const Scheduler) bool {
 // the home processor back. Only where the monitor hands processors on
 // (`Processor.lends`): epoll, kqueue and IOCP, with workers.
 
-/// The states of `Processor.lease`, in its low bits below the generation,
-/// which moves at every change of owner.
-pub const Lease = struct {
-    /// Its owner's: whether it is lent is the owner's `stage`.
-    pub const held: u32 = 0;
-    /// The monitor gave it to a spare thread while its owner had lent it.
-    pub const handed: u32 = 1;
-    /// The home processor, given back to the home thread.
-    pub const home_back: u32 = 2;
-    /// The monitor looks at it while its owner has lent it, to decide
-    /// whether to hand it on; the owner waits for the look to end.
-    pub const claimed: u32 = 3;
-    pub const state: u32 = 3;
+/// `Processor.lease`: its state in the low bits, below a generation that
+/// moves at every change of owner, so a word one owner held it with never
+/// matches under the next.
+pub const Lease = enum(u32) {
+    /// Held by its first owner.
+    first = 0,
+    _,
 
-    /// The generation after `word`'s, with no state.
-    pub fn next(word: u32) u32 {
-        return (word & ~state) +% (state + 1);
+    pub const State = enum(u2) {
+        /// Its owner's: whether it is lent is the owner's `stage`.
+        held,
+        /// The monitor gave it to a spare thread while its owner had lent it.
+        handed,
+        /// The home processor, given back to the home thread.
+        home_back,
+        /// The monitor looks at it while its owner has lent it, to decide
+        /// whether to hand it on; the owner waits for the look to end.
+        claimed,
+    };
+
+    const Word = packed struct(u32) { state: State, generation: u30 };
+
+    pub fn state(l: Lease) State {
+        const word: Word = @bitCast(@backingInt(l));
+        return word.state;
     }
 
-    /// `word` with `new` as its state, its generation kept.
-    pub fn with(word: u32, new: u32) u32 {
-        return (word & ~state) | new;
+    /// The generation after `l`'s, held.
+    pub fn next(l: Lease) Lease {
+        var word: Word = @bitCast(@backingInt(l));
+        word.generation +%= 1;
+        word.state = .held;
+        return @fromBackingInt(@as(u32, @bitCast(word)));
+    }
+
+    /// `l` with `new` as its state, its generation kept.
+    pub fn with(l: Lease, new: State) Lease {
+        var word: Word = @bitCast(@backingInt(l));
+        word.state = new;
+        return @fromBackingInt(@as(u32, @bitCast(word)));
     }
 };
 
@@ -1209,7 +1226,7 @@ fn comeBack(own: *Seat) bool {
     while (true) {
         const word = p.lease.load(.seq_cst);
         if (word == own.lease) return true;
-        if (word != Lease.with(own.lease, Lease.claimed)) return false;
+        if (word != own.lease.with(.claimed)) return false;
         std.atomic.spinLoopHint();
     }
 }
@@ -1328,8 +1345,8 @@ pub fn reclaim(p: *Processor) void {
     p.loop.wake();
     while (true) {
         const word = p.lease.load(.acquire);
-        if (word & Lease.state == Lease.home_back) break;
-        system().futexWaitUncancelable(u32, &p.lease.raw, word);
+        if (word.state() == .home_back) break;
+        p.lease.waitUncancelable(system(), word);
     }
     p.remote.home_wants.clear(.monotonic);
     if (heldNow() == null) enter(p);
@@ -1350,14 +1367,14 @@ fn relocated(s: *Scheduler, t: *Task) void {
 /// home thread asking for it. The global queue is any processor's, and an
 /// idle one is woken for it. False when it has nothing, there is no thread
 /// to hand it to, or the owner came back into the runtime or changed.
-pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: Stage) bool {
-    if (word & Lease.state != Lease.held) return false;
+pub fn handOff(s: *Scheduler, p: *Processor, word: Lease, owner: *Seat, stage: Stage) bool {
+    if (word.state() != .held) return false;
     // A thread first, outside the claim: starting one is slow, and the owner
     // waits on a claim.
     if (!s.spares.reserve(serveThread, s)) return false;
     // `word` is the generation `owner` and `stage` were read under: a
     // processor another thread took over since has another.
-    if (p.lease.cmpxchgStrong(word, Lease.with(word, Lease.claimed), .seq_cst, .monotonic) != null) return false;
+    if (p.lease.cmpxchgStrong(word, word.with(.claimed), .seq_cst, .monotonic) != null) return false;
     // The owner came back meanwhile: it may be touching the processor.
     if (owner.stage.load(.seq_cst) != stage) {
         p.lease.store(word, .release);
@@ -1369,7 +1386,7 @@ pub fn handOff(s: *Scheduler, p: *Processor, word: u32, owner: *Seat, stage: Sta
         p.lease.store(word, .release);
         return false;
     }
-    p.lease.store(Lease.with(word, Lease.handed), .release);
+    p.lease.store(word.with(.handed), .release);
     s.spares.post(p);
     return true;
 }

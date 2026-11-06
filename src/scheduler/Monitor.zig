@@ -15,6 +15,9 @@
 //! after its lending began, so 10 ms at most after the monitor last looked.
 const Monitor = @This();
 
+/// The wakes sent to the monitor.
+const Wakes = aegis.units.Count(Monitor, u32);
+
 /// Stalls ever recorded.
 const Stalls = aegis.units.Count(Stall, u64);
 /// Processors' work handed to another thread.
@@ -62,9 +65,8 @@ handoff_after: clocks.Span,
 report_after: ?clocks.Span,
 handoff: bool,
 thread: ?std.Thread = null,
-/// What the monitor sleeps on: moved to wake it early.
-// aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-word: std.atomic.Value(u32) = .init(0),
+/// What the monitor sleeps on: moved to wake it early, a count that wraps.
+word: aegis.Atomic(Wakes) = .init(.fromRaw(0)),
 /// Sleeping longer than the shortest interval, or parked: a blocking call
 /// or a processor waking up wakes it.
 slow: Raised = .{},
@@ -106,16 +108,16 @@ fn now() clocks.Awake {
 pub fn poke(m: *Monitor) void {
     if (!m.slow.raised(.monotonic)) return;
     m.slow.clear(.monotonic);
-    _ = m.word.fetchAdd(1, .release);
-    system().futexWake(u32, &m.word.raw, 1);
+    _ = m.word.fetchAddWrapping(.fromRaw(1), .release);
+    m.word.wake(system(), 1);
 }
 
 /// At stop, before any processor's thread may end: the monitor reads their
 /// seats.
 pub fn stop(m: *Monitor) void {
     _ = m.quit.raise(.release);
-    _ = m.word.fetchAdd(1, .release);
-    system().futexWake(u32, &m.word.raw, 1);
+    _ = m.word.fetchAddWrapping(.fromRaw(1), .release);
+    m.word.wake(system(), 1);
     if (m.thread) |t| t.join();
     m.thread = null;
 }
@@ -138,7 +140,7 @@ pub fn run(m: *Monitor, s: anytype) void {
             _ = m.slow.raise(.monotonic);
             // A processor that leaves its kernel wait after this check
             // sees `parked` and wakes the monitor.
-            if (s.allIdle() and !m.quit.raised(.acquire)) system().futexWaitUncancelable(u32, &m.word.raw, seen);
+            if (s.allIdle() and !m.quit.raised(.acquire)) m.word.waitUncancelable(system(), seen);
             m.parked.clear(.monotonic);
             delay = shortest;
             continue;
@@ -146,7 +148,7 @@ pub fn run(m: *Monitor, s: anytype) void {
         if (delay.compare(shortest) == .gt) {
             _ = m.slow.raise(.monotonic);
         } else m.slow.clear(.monotonic);
-        system().futexWaitTimeout(u32, &m.word.raw, seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
+        m.word.waitTimeout(system(), seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
         if (m.word.load(.acquire) != seen) delay = shortest;
     }
 }

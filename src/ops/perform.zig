@@ -7,6 +7,7 @@
 //! timer on the same processor that asks the kernel to end the operation
 //! the same way.
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -318,7 +319,7 @@ pub fn runElsewhere(p: *Processor, o: *Loop.Op, at: ?Io.Clock.Timestamp) error{ 
     defer o.completion = null;
     p.send(&e.errand);
     const system = Scheduler.system();
-    while (e.done.load(.acquire) == 0) system.futexWaitUncancelable(u32, &e.done.raw, 0);
+    while (e.done.load(.acquire) == .waiting) e.done.waitUncancelable(system, .waiting);
     if (e.failed) return error.SystemResources;
     if (e.timed_out and canceledResult(o)) return error.Timeout;
 }
@@ -337,8 +338,8 @@ const Elsewhere = struct {
     left: u8 = 1,
     timed_out: bool = false,
     failed: bool = false,
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    done: std.atomic.Value(u32) = .init(0),
+    /// Set when the processor has finished the errand, for the waiting thread.
+    done: aegis.Atomic(Task.Awaiter.Done) = .init(.waiting),
 
     fn start(errand: *Scheduler.Errand, p: *Processor) void {
         const e: *Elsewhere = @alignCast(@fieldParentPtr("errand", errand)); // safe: the field belongs to this record
@@ -388,7 +389,7 @@ const Elsewhere = struct {
     }
 
     fn signal(e: *Elsewhere) void {
-        e.done.store(1, .release);
-        Scheduler.system().futexWake(u32, &e.done.raw, 1);
+        e.done.store(.done, .release);
+        e.done.wake(Scheduler.system(), 1);
     }
 };

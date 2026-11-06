@@ -54,6 +54,9 @@ const Bucket = aegis.Guarded(Chain);
 
 const Outcome = enum(u8) { waiting, woken, canceled, timed_out };
 
+/// Whether a thread waiting off the runtime has been woken.
+const Woken = enum(u32) { waiting, woken };
+
 const Waiter = struct {
     next: ?*Waiter = null,
     prev: ?*Waiter = null,
@@ -62,9 +65,8 @@ const Waiter = struct {
     outcome: Outcome = .waiting,
     /// The parked task, or null for a thread outside the runtime.
     task: ?*Task,
-    /// A thread's: set to 1 when it is woken.
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    word: std.atomic.Value(u32) = .init(0),
+    /// A thread's: set when it is woken.
+    word: aegis.Atomic(Woken) = .init(.waiting),
     bucket: *Bucket,
     scheduler: *Scheduler,
     hook: Task.Hook = .{ .cancel = cancelHook },
@@ -160,16 +162,16 @@ fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout
     held.deinit();
     const sys = Scheduler.system();
     const outcome: error{Canceled}!void = if (cancelable)
-        sys.futexWaitTimeout(u32, &w.word.raw, 0, timeout.toDeadline(sys))
+        w.word.waitTimeout(sys, .waiting, timeout.toDeadline(sys))
     else
-        sys.futexWaitUncancelable(u32, &w.word.raw, 0);
+        w.word.waitUncancelable(sys, .waiting);
     held = b.acquire();
     const still = w.linked;
     if (still) held.value().remove(&w);
     held.deinit();
     // A waker unlinked it and will set the word: wait for that, so the
     // waker never writes to a frame that is gone.
-    if (!still) while (w.word.load(.acquire) == 0) sys.futexWaitUncancelable(u32, &w.word.raw, 0);
+    if (!still) while (w.word.load(.acquire) == .waiting) w.word.waitUncancelable(sys, .waiting);
     return outcome;
 }
 
@@ -199,8 +201,8 @@ pub fn wake(table: *Table, ptr: *const u32, max: u32) void {
         if (w.task) |t| {
             w.scheduler.ready(t, .woken);
         } else {
-            w.word.store(1, .release);
-            Scheduler.system().futexWake(u32, &w.word.raw, 1);
+            w.word.store(.woken, .release);
+            w.word.wake(Scheduler.system(), 1);
         }
     }
 }

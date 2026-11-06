@@ -11,6 +11,7 @@
 //! handles' bindings.
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const getaddrinfo = @import("../sys/getaddrinfo.zig");
 const stub = @import("../ops/resolve.zig");
 const lookup_windows = @import("../ops/lookup/windows.zig");
@@ -322,8 +323,8 @@ fn abortElsewhere(r: *Core, fd: Io.File.Handle) void {
         } else {
             other.send(&a.errand);
             const system = Scheduler.system();
-            while (a.finished.load(.acquire) != 2) {
-                if (a.finished.load(.acquire) == 0) system.futexWaitUncancelable(u32, &a.finished.raw, 0) else std.atomic.spinLoopHint();
+            while (a.finished.load(.acquire) != .released) {
+                if (a.finished.load(.acquire) == .pending) a.finished.waitUncancelable(system, .pending) else std.atomic.spinLoopHint();
             }
         }
     }
@@ -336,8 +337,9 @@ const Abort = struct {
     completion: Loop.Completion = .{ .run = done },
     op: Loop.Op,
     task: ?*Task,
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    finished: std.atomic.Value(u32) = .init(0),
+    /// Pending, then waking while `finish` still touches the record, then
+    /// released: the waiting thread may let the record go.
+    finished: aegis.Atomic(Finish) = .init(.pending),
     scheduler: *Scheduler,
     target: *Processor = undefined,
 
@@ -363,10 +365,12 @@ const Abort = struct {
 
     fn finish(a: *Abort) void {
         if (a.task) |task| return a.scheduler.ready(task, .completed);
-        a.finished.store(1, .release);
-        Scheduler.system().futexWake(u32, &a.finished.raw, 1);
-        a.finished.store(2, .release);
+        a.finished.store(.waking, .release);
+        a.finished.wake(Scheduler.system(), 1);
+        a.finished.store(.released, .release);
     }
+
+    const Finish = enum(u32) { pending, waking, released };
 };
 
 pub fn netAccept(userdata: ?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {

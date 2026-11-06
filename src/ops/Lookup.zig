@@ -16,11 +16,12 @@ pub const capacity = 64;
 pub const Provider = *const fn ([]const u8, u16, ?net.IpAddress.Family, []net.IpAddress, ?*[254]u8) getaddrinfo.Error!getaddrinfo.Result;
 pub const Result = struct { count: usize, canonical: ?net.HostName = null };
 const State = enum(u8) { pending, completed, canceled };
+const Finished = enum(u32) { running, finished };
 
 const Record = struct {
     occupied: Raised = .{},
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    finished: std.atomic.Value(u32) = .init(1),
+    /// Whether the lookup has finished; a free record's has.
+    finished: aegis.Atomic(Finished) = .init(.finished),
     published: Raised = .{},
     notified: Raised = .{},
     state: aegis.Atomic(State) = .init(.pending),
@@ -66,8 +67,8 @@ const Record = struct {
     fn done(job: *Lanes.Job) void {
         const r: *Record = @alignCast(@fieldParentPtr("job", job)); // safe: the job belongs to this request
         const completed = r.state.cmpxchgStrong(.pending, .completed, .seq_cst, .seq_cst) == null;
-        r.finished.store(1, .release);
-        Io.Threaded.global_single_threaded.io().futexWake(u32, &r.finished.raw, 1);
+        r.finished.store(.finished, .release);
+        r.finished.wake(Io.Threaded.global_single_threaded.io(), 1);
         if (completed) r.notify();
     }
 };
@@ -84,7 +85,7 @@ pub fn init(gpa: Allocator, count: u32) Allocator.Error!Lookup {
 pub fn deinit(l: *Lookup, gpa: Allocator, lanes: *Lanes) void {
     const system = Io.Threaded.global_single_threaded.io();
     for (l.records) |*r| {
-        while (r.finished.load(.acquire) == 0) system.futexWaitUncancelable(u32, &r.finished.raw, 0);
+        while (r.finished.load(.acquire) == .running) r.finished.waitUncancelable(system, .running);
         r.job.group.await(lanes.executor(.lookup)) catch unreachable; // unreachable: shutdown runs outside a cancelable Threaded task
     }
     for (l.records) |*r| lanes.retire(&r.job);
@@ -95,7 +96,7 @@ pub fn deinit(l: *Lookup, gpa: Allocator, lanes: *Lanes) void {
 fn acquire(l: *Lookup) ?*Record {
     for (l.records) |*r| {
         if (r.occupied.raise(.acquire)) continue;
-        if (r.finished.load(.acquire) == 0 or r.job.held()) {
+        if (r.finished.load(.acquire) == .running or r.job.held()) {
             r.occupied.clear(.release);
             continue;
         }
@@ -130,7 +131,7 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
         lanes.retire(&r.job);
         return err;
     };
-    r.finished.store(0, .release);
+    r.finished.store(.running, .release);
     r.job.pending.store(.fromRaw(1), .monotonic);
     Scheduler.park(&r.after);
     t.leaveWait();

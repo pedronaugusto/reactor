@@ -150,9 +150,10 @@ pub const Awaiter = struct {
     /// While it waits for a group: the group's listed members, whose first
     /// the group's `state` gives up to the awaiter.
     members: ?*Task = null,
-    /// Set to 1 when the future finishes, for a waiting thread.
-    // aegis: boundary(A007): a futex word: the kernel waits on this u32's address
-    done: std.atomic.Value(u32) = .init(0),
+    /// Set when the future finishes, for a waiting thread.
+    done: aegis.Atomic(Done) = .init(.waiting),
+
+    pub const Done = enum(u32) { waiting, done };
 };
 
 pub const Protection = packed struct(u2) {
