@@ -366,7 +366,7 @@ fn listedOf(g: *Io.Group) *?*Task {
 /// The group's awaiter, if it is awaited. Under the lock.
 fn awaiterOf(g: *Io.Group) ?*Awaiter {
     if (g.state & group_awaited == 0) return null;
-    // aegis: boundary(A019): std.Io implementation contract: Io.Group gives the implementation one word, `state`, where this runtime keeps the awaiter, its low bit set, while the group is awaited
+    // aegis: design(A019): std.Io implementation contract: Io.Group gives the implementation one word, `state`, where this runtime keeps the awaiter, its low bit set, while the group is awaited
     return @ptrFromInt(g.state & ~group_awaited);
 }
 
