@@ -101,8 +101,10 @@ const Late = struct {
     }
     fn release() void {
         var threaded: Io.Threaded = .init_single_threaded;
-        // glint-ignore: Z026 -- a sleep cut short releases the task sooner, which the test reads the same way
-        threaded.io().sleep(.fromMilliseconds(10), .awake) catch {};
+        threaded.io().sleep(.fromMilliseconds(10), .awake) catch |err| switch (err) {
+            // The cancel stays asked for, at the thread's next cancelation point; the task is let go either way.
+            error.Canceled => threaded.io().recancel(),
+        };
         go.store(true, .release);
     }
 };

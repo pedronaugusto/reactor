@@ -23,14 +23,6 @@ pub const pipe_unlimited_instances: windows.DWORD = 255;
 /// reads.
 pub const sddl_revision_1: windows.DWORD = 1;
 
-pub const error_file_not_found: windows.DWORD = 2;
-pub const error_access_denied: windows.DWORD = 5;
-pub const error_invalid_name: windows.DWORD = 123;
-pub const error_pipe_busy: windows.DWORD = 231;
-pub const error_bad_pathname: windows.DWORD = 161;
-pub const error_invalid_parameter: windows.DWORD = 87;
-pub const error_not_enough_memory: windows.DWORD = 8;
-
 /// `FSCTL_PIPE_LISTEN`: a server instance waits for a client, overlapped
 /// on a handle opened so; `PIPE_CONNECTED` when one came before the wait.
 pub const fsctl_pipe_listen: windows.CTL_CODE = .{
@@ -81,5 +73,3 @@ pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
 
 // aegis: boundary(A019): kernel32's LocalFree, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-// aegis: boundary(A019): kernel32's GetLastError, declared as Microsoft's Win32 documentation gives it
-pub extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;

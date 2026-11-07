@@ -332,7 +332,7 @@ pub fn io(c: *Core) Io {
 
 /// The core an `Io.userdata` is.
 pub fn of(userdata: ?*anyopaque) *Core {
-    // aegis: boundary(A019): std.Io implementation contract: the vtable's functions get back the userdata `io` gave, a `Core`, as `?*anyopaque`. Not covered: Runtime.recognize and native.runtimeOf, which read it after `slots.isRuntime`, wait on aegis's ptr+vtable exception
+    // std.Io implementation contract: the vtable's functions get back the userdata `io` gave, a `Core`, as `?*anyopaque`. Not covered: Runtime.recognize and native.runtimeOf, which read it after `slots.isRuntime`, wait on aegis's ptr+vtable exception
     return @ptrCast(@alignCast(userdata.?));
 }
 

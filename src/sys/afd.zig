@@ -83,9 +83,8 @@ fn answered(handle: Handle, code: windows.CTL_CODE, in: []const u8, out: []u8) A
     var iosb: windows.IO_STATUS_BLOCK = .{ .u = .{ .Status = .PENDING }, .Information = 0 };
     const status = windows.ntdll.NtDeviceIoControlFile(handle, null, null, null, &iosb, code, if (in.len > 0) in.ptr else null, @intCast(in.len), if (out.len > 0) out.ptr else null, @intCast(out.len));
     if (status != .PENDING) return .{ .status = status, .len = iosb.Information };
-    const status_word: *const u32 = @ptrCast(&iosb.u.Status); // aegis: boundary(A019): the status is a 32-bit word the kernel writes
     // aegis: boundary(A007): the kernel writes the status block's word as the call completes, so it is read atomically where it lies
-    while (@atomicLoad(u32, status_word, .acquire) == @backingInt(Status.PENDING)) _ = windows.ntdll.NtYieldExecution();
+    while (@atomicLoad(windows.NTSTATUS, &iosb.u.Status, .acquire) == .PENDING) _ = windows.ntdll.NtYieldExecution();
     return .{ .status = iosb.u.Status, .len = iosb.Information };
 }
 

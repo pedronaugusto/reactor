@@ -49,7 +49,7 @@ pub const AttachError = error{ AlreadyAttached, Unsupported, SystemResources, Un
 pub fn attach(io: Io, job: windows.HANDLE) AttachError!Job {
     if (!is_windows) return error.Unsupported;
     var duplicate: windows.HANDLE = undefined;
-    const process = win32.GetCurrentProcess();
+    const process = windows.GetCurrentProcess();
     if (win32.DuplicateHandle(process, job, process, &duplicate, 0, .FALSE, 2) == .FALSE) return error.SystemResources;
     errdefer windows.CloseHandle(duplicate);
     if (comptime is_windows and supported) {
@@ -74,8 +74,8 @@ pub fn attach(io: Io, job: windows.HANDLE) AttachError!Job {
 
 fn associate(job: windows.HANDLE, key: usize, port: ?windows.HANDLE) AttachError!void {
     const association: win32.JobObjectAssociateCompletionPort = .{ .CompletionKey = key, .CompletionPort = port };
-    if (win32.SetInformationJobObject(job, win32.job_object_associate_completion_port_information, &association, @sizeOf(win32.JobObjectAssociateCompletionPort)) == .FALSE) return switch (win32.GetLastError()) {
-        win32.error_invalid_parameter => error.AlreadyAttached,
+    if (win32.SetInformationJobObject(job, win32.job_object_associate_completion_port_information, &association, @sizeOf(win32.JobObjectAssociateCompletionPort)) == .FALSE) return switch (windows.GetLastError()) {
+        .INVALID_PARAMETER => error.AlreadyAttached,
         else => error.Unexpected,
     };
 }

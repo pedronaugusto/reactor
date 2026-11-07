@@ -62,8 +62,8 @@ fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectErro
         try io.checkCancel();
         const handle = pipe_windows.CreateFileW(name, pipe_windows.generic_read | pipe_windows.generic_write, 0, null, pipe_windows.open_existing, pipe_windows.file_flag_overlapped, null);
         if (handle != windows.INVALID_HANDLE_VALUE) return .init(.{ .handle = handle, .flags = .{ .nonblocking = true } });
-        switch (pipe_windows.GetLastError()) {
-            pipe_windows.error_pipe_busy => {
+        switch (windows.GetLastError()) {
+            .PIPE_BUSY => {
                 var wait = busy_retry;
                 if (deadline) |d| {
                     const left = clock.spanOf(Io.Clock.Timestamp.now(io, d.clock).durationTo(d).raw);
@@ -72,9 +72,9 @@ fn connectWindows(io: Io, path: []const u8, options: ConnectOptions) ConnectErro
                 }
                 try io.sleep(wait, .awake);
             },
-            pipe_windows.error_file_not_found => return error.FileNotFound,
-            pipe_windows.error_access_denied => return error.AccessDenied,
-            pipe_windows.error_invalid_name, pipe_windows.error_bad_pathname => return error.InvalidPipeName,
+            .FILE_NOT_FOUND => return error.FileNotFound,
+            .ACCESS_DENIED => return error.AccessDenied,
+            .INVALID_NAME, .BAD_PATHNAME => return error.InvalidPipeName,
             else => return error.Unexpected,
         }
     }
@@ -175,10 +175,10 @@ pub const PipeListener = struct {
         const pipe_mode = pipe_windows.pipe_type_byte | pipe_windows.pipe_readmode_byte | pipe_windows.pipe_wait | pipe_windows.pipe_reject_remote_clients;
         const handle = pipe_windows.CreateNamedPipeW(l.name[0..l.name_len :0], open_mode, pipe_mode, pipe_windows.pipe_unlimited_instances, l.buffer_size, l.buffer_size, 0, if (l.descriptor != null) &attributes else null);
         if (handle != windows.INVALID_HANDLE_VALUE) return .init(.{ .handle = handle, .flags = .{ .nonblocking = true } });
-        return switch (pipe_windows.GetLastError()) {
-            pipe_windows.error_access_denied => if (first) error.AddressInUse else error.AccessDenied,
-            pipe_windows.error_invalid_name, pipe_windows.error_bad_pathname => error.InvalidPipeName,
-            pipe_windows.error_not_enough_memory => error.SystemResources,
+        return switch (windows.GetLastError()) {
+            .ACCESS_DENIED => if (first) error.AddressInUse else error.AccessDenied,
+            .INVALID_NAME, .BAD_PATHNAME => error.InvalidPipeName,
+            .NOT_ENOUGH_MEMORY => error.SystemResources,
             else => error.Unexpected,
         };
     }
@@ -222,8 +222,10 @@ pub fn disconnect(io: Io, server_end: Io.File) void {
 }
 
 fn disconnectWindows(io: Io, server_end: Io.File) void {
-    // glint-ignore: Z026 -- an instance that cannot be disconnected has no client, which is what this asks
-    _ = io.operate(.{ .device_io_control = .{ .file = server_end, .code = pipe_windows.fsctl_pipe_disconnect } }) catch {};
+    // An instance that cannot be disconnected has no client, which is what this asks; a cancel stays asked for.
+    _ = io.operate(.{ .device_io_control = .{ .file = server_end, .code = pipe_windows.fsctl_pipe_disconnect } }) catch |err| switch (err) {
+        error.Canceled => return io.recancel(),
+    };
 }
 
 /// What `readPipeWithin` found.

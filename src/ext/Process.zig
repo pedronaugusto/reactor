@@ -35,10 +35,10 @@ pub const OpenError = error{ ProcessNotFound, SystemResources, Unexpected };
 pub fn open(io: Io, id: std.process.Child.Id) OpenError!Process {
     _ = io;
     if (is_windows) {
-        const me = win32.GetCurrentProcess();
+        const me = windows.GetCurrentProcess();
         var copy: windows.HANDLE = undefined;
-        if (win32.DuplicateHandle(me, id, me, &copy, win32.synchronize, .FALSE, 0) == .FALSE) return switch (win32.GetLastError()) {
-            win32.error_invalid_parameter, win32.error_access_denied => error.ProcessNotFound,
+        if (win32.DuplicateHandle(me, id, me, &copy, win32.synchronize, .FALSE, 0) == .FALSE) return switch (windows.GetLastError()) {
+            .INVALID_PARAMETER, .ACCESS_DENIED => error.ProcessNotFound,
             else => error.Unexpected,
         };
         return .{ .watch = copy, .id = id };

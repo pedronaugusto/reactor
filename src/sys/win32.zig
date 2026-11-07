@@ -33,8 +33,6 @@ pub extern "kernel32" fn WaitForMultipleObjects(
     dwMilliseconds: windows.DWORD,
 ) callconv(.winapi) windows.DWORD;
 
-// aegis: boundary(A019): kernel32's GetCurrentProcess, declared as Microsoft's Win32 documentation gives it
-pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) windows.HANDLE;
 pub const synchronize: windows.DWORD = 0x0010_0000;
 // aegis: boundary(A019): kernel32's DuplicateHandle, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn DuplicateHandle(
@@ -95,11 +93,6 @@ pub const job_msg = struct {
     pub const process_memory_limit: windows.DWORD = 9;
     pub const job_memory_limit: windows.DWORD = 10;
 };
-
-// aegis: boundary(A019): kernel32's GetLastError, declared as Microsoft's Win32 documentation gives it
-pub extern "kernel32" fn GetLastError() callconv(.winapi) windows.DWORD;
-pub const error_invalid_parameter: windows.DWORD = 87;
-pub const error_access_denied: windows.DWORD = 5;
 
 pub const HandlerRoutine = *const fn (dwCtrlType: windows.DWORD) callconv(.winapi) windows.BOOL;
 // aegis: boundary(A019): kernel32's SetConsoleCtrlHandler, declared as Microsoft's Win32 documentation gives it
