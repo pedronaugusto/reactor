@@ -20,10 +20,16 @@ pub fn abort(io: Io, socket: Io.net.Socket.Handle) void {
             .code = windows.IOCTL.AFD.PARTIAL_DISCONNECT,
             .in = std.mem.asBytes(&info),
         } };
-        // glint-ignore: Z026 -- a socket that cannot be disconnected is ended already, which is what this asks
-        _ = io.operate(operation) catch {};
+        // A socket that cannot be disconnected is ended already, which is what this asks; a cancel stays asked for.
+        _ = io.operate(operation) catch |err| switch (err) {
+            error.Canceled => return io.recancel(),
+        };
         return;
     }
-    // glint-ignore: Z026 -- a socket that cannot be shut down is ended already, which is what this asks
-    io.vtable.netShutdown(io.userdata, socket, .both) catch {};
+    io.vtable.netShutdown(io.userdata, socket, .both) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+        error.ConnectionAborted, error.ConnectionResetByPeer, error.SocketUnconnected => {},
+        // glint-ignore: Z026 -- a socket that cannot be shut down is ended already, which is what this asks
+        error.NetworkDown, error.SystemResources, error.Unexpected => {},
+    };
 }

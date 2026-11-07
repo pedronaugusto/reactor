@@ -513,10 +513,10 @@ test "a write larger than the socket's buffers waits for the reader instead of h
 /// Writes nothing to `file` over and over: each completes at once, so the
 /// task spends its budget and yields, without ever waiting. Records the
 /// threads it ran on other than `home`.
-fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value(bool), away: *std.atomic.Value(u32)) Io.Cancelable!void {
+fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value(bool), away: *std.atomic.Value(u32)) !void {
     while (!stop.load(.acquire)) {
-        // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
-        _ = (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming catch {};
+        // An empty write completes at once; only that it yields matters here.
+        _ = try (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming;
         if (current_thread.now() != home) _ = away.fetchAdd(1, .monotonic);
     }
 }
@@ -541,8 +541,8 @@ test "a task behind the root on the home processor is offered to an idle process
         // million of them in less than an idle worker takes to wake.
         const until = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
         while (away.load(.monotonic) == 0 and std.Io.Clock.awake.now(io).nanoseconds < until.nanoseconds) {
-            // glint-ignore: Z026 -- an empty write completes at once; only that it yields matters here
-            _ = (try io.operate(.{ .file_write_streaming = .{ .file = write_end, .data = &.{""} } })).file_write_streaming catch {};
+            // An empty write completes at once; only that it yields matters here.
+            _ = try (try io.operate(.{ .file_write_streaming = .{ .file = write_end, .data = &.{""} } })).file_write_streaming;
         }
         stop.store(true, .release);
         try task.await(io);

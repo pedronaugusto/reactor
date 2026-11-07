@@ -133,7 +133,7 @@ fn writeTotal(data: []const []const u8, splat: usize) usize {
 pub fn isStream(fd: posix.fd_t) bool {
     var kind: i32 = 0;
     var len: posix.socklen_t = @sizeOf(i32);
-    const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, @ptrCast(&kind), &len); // aegis: boundary(A019): the option is an int, its length given
+    const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.TYPE, std.mem.asBytes(&kind), &len); // the option is an int, its length given
     return posix.errno(rc) == .SUCCESS and kind == posix.SOCK.STREAM;
 }
 
@@ -303,7 +303,7 @@ fn netReceive(r: Io.Operation.NetReceive) ?struct { ?net.Socket.ReceiveError, us
                 message.* = .{
                     .from = Threaded.addressFromPosix(&storage),
                     .data = r.data_buffer[0..@intCast(rc)],
-                    .control = if (msg.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..msg.controllen] else message.control, // aegis: boundary(A019): the caller's control buffer, as the kernel filled it
+                    .control = message.control[0..msg.controllen], // the caller's control buffer, as the kernel filled it
                     .flags = .{
                         .eor = msg.flags & posix.MSG.EOR != 0,
                         .trunc = msg.flags & posix.MSG.TRUNC != 0,
@@ -576,7 +576,7 @@ pub fn connected(fd: posix.fd_t) ConnectError!void {
     var err: i32 = 0;
     var len: posix.socklen_t = @sizeOf(i32);
     while (true) {
-        const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&err), &len); // aegis: boundary(A019): the option is an int, its length given
+        const rc = posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, std.mem.asBytes(&err), &len); // the option is an int, its length given
         switch (posix.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,

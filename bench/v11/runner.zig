@@ -100,8 +100,14 @@ const Watchdog = struct {
         const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(120), .clock = .awake });
         while (w.done.load(.acquire) == 0) {
             if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= deadline.raw.nanoseconds) break;
-            // glint-ignore: Z026 -- a timed futex wait ends by wake, timeout or error alike, and the loop reads the flag it waited on
-            io.futexWaitTimeout(u32, &w.done.raw, 0, .{ .deadline = deadline }) catch {};
+            // A wake or the deadline ends the wait alike: the loop reads the flag it waited on.
+            io.futexWaitTimeout(u32, &w.done.raw, 0, .{ .deadline = deadline }) catch |err| switch (err) {
+                // A canceled watchdog watches no more; the cancel stays asked for.
+                error.Canceled => {
+                    io.recancel();
+                    return;
+                },
+            };
         }
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;

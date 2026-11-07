@@ -521,8 +521,11 @@ fn accepts(r: Report, io: Io, c: Config) !void {
         // and the client's ports are free again at once.
         var byte: [1]u8 = undefined;
         var data: [1][]u8 = .{&byte};
-        // glint-ignore: Z026 -- the server closed first, so the read ends in end of stream or a reset, and either is the end this wants
-        _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
+        // The server closed first, so the read ends at end of stream or in a reset: either is the end this wants.
+        _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch |err| switch (err) {
+            error.ConnectionResetByPeer => 0,
+            else => |other| return other,
+        };
         stream.close(io);
     }
     try acceptor.await(io);
@@ -755,8 +758,11 @@ fn connectOptions(r: Report, io: Io, c: Config) !void {
             const stream = connected.borrow().*;
             var byte: [1]u8 = undefined;
             var data: [1][]u8 = .{&byte};
-            // glint-ignore: Z026 -- the server closed first, so the read ends in end of stream or a reset, and either is the end this wants
-            _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch {};
+            // The server closed first, so the read ends at end of stream or in a reset: either is the end this wants.
+            _ = (try io.operate(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } })).net_read catch |err| switch (err) {
+                error.ConnectionResetByPeer => 0,
+                else => |other| return other,
+            };
             connected.deinit(io);
         }
         try acceptor.await(io);

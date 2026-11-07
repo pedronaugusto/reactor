@@ -80,7 +80,7 @@ fn failure(comptime E: type, err: linux.E) E {
     return error.Unexpected;
 }
 
-// aegis: boundary(A015): std.Io implementation contract: the vtable returns the opened File by value, to the caller of Dir.openFile, which owns it
+// std.Io implementation contract: the vtable returns the opened File by value, to the caller of Dir.openFile, which owns it
 fn open(core: *Core, dir: Io.Dir, path: []const u8, flags: linux.O, mode: linux.mode_t) Io.File.OpenError!Io.File {
     var path_buffer: [std.posix.PATH_MAX]u8 = undefined;
     const terminated = try Io.Threaded.pathToPosix(path, &path_buffer);

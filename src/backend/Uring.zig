@@ -826,7 +826,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
             u.submitPending(token, operation) catch sink.completePending(token, .{ .result = results.failure(operation) });
         },
         .wake => {
-            _ = linux.read(u.wake_fd, @ptrCast(&u.wake_buffer), 8); // aegis: boundary(A019): eight bytes, as an eventfd reads
+            _ = linux.read(u.wake_fd, std.mem.asBytes(&u.wake_buffer), 8); // eight bytes, as an eventfd reads
             u.wake_pending.clear(.release);
             if (cqe.flags & linux.IORING_CQE_F_MORE == 0) u.wake_armed = false;
         },
@@ -946,7 +946,7 @@ fn armWake(u: *Uring) void {
 pub fn wake(u: *Uring) void {
     if (u.wake_pending.raise(.acq_rel)) return;
     const one: u64 = 1;
-    _ = linux.write(u.wake_fd, @ptrCast(&one), 8); // aegis: boundary(A019): eight bytes, as an eventfd is written
+    _ = linux.write(u.wake_fd, std.mem.asBytes(&one), 8); // eight bytes, as an eventfd is written
 }
 
 /// An eventfd the kernel signals on every completion, for a host's poller.

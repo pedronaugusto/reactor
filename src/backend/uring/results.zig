@@ -91,7 +91,7 @@ fn fillMessage(message: *net.IncomingMessage, data: []u8, address: *const Thread
     message.* = .{
         .from = Threaded.addressFromPosix(address),
         .data = data,
-        .control = if (header.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..header.controllen] else message.control, // aegis: boundary(A019): the control buffer the caller gave, as the kernel filled it
+        .control = message.control[0..header.controllen], // the control buffer the caller gave, as the kernel filled it
         .flags = .{
             .eor = header.flags & posix.MSG.EOR != 0,
             .trunc = header.flags & posix.MSG.TRUNC != 0,
@@ -341,7 +341,7 @@ pub fn attempt(operation: Io.Operation) ?Io.Operation.Result {
             var address: Threaded.PosixAddress = undefined;
             var iov: posix.iovec = .{ .base = r.data_buffer.ptr, .len = r.data_buffer.len };
             const message = &r.message_buffer[0];
-            var msg: linux.msghdr = .{ .name = &address.any, .namelen = @sizeOf(Threaded.PosixAddress), .iov = @ptrCast(&iov), .iovlen = 1, .control = message.control.ptr, .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary(A019): one iovec as an array of one
+            var msg: linux.msghdr = .{ .name = &address.any, .namelen = @sizeOf(Threaded.PosixAddress), .iov = (&iov)[0..1], .iovlen = 1, .control = message.control.ptr, .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary(A019): one iovec as an array of one
             const flags = @as(u32, if (r.flags.oob) posix.MSG.OOB else 0) | @as(u32, if (r.flags.peek) posix.MSG.PEEK else 0) | @as(u32, if (r.flags.trunc) posix.MSG.TRUNC else 0);
             const rc = linux.recvmsg(r.socket_handle, &msg, flags | posix.MSG.DONTWAIT);
             const e = linux.errno(rc);
