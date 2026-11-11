@@ -4,6 +4,7 @@ const testing = std.testing;
 const Io = std.Io;
 const stub = @import("ops/resolve.zig");
 const shakedown = @import("shakedown");
+const reactor = @import("reactor.zig");
 
 fn response(buffer: []u8, query: []const u8, count: u16) []u8 {
     const header_len = query.len - 11;
@@ -302,4 +303,25 @@ test "a cancel that lands as a truncated answer's TCP query is written is Cancel
     try truncated;
     // The TCP query was never sent: the connection closed before it.
     try testing.expectError(error.EndOfStream, streamed);
+}
+
+/// An `Io` whose lookups end canceled at once, the queue closed and empty, as
+/// a lookup task that a cancel reached ends.
+const CanceledLookup = struct {
+    const Layer = shakedown.Layer(State, .{ .netLookup = lookup });
+    const State = struct { canceled: u32 = 0 };
+
+    fn lookup(userdata: ?*anyopaque, _: Io.net.HostName, resolved: *Io.Queue(Io.net.HostName.LookupResult), _: Io.net.HostName.LookupOptions) Io.net.HostName.LookupError!void {
+        const layer = Layer.of(userdata);
+        layer.state.canceled += 1;
+        resolved.close(layer.base);
+        return error.Canceled;
+    }
+};
+
+test "a lookup canceled in its own task is the caller's Canceled, not an unresolved name" {
+    var layer: CanceledLookup.Layer = .init(testing.io, .{});
+    var out: [4]Io.net.IpAddress = undefined;
+    try testing.expectError(error.Canceled, reactor.net.resolve(layer.io(), "canceled.test", 80, .{}, &out));
+    try testing.expectEqual(@as(u32, 1), layer.state.canceled);
 }

@@ -61,7 +61,14 @@ pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpA
     };
     // glint-ignore: Z026 -- the lookup's own error is dropped on the way out: the caller gets the error that ended this call
     defer future.cancel(io) catch {};
-    const found = try drain(io, &queue, options.family, out);
+    const found = drain(io, &queue, options.family, out) catch |err| switch (err) {
+        // The queue closed empty: a lookup that ended canceled says so first.
+        error.NameNotResolved => {
+            future.await(io) catch |lookup| if (lookup == error.Canceled) return error.Canceled;
+            return error.NameNotResolved;
+        },
+        else => |e| return e,
+    };
     future.await(io) catch |err| return switch (err) {
         error.Canceled => error.Canceled,
         else => error.NameNotResolved,

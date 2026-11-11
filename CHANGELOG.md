@@ -22,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A DNS stub lookup canceled while it binds a query's socket or writes a truncated answer's query over TCP is `error.Canceled`, where the bind's cancel moved on to the next server or attempt and the write's read as `NameNotResolved`.
 - A canceled task's wait is `Canceled` whether or not its set is ready: `waitAny`, `wait`, `Wake.wait`, `Job.next`, `Signals.next` and `net.Receiver.next` check for a cancel as they start, as std's own operations do. They returned a ready member, a waiting message, signal or bytes first, so a task looping on a set that stayed ready was never canceled.
 - A Unix socket path that does not fit the system's socket address, 104 bytes with its ending zero on macOS and the BSDs and 108 on Linux, is `NameTooLong` from `net.connectUnix` before any socket is made, where std 0.17's `Io.Threaded` copied it past the room (std's `UnixAddress.max_len` is 108 everywhere). A runtime's own Unix connect answers it `FileNotFound`, as on Windows, where it cut the path to fit and could reach another socket.
+- `net.resolve` on an `Io` that is not reactor's returns `Canceled` when its lookup task ended canceled, where the queue's closing empty made it `NameNotResolved` and the cancel was lost. Found by uplink's fault sweep on shakedown's simulated network.
 
 ### Changed
 
