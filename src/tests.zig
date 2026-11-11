@@ -24,6 +24,7 @@ test {
     _ = @import("net_test.zig");
     _ = @import("pipe_test.zig");
     _ = @import("socket_options_test.zig");
+    _ = @import("seam_test.zig");
     _ = @import("ext/net/connect.zig");
     _ = @import("ext/net/pipe.zig");
     _ = @import("message_test.zig");

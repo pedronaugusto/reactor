@@ -8,7 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `net.setOptions` takes the `Io` first, `setOptions(io, socket, options)`: a socket's options are set behind reactor's seam, where an `Io` whose sockets are not the system's (a simulation's, through `reactor.testing`) is told the options and no raw `setsockopt` runs. The options step inside `net.connect` goes through it too. Write `setOptions(io, ...)` where `setOptions(...)` was.
 - A handle reactor's own calls hand back comes with its one owner, an `aegis.own.OwnedIo`, where it was a bare `Io.File`, `Io.net.Stream` or `Io.net.Server` the caller was told to close: `net.connectPipe` and `PipeListener.accept` give a `net.owned.File`, `net.connectUnix` and `net.Connected.stream` a `net.owned.Stream`, `net.listen` a `net.owned.Server`. `deinit(io)` closes it; `borrow()` lends the handle; `take` moves it out to be kept.
+
+### Added
+
+- `net.peek(io, handle)` and `net.Peek`: a look at a socket that neither waits nor takes anything (`recv` with `MSG_PEEK` and `MSG_DONTWAIT`), behind the seam: null on Windows and WASI and under a hooked `Io`, where the caller reads through its `Io`. It was uplink's own raw call.
+- `reactor.testing`, made by the build's `testing(reactor, shakedown)`: a `Seam` whose `io()` is an `Io` over a base (a `Sim`'s) where reactor's raw socket calls ask the test instead, as airlock's seam does: the options asked are recorded (`asked()`), never set, and a peek answers nothing. Production reactor carries one compare of a vtable slot.
 
 ### Fixed
 

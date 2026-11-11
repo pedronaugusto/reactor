@@ -740,7 +740,7 @@ fn connectAs(io: Io, address: *const Io.net.IpAddress, setting: Setting) !reacto
         .after => after: {
             const stream = try address.connect(io, .{ .mode = .stream });
             errdefer stream.close(io);
-            try reactor.net.setOptions(stream.socket, bench_options);
+            try reactor.net.setOptions(io, stream.socket, bench_options);
             break :after .init(stream);
         },
     };

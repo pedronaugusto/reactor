@@ -25,6 +25,11 @@ pub const KeepaliveSeconds = options_file.KeepaliveSeconds;
 pub const KeepaliveCount = options_file.KeepaliveCount;
 pub const OptionsError = options_file.Error;
 pub const setOptions = options_file.setOptions;
+
+/// A look at a socket that neither waits nor takes anything (`peek`), and
+/// what it finds.
+pub const Peek = @import("net/peek.zig").Peek;
+pub const peek = @import("net/peek.zig").peek;
 pub const send_buffer_when_connected = options_file.send_buffer_when_connected;
 
 pub const ListenOptions = listen_file.Options;

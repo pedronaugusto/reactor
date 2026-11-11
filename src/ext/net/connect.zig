@@ -69,8 +69,8 @@ pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Co
     connected.stream.take(&stream);
     errdefer stream.close(io);
     if (own_socket) {
-        if (options.socket.connected().any()) try options_file.apply(stream.socket.handle, address.*, options.socket.connected());
-    } else if (options.socket.any()) try options_file.setOptions(stream.socket, options.socket);
+        if (options.socket.connected().any()) try options_file.applyThrough(io, stream.socket.handle, address.*, options.socket.connected());
+    } else if (options.socket.any()) try options_file.setOptions(io, stream.socket, options.socket);
     return .{ .stream = .init(stream), .timeout_enforced = connected.timeout_enforced };
 }
 

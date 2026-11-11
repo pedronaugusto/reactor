@@ -1,14 +1,19 @@
 const std = @import("std");
 
 /// What a project that depends on reactor builds: the `reactor` module and its
-/// library. The tests, example, benchmarks and gate are `dev`'s.
+/// library. The tests, example, benchmarks and gate are `dev`'s. The seam in
+/// front of reactor's raw socket calls is a module of its own that only
+/// reactor and `reactor.testing` import, so neither exports it, as airlock's
+/// is; `reactor.testing` is made by `testing`, on the shakedown the project's
+/// build gives it.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const aegis = b.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     // A task's stack and switch are shuttle's.
     const shuttle = b.dependency("shuttle", .{ .target = target, .optimize = optimize }).module("shuttle");
-    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle } } });
+    const seam = b.createModule(.{ .root_source_file = b.path("src/seam.zig"), .target = target, .optimize = optimize });
+    const module = b.addModule("reactor", .{ .root_source_file = b.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle }, .{ .name = "seam", .module = seam } } });
     b.installArtifact(b.addLibrary(.{ .name = "reactor", .root_module = module }));
 }
 
@@ -32,7 +37,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle_dependency.module("shuttle") } },
+        .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle_dependency.module("shuttle") }, .{ .name = "seam", .module = module.import_table.get("seam").? } },
     });
     if (target.result.os.tag == .windows) {
         test_module.link_libc = true;
@@ -67,6 +72,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The test doubles and the conformance suite are shakedown's.
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("shakedown", shakedown.module("shakedown"));
+    // The seam's tests install its hook as a project's do.
+    test_module.addImport("reactor.testing", testing(package, shakedown.module("shakedown")));
     // airlock's device flushes through `syncLane`, the executor reactor
     // supplies for its `Blocking`.
     test_module.addImport("airlock", b.dependency("airlock", .{ .target = target, .optimize = optimize }).module("airlock"));
@@ -96,6 +103,32 @@ fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.l
     const p = b.dependency("reactor", .{ .target = target, .optimize = optimize }).builder;
     const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
     const shuttle = p.dependency("shuttle", .{ .target = target, .optimize = optimize }).module("shuttle");
-    const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle } } });
+    const seam = b.createModule(.{ .root_source_file = p.path("src/seam.zig"), .target = target, .optimize = optimize });
+    const reactor = b.createModule(.{ .root_source_file = p.path("src/reactor.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "aegis", .module = aegis }, .{ .name = "shuttle", .module = shuttle }, .{ .name = "seam", .module = seam } } });
     return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "reactor", .module = reactor }, .{ .name = "aegis", .module = aegis } }) catch @panic("OOM");
+}
+
+/// The test seam for a project's tests: the module `reactor.testing`, for
+/// `reactor`'s dependency in that project's build, on `shakedown`, the
+/// project's own, so that a test binary links one shakedown. Its `Seam` is an
+/// `Io` whose sockets are not the system's (a simulation's), where reactor's
+/// raw socket calls ask the test instead.
+///
+///     const reactor_build = @import("reactor"); // at the top of the build.zig
+///
+///     const reactor = b.dependency("reactor", .{ .target = target, .optimize = optimize });
+///     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
+///     tests.root_module.addImport("reactor.testing", reactor_build.testing(reactor, shakedown.module("shakedown")));
+pub fn testing(reactor: *std.Build.Dependency, shakedown: *std.Build.Module) *std.Build.Module {
+    const module = reactor.module("reactor");
+    return reactor.builder.createModule(.{
+        .root_source_file = reactor.builder.path("src/testing.zig"),
+        .target = module.resolved_target,
+        .optimize = module.optimize,
+        .imports = &.{
+            .{ .name = "seam", .module = module.import_table.get("seam").? },
+            .{ .name = "aegis", .module = module.import_table.get("aegis").? },
+            .{ .name = "shakedown", .module = shakedown },
+        },
+    });
 }

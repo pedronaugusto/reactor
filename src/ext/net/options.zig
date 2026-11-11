@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const aegis = @import("aegis");
 const sys = @import("../../sys/options.zig");
+const seam = @import("seam");
 const net = std.Io.net;
 
 /// Why an option was not set: the system has no such option or refuses its
@@ -96,10 +97,29 @@ pub const Options = struct {
 /// a connected or accepted socket the buffer sizes no longer change the
 /// window scale, which its first segment fixed. On Apple's systems the
 /// socket is also made never to raise `SIGPIPE`, as every socket reactor
-/// makes is.
-pub fn setOptions(socket: net.Socket, options: Options) Error!void {
+/// makes is. Under an `Io` whose sockets are not the system's (a test's
+/// hook, `reactor.testing`) no raw call runs: the hook is told the options.
+pub fn setOptions(io: std.Io, socket: net.Socket, options: Options) Error!void {
+    if (seam.hookOf(io)) |hook| return hook.options(hook.ctx, socket.handle, told(options));
     if (sys.no_sigpipe != null) try sys.set(socket.handle, sys.no_sigpipe, 1);
     return apply(socket.handle, socket.address, options);
+}
+
+/// `apply` behind the seam, as `setOptions` is.
+pub fn applyThrough(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family, options: Options) Error!void {
+    if (seam.hookOf(io)) |hook| return hook.options(hook.ctx, handle, told(options));
+    return apply(handle, family, options);
+}
+
+/// `options` as the seam's hook is told them.
+fn told(options: Options) seam.Asked {
+    return .{
+        .nodelay = options.nodelay,
+        .keepalive = if (options.keepalive) |k| k == .on else null,
+        .send_buffer = if (options.send_buffer) |size| size.raw() else null,
+        .receive_buffer = if (options.receive_buffer) |size| size.raw() else null,
+        .traffic_class = options.traffic_class,
+    };
 }
 
 /// Sets `options` on the socket `handle` of `family`'s address family.

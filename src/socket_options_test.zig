@@ -65,7 +65,7 @@ fn everyOption(io: Io) !void {
     try testing.expect(connected.stream.borrow().socket.address.getPort() != 0);
     const accepted = try server.borrowMut().accept(io);
     defer accepted.close(io);
-    try net.setOptions(accepted.socket, .{ .nodelay = false, .keepalive = .off, .send_buffer = .fromRaw(96 << 10) });
+    try net.setOptions(io, accepted.socket, .{ .nodelay = false, .keepalive = .off, .send_buffer = .fromRaw(96 << 10) });
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.nodelay));
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.keepalive));
     try testing.expect(try sys.get(accepted.socket.handle, sys.send_buffer) >= 96 << 10);
@@ -112,7 +112,7 @@ test "an option the system has none of is OptionUnsupported, and fails the conne
     defer stream.close(io);
     try testing.expectError(error.OptionUnsupported, sys.set(stream.socket.handle, .{ .level = sys.keepalive.?.level, .name = 0x7ff0 }, 1));
     if (builtin.os.tag == .windows) {
-        try testing.expectError(error.OptionUnsupported, net.setOptions(stream.socket, .{ .traffic_class = 0x20 }));
+        try testing.expectError(error.OptionUnsupported, net.setOptions(io, stream.socket, .{ .traffic_class = 0x20 }));
         try testing.expectError(error.OptionUnsupported, net.connect(io, &server.socket.address, .{ .socket = .{ .traffic_class = 0x20 } }));
     }
 }
@@ -146,7 +146,7 @@ test "on Apple's systems a socket given its options never raises SIGPIPE, which 
     const accepted = try server.accept(io);
     defer accepted.close(io);
     try testing.expectEqual(@as(c_int, 0), try sys.get(accepted.socket.handle, sys.no_sigpipe));
-    try net.setOptions(accepted.socket, .{});
+    try net.setOptions(io, accepted.socket, .{});
     try testing.expect(try sys.get(accepted.socket.handle, sys.no_sigpipe) != 0);
 }
 
