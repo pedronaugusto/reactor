@@ -56,7 +56,7 @@ pub const Config = struct {
         defer f.close(io);
         var buffer: [4096]u8 = undefined;
         var reader = f.reader(io, &buffer);
-        while (reader.interface.takeDelimiter('\n') catch return unread(&reader)) |text| {
+        while (reader.interface.takeDelimiter('\n') catch return stopped(reader.err)) |text| {
             c.line(text);
         }
         if (c.server_count == 0) {
@@ -101,10 +101,10 @@ pub const Config = struct {
     }
 };
 
-/// A configuration file that could not be read to its end: canceled, or
-/// no name resolved from it.
-fn unread(reader: *const Io.File.Reader) Error {
-    if (reader.err) |err| if (err == error.Canceled) return error.Canceled;
+/// A file or stream that could not be read or written to its end, by the
+/// error its reader or writer recorded: canceled, or no name resolved.
+fn stopped(recorded: anytype) Error {
+    if (recorded) |err| if (err == error.Canceled) return error.Canceled;
     return error.NameNotResolved;
 }
 
@@ -149,7 +149,7 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
     var n: usize = 0;
-    lines: while (reader.interface.takeDelimiter('\n') catch return unread(&reader)) |line| {
+    lines: while (reader.interface.takeDelimiter('\n') catch return stopped(reader.err)) |line| {
         var words = std.mem.tokenizeAny(u8, line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len], " \t\r");
         const text = words.next() orelse continue;
         const primary = words.next() orelse continue;
@@ -255,7 +255,10 @@ fn exchangeOne(r: Request) Error!Answer {
             .ip4 => .{ .ip4 = .unspecified(0) },
             .ip6 => .{ .ip6 = .unspecified(0) },
         };
-        const socket = local.bind(r.io, .{ .mode = .dgram }) catch continue;
+        const socket = local.bind(r.io, .{ .mode = .dgram }) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            continue;
+        };
         defer socket.close(r.io);
         const timeout: Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = r.config.timeout.toIoDuration() } };
         const deadline = timeout.toDeadline(r.io);
@@ -320,9 +323,9 @@ fn tcpRequest(r: Request, server: net.IpAddress, q: []const u8) Error!Answer {
     var writer = stream.writer(r.io, &storage);
     var prefix: [2]u8 = undefined;
     std.mem.writeInt(u16, &prefix, @intCast(q.len), .big);
-    writer.interface.writeAll(&prefix) catch return error.NameNotResolved;
-    writer.interface.writeAll(q) catch return error.NameNotResolved;
-    writer.interface.flush() catch return error.NameNotResolved;
+    writer.interface.writeAll(&prefix) catch return stopped(writer.err);
+    writer.interface.writeAll(q) catch return stopped(writer.err);
+    writer.interface.flush() catch return stopped(writer.err);
     try readAll(r.io, stream.socket.handle, &prefix, .none);
     const len = std.mem.readInt(u16, &prefix, .big);
     var buffer: [65535]u8 = undefined;

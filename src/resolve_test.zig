@@ -261,3 +261,45 @@ test "a cancel that stops the read of resolv.conf or the hosts file is Canceled,
         }
     }
 }
+
+test "a cancel that lands as a query binds its socket is Canceled, not the next attempt" {
+    const io = testing.io;
+    const socket = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).bind(io, .{ .mode = .dgram });
+    defer socket.close(io);
+    var config: stub.Config = .{};
+    config.servers[0] = socket.address;
+    config.server_count = 1;
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .netBindIp, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(testing.allocator, io, .{ .plan = &plan });
+    defer faults.deinit();
+    var server = try io.concurrent(serve, .{ io, socket });
+    var addresses: [2]Io.net.IpAddress = undefined;
+    const result = stub.query(faults.io(), "local.example", 80, .ip4, &addresses, &config);
+    const served = server.cancel(io);
+    try testing.expectError(error.Canceled, result);
+    // No query reached the server: it was still waiting for one.
+    try testing.expectError(error.Canceled, served);
+}
+
+test "a cancel that lands as a truncated answer's TCP query is written is Canceled, not a name unresolved" {
+    const io = testing.io;
+    var server, const udp = try bothOnOnePort(io);
+    defer server.deinit(io);
+    defer udp.close(io);
+    var config: stub.Config = .{};
+    config.servers[0] = udp.address;
+    config.server_count = 1;
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(testing.allocator, io, .{ .plan = &plan });
+    defer faults.deinit();
+    var datagram = try io.concurrent(serveTruncated, .{ io, udp });
+    var stream = try io.concurrent(serveTcp, .{ io, &server });
+    var addresses: [2]Io.net.IpAddress = undefined;
+    const result = stub.query(faults.io(), "truncated.example", 80, .ip4, &addresses, &config);
+    const truncated = datagram.await(io);
+    const streamed = stream.await(io);
+    try testing.expectError(error.Canceled, result);
+    try truncated;
+    // The TCP query was never sent: the connection closed before it.
+    try testing.expectError(error.EndOfStream, streamed);
+}
