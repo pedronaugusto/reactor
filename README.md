@@ -14,6 +14,12 @@ through `b.dependency` and add it to your executable's imports. reactor depends
 on std and [aegis](https://github.com/pedronaugusto/aegis), which depends on
 std alone and is fetched with it.
 
+## Stability
+
+reactor is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.9 to 0.10), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
+
 ## Usage
 
 <!-- BEGIN GENERATED zig build docs -- usage -->

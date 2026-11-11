@@ -559,13 +559,13 @@ test "global lane completions wake a host driving the home loop" {
     gate.store(1, .release);
     system.futexWake(u32, &gate.raw, 1);
     const until = Io.Clock.awake.now(system).addDuration(.fromSeconds(2));
-    while (t.fakes[0].woken.load(.acquire) == 0 and Io.Clock.awake.now(system).nanoseconds < until.nanoseconds)
+    while (t.fakes[0].woken.load(.acquire) == .idle and Io.Clock.awake.now(system).nanoseconds < until.nanoseconds)
         try system.sleep(.fromMilliseconds(1), .awake);
     const queued = t.runtime.core.scheduler.injectedLen();
     const woken = t.fakes[0].woken.load(.acquire);
     task.await(io);
     try testing.expect(queued > 0);
-    try testing.expectEqual(@as(u32, 1), woken);
+    try testing.expect(woken == .woken);
 }
 
 fn capturedChild(io: Io) !void {

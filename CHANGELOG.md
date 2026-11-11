@@ -22,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.
 - A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
 - `net.connectUnix` returns `net.ConnectUnixError`, std's `UnixAddress.ConnectError` with `NameTooLong`.
+- The idle test backend's wake word is an aegis `Atomic` that waits and wakes on itself, where it was a `std.atomic.Value` whose `.raw` word went to std's futex. Tests only; no public API changes.
 
 
 ## [0.9.0] - 2026-10-28

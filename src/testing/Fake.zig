@@ -13,6 +13,7 @@ const Fake = @This();
 
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 const backend = @import("../backend.zig");
@@ -42,13 +43,17 @@ script: Script = defaultScript,
 script_context: ?*anyopaque = null,
 ops: std.ArrayList(*op.Op) = .empty,
 batch: std.ArrayList(Entry) = .empty,
-woken: std.atomic.Value(u32) = .init(0),
+/// Raised by `wake`, waited on by an idle poll: a word that waits and wakes on itself.
+woken: aegis.Atomic(Woken) = .init(.idle),
 /// One-based failing submission, shared by ordinary and batch operations.
 /// Null is clean; each site can be swept independently without a kernel.
 fail_submit_at: ?usize = null,
 submissions: usize = 0,
 /// Polls that delivered nothing and waited.
 waits: u64 = 0,
+
+/// Whether `wake` was called since the idle poll last waited.
+const Woken = enum(u32) { idle, woken };
 
 const Entry = struct { token: pending.Token, operation: Io.Operation, canceled: bool = false };
 
@@ -110,8 +115,8 @@ fn cancelPending(c: *backend.Custom, token: pending.Token) void {
 
 fn wake(c: *backend.Custom) void {
     const f = of(c);
-    f.woken.store(1, .release);
-    Io.Threaded.global_single_threaded.io().futexWake(u32, &f.woken.raw, 1);
+    f.woken.store(.woken, .release);
+    f.woken.wake(Io.Threaded.global_single_threaded.io(), 1);
 }
 
 fn poll(c: *backend.Custom, wait: backend.Wait, sink: *backend.Custom.Sink) void {
@@ -155,7 +160,7 @@ fn pollSeeded(f: *Fake, wait: backend.Wait, sink: *backend.Custom.Sink, virtual:
             f.waits += 1;
             virtual.advance(span.toIoDuration());
         },
-        .forever => if (f.woken.swap(0, .acq_rel) == 0 and f.ops.items.len == 0 and f.batch.items.len == 0)
+        .forever => if (f.woken.swap(.idle, .acq_rel) == .idle and f.ops.items.len == 0 and f.batch.items.len == 0)
             @panic("reactor's fake: every task waits and nothing can wake one"),
     }
 }
@@ -216,10 +221,10 @@ fn pollIdle(f: *Fake, wait: backend.Wait, sink: *backend.Custom.Sink) void {
     const sys = Io.Threaded.global_single_threaded.io();
     switch (wait) {
         .nowait => {},
-        .up_to => |span| sys.futexWaitTimeout(u32, &f.woken.raw, 0, .{ .duration = .{ .raw = span.toIoDuration(), .clock = .awake } }) catch unreachable, // unreachable: a scheduler's thread is no `Threaded` task, so nothing cancels it
-        .forever => sys.futexWaitUncancelable(u32, &f.woken.raw, 0),
+        .up_to => |span| f.woken.waitTimeout(sys, .idle, .{ .duration = .{ .raw = span.toIoDuration(), .clock = .awake } }) catch unreachable, // unreachable: a scheduler's thread is no `Threaded` task, so nothing cancels it
+        .forever => f.woken.waitUncancelable(sys, .idle),
     }
-    f.woken.store(0, .release);
+    f.woken.store(.idle, .release);
 }
 
 fn canceledResult(o: *const op.Op) op.Result {
