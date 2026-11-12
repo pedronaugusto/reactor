@@ -518,15 +518,21 @@ test "a write larger than the socket's buffers waits for the reader instead of h
     }
 }
 
-/// Writes nothing to `file` over and over: each completes at once, so the
+/// Writes nothing to `socket` over and over: each completes at once, so the
 /// task spends its budget and yields, without ever waiting. Records the
 /// threads it ran on other than `home`.
-fn yieldAway(io: Io, file: Io.File, home: std.Thread.Id, stop: *std.atomic.Value(bool), away: *std.atomic.Value(u32)) !void {
+fn yieldAway(io: Io, socket: net.Socket.Handle, home: std.Thread.Id, stop: *std.atomic.Value(bool), away: *std.atomic.Value(u32)) !void {
     while (!stop.load(.acquire)) {
-        // An empty write completes at once; only that it yields matters here.
-        _ = try (try io.operate(.{ .file_write_streaming = .{ .file = file, .data = &.{""} } })).file_write_streaming;
+        try writeNothing(io, socket);
         if (current_thread.now() != home) _ = away.fetchAdd(1, .monotonic);
     }
+}
+
+/// An empty write on a connected socket: it completes at once on every
+/// backend, IOCP's port included, where a file opened for synchronous
+/// calls would go to a lane instead.
+fn writeNothing(io: Io, socket: net.Socket.Handle) !void {
+    _ = try (try io.operate(.{ .net_write = .{ .socket_handle = socket, .header = "", .data = &.{""}, .splat = 1 } })).net_write;
 }
 
 test "a task behind the root on the home processor is offered to an idle processor, on each backend" {
@@ -535,22 +541,24 @@ test "a task behind the root on the home processor is offered to an idle process
         try runtime(&r, backend, 1);
         defer r.deinit();
         const io = r.io();
-        // Something an empty write completes on at once, on every backend.
-        var tmp = testing.tmpDir(.{});
-        defer tmp.cleanup();
-        const write_end = try tmp.dir.createFile(io, "sink", .{});
-        defer write_end.close(io);
+        // A connected loopback socket: an empty write on it completes at
+        // once on every backend.
+        const any: net.IpAddress = .{ .ip4 = .loopback(0) };
+        var server = try any.listen(io, .{ .reuse_address = true });
+        defer server.deinit(io);
+        const sink = try server.socket.address.connect(io, .{ .mode = .stream });
+        defer sink.close(io);
         var stop: std.atomic.Value(bool) = .init(false);
         var away: std.atomic.Value(u32) = .init(0);
         // The root stays on the home processor; the task it starts queues
         // behind it there, and the idle worker takes it.
-        var task = try io.concurrent(yieldAway, .{ io, write_end, current_thread.now(), &stop, &away });
+        var task = try io.concurrent(yieldAway, .{ io, sink.socket.handle, current_thread.now(), &stop, &away });
         // Bounded by time, not by a count of writes: an optimized build makes a
         // million of them in less than an idle worker takes to wake.
         const until = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
         while (away.load(.monotonic) == 0 and std.Io.Clock.awake.now(io).nanoseconds < until.nanoseconds) {
             // An empty write completes at once; only that it yields matters here.
-            _ = try (try io.operate(.{ .file_write_streaming = .{ .file = write_end, .data = &.{""} } })).file_write_streaming;
+            try writeNothing(io, sink.socket.handle);
         }
         stop.store(true, .release);
         try task.await(io);
