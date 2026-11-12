@@ -7,6 +7,7 @@
 //! `NamedPipeUnsupported`.
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const clock = @import("../../clock.zig");
 const Io = std.Io;
 const windows = std.os.windows;
@@ -25,7 +26,7 @@ const OwnedFile = @import("owned.zig").File;
 
 /// How long a connect waits before it tries a busy pipe again: every
 /// instance was taken, and a free one is made when the server accepts.
-const busy_retry: Io.Duration = .fromMilliseconds(10);
+const busy_retry: Io.Duration = aegis.units.Duration(.millisecond, u32).fromRaw(10).toIoDuration();
 
 pub const ConnectOptions = struct {
     /// How long a busy pipe is waited for; `.none` waits until an instance

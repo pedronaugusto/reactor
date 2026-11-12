@@ -12,6 +12,7 @@ const Job = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
+const clock = @import("../clock.zig");
 const windows = std.os.windows;
 
 const supported = @import("../Scheduler.zig").supported;
@@ -124,7 +125,7 @@ fn take(io: Io, port: windows.HANDLE, deadline: Io.Timeout) NextError!Message {
         var overlapped: ?*anyopaque = null;
         if (win32.GetQueuedCompletionStatus(port, &bytes, &key, &overlapped, ms.raw()) == .FALSE) {
             if (overlapped == null) {
-                if (left) |d| if (d.raw.nanoseconds <= 0) return error.Timeout;
+                if (left) |d| if (clock.spent(d.raw)) return error.Timeout;
                 continue;
             }
             return error.Unexpected;

@@ -11,6 +11,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
+const aegis = @import("aegis");
+const clock = @import("../clock.zig");
 const windows = std.os.windows;
 
 const backend = @import("../backend.zig");
@@ -178,7 +180,7 @@ fn waitFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize
 /// The lowest index of a member that is ready, as its watch says.
 fn readyFirst(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
     if (!has_priority) for (set) |m| if (m == .priority) return error.Unsupported;
-    if (timeout.toDurationFromNow(io)) |remaining| if (remaining.raw.nanoseconds <= 0) {
+    if (timeout.toDurationFromNow(io)) |remaining| if (clock.spent(remaining.raw)) {
         return try once(io, set, poll.look) orelse error.Timeout;
     };
     // A process that had ended when it was opened needs no wait.
@@ -258,7 +260,7 @@ fn sliced(io: Io, set: []const Waitable, deadline: Io.Timeout) WaitError!usize {
 }
 
 /// The longest one batch wait lasts when the caller gave no deadline.
-const batch_bound: Io.Clock.Duration = .{ .raw = .fromSeconds(3600), .clock = .awake };
+const batch_bound: Io.Clock.Duration = .{ .raw = aegis.units.Duration(.second, u32).fromRaw(3600).toIoDuration(), .clock = .awake };
 
 /// A wait through `io`'s concurrent batch: a zero-length read for each
 /// readable member and a zero-length write for each writable one, which an
@@ -327,7 +329,7 @@ const threaded_batch = Io.Threaded.global_single_threaded.io().vtable.batchAwait
 /// has passed.
 pub fn sliceFor(left: ?Io.Clock.Duration) ?poll.Millis {
     const remaining = left orelse return slice;
-    if (remaining.raw.nanoseconds <= 0) return null;
+    if (clock.spent(remaining.raw)) return null;
     // Beyond what a u32 of milliseconds holds is far past one slice.
     const ms = poll.Millis.fromIoDuration(remaining.raw, .up) catch return slice;
     return if (ms.compare(slice) == .gt) slice else ms;

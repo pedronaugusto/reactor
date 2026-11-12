@@ -33,6 +33,11 @@ pub fn spanOf(d: Io.Duration) Span {
 /// the sign of.
 pub const Signed = aegis.units.Duration(.nanosecond, i96);
 
+/// Whether `left`, a span still to wait, is spent: zero or less.
+pub fn spent(left: Io.Duration) bool {
+    return Signed.fromIoDuration(left, .exact).compare(.fromRaw(0)) != .gt;
+}
+
 /// `then`, read on some clock whose time is `now`, as a point of the awake
 /// timeline whose time is `awake_now`: as far ahead of `awake_now` as it is
 /// of `now`, clamped at the ends of each.
