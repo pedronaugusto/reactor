@@ -11,6 +11,7 @@ const Threaded = Io.Threaded;
 const windows = std.os.windows;
 const ws2_32 = windows.ws2_32;
 const afd = @import("afd.zig");
+const aegis = @import("aegis");
 const sys_windows = @import("windows.zig");
 
 const is_windows = builtin.os.tag == .windows;
@@ -196,38 +197,16 @@ pub fn unixPathFits(path: []const u8) bool {
     return path.len < @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len;
 }
 
-/// A Unix stream socket to connect to `address`. On Windows AFD takes the
-/// target from a socket option, the address a connect names being only
-/// informational, and the socket is bound to no path first, as std does.
-/// A path that does not fit a socket address is `FileNotFound`, as on
-/// Windows: std's `ConnectError` has no name for it, and the path cut to
-/// fit would name another.
+/// A Unix stream socket to connect to `address`: POSIX's. On Windows the
+/// runtime connects one through Winsock (`unix_windows.zig`), the system
+/// refusing an AF_UNIX endpoint AFD is driven for directly. A path that
+/// does not fit a socket address is `FileNotFound`, as on Windows: std's
+/// `ConnectError` has no name for it, and the path cut to fit would name
+/// another.
 pub fn openUnix(address: *const net.UnixAddress, start: Start) OpenUnixError!Handle {
     if (!unixPathFits(address.path)) return error.FileNotFound;
-    if (!is_windows) return open(posix.AF.UNIX, .stream, null, start);
-    const path = if (!address.isAbstract()) Threaded.sliceToPrefixedFileW(null, address.path, .{ .allow_relative = false }) catch |err| return switch (err) {
-        error.NameTooLong, error.BadPathName => error.FileNotFound,
-        else => error.Unexpected,
-    } else undefined;
-    const handle = afd.open(ws2_32.AF.UNIX, .stream, null) catch |err| return switch (err) {
-        error.ProtocolUnsupportedByAddressFamily, error.OptionUnsupported => error.AddressFamilyUnsupported,
-        else => |e| e,
-    };
-    errdefer close(handle);
-    if (!address.isAbstract()) {
-        var target: windows.AFD.SOCKOPT_INFO.UNIX_PATH = .{ .Path = path.data };
-        const bytes = std.mem.asBytes(&target)[0 .. @offsetOf(windows.AFD.SOCKOPT_INFO.UNIX_PATH, "Path") + @sizeOf(windows.WCHAR) * path.len];
-        switch (afd.option(handle, .special, 0, ws2_32.SO.UNIX_PATH, bytes).status) {
-            .SUCCESS => {},
-            .INSUFFICIENT_RESOURCES => return error.SystemResources,
-            else => |status| return windows.unexpectedStatus(status),
-        }
-    }
-    afd.bindUnixUnnamed(handle) catch |err| return switch (err) {
-        error.SystemResources => error.SystemResources,
-        error.Unexpected => error.Unexpected,
-    };
-    return handle;
+    if (is_windows) aegis.assert.never("a Unix socket on Windows is Winsock's: unix_windows.connectUnix");
+    return open(posix.AF.UNIX, .stream, null, start);
 }
 
 /// The address the socket's own end is bound to.

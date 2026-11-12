@@ -46,6 +46,7 @@ const Notifications = @import("iocp/Notifications.zig");
 const results = @import("iocp/results.zig");
 const sys = @import("../sys/windows.zig");
 const afd = @import("../sys/afd.zig");
+const aegis = @import("aegis");
 const scratch = @import("iocp/scratch.zig");
 
 pub const Options = struct {
@@ -210,15 +211,10 @@ pub fn submit(b: *Iocp, o: *op.Op) error{ SystemResources, Unexpected }!bool {
                     const len = Threaded.addressToPosix(ip, &info.address);
                     break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.status.iosb, windows.IOCTL.AFD.CONNECT, info, @intCast(@offsetOf(@TypeOf(info.*), "address") + len), null, 0);
                 },
-                .unix => |unix| status: {
-                    s.request = .{ .connect_unix = .{ .address = .{ .path = @splat(0) } } };
-                    const info = &s.request.connect_unix;
-                    // The path is informational to AFD: its socket option
-                    // named the target already. As std, a suffix.
-                    const n = @min(unix.path.len, info.address.path.len - 1);
-                    @memcpy(info.address.path[0..n], unix.path[unix.path.len - n ..]);
-                    break :status windows.ntdll.NtDeviceIoControlFile(c.socket, null, null, context, &s.status.iosb, windows.IOCTL.AFD.CONNECT, info, @sizeOf(@TypeOf(info.*)), null, 0);
-                },
+                // The system refuses an AF_UNIX endpoint AFD is driven for
+                // directly: a Unix socket on Windows is Winsock's, connected
+                // by `unix_windows.connectUnix`, and no connect op names one.
+                .unix => aegis.assert.never("a Unix connect on Windows is Winsock's: unix_windows.connectUnix"),
             };
             return b.settle(o, status);
         },

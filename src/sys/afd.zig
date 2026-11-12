@@ -190,17 +190,6 @@ pub fn listen(handle: Handle, backlog: u31) error{ SystemResources, Unexpected }
     };
 }
 
-/// The Unix socket bound to no path, as std binds one before connecting.
-pub fn bindUnixUnnamed(handle: Handle) error{ SystemResources, Unexpected }!void {
-    const Storage = extern struct { share: Share, address: ws2_32.sockaddr.un };
-    var storage: Storage = .{ .share = .unique, .address = .{ .path = @splat(0) } };
-    return switch (control(handle, windows.IOCTL.AFD.BIND, std.mem.asBytes(&storage), std.mem.asBytes(&storage.address))) {
-        .SUCCESS => {},
-        .INSUFFICIENT_RESOURCES => error.SystemResources,
-        else => |status| windows.unexpectedStatus(status),
-    };
-}
-
 /// What `CONNECT` reads: three reserved words, then the peer's address.
 pub fn ConnectInfo(comptime Address: type) type {
     return extern struct {

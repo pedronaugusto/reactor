@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Windows a Unix socket connects on the runtime: its `netConnectUnix` connects through Winsock, as `net.connectUnix` does for every other `Io`, where it drove AFD itself and the system refused the endpoint at its bind (`STATUS_INVALID_PARAMETER`), so every Unix socket connect on IOCP failed. The handle is bound to the port on first use like any other. The raw AFD path (`openUnix`'s Windows half, the unnamed bind, IOCP's Unix connect) is gone. Every backend test now runs on IOCP too, where none had.
 - `net.abort` reads what the socket answered: an abortive disconnect (Windows) or a shutdown the socket refuses for any reason but having ended already (not connected, reset, disconnected) stops a Debug build there, naming it, where the answer was dropped. Such a refusal leaves a read or write waiting on the socket with nothing to end it, a deadline's included, so it was a silent hang. It is a check, not an error returned: no caller has a way on from one (a deadline's watching task, a server closing its connections).
 - A lookup canceled while it opened or read `/etc/resolv.conf` or `/etc/hosts` is `error.Canceled`, where the open's cancel read as no file (the default server, no hosts entry) and the read's as `NameNotResolved`.
 - A DNS stub lookup canceled while it binds a query's socket or writes a truncated answer's query over TCP is `error.Canceled`, where the bind's cancel moved on to the next server or attempt and the write's read as `NameNotResolved`.

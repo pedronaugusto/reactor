@@ -57,7 +57,6 @@ pub const Request = union {
     datagram_in: DatagramIn,
     datagram_out: DatagramOut,
     connect_ip: afd.ConnectInfo(Threaded.PosixAddress),
-    connect_unix: afd.ConnectInfo(ws2_32.sockaddr.un),
     accept: struct { response: afd.ListenResponse, info: windows.AFD.ACCEPT_INFO, socket: Handle },
     poll: afd.PollInfo,
     offset: i64,
