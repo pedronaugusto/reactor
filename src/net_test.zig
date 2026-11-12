@@ -482,6 +482,43 @@ test "connectUnix reaches a listener, and names a refused connect and a missing 
     try testing.expectError(error.ConnectionRefused, net.connectUnix(io, &address));
 }
 
+test "a Unix socket connect on the runtime reaches its listener and carries bytes, on Windows' IOCP over AFD too" {
+    if (!Io.net.has_unix_sockets or !@import("Scheduler.zig").supported) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = if (builtin.os.tag == .windows) root: {
+        const real = try tmp.dir.realPathFileAlloc(testing.io, ".", gpa);
+        std.mem.replaceScalar(u8, real, '\\', '/');
+        break :root real;
+    } else try gpa.print(".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer gpa.free(root);
+    const path = try gpa.print("{s}/socket", .{root});
+    defer gpa.free(path);
+    const address = try Io.net.UnixAddress.init(path);
+    var listener: UnixListener = try .open(testing.io, &address);
+    defer listener.close(testing.io);
+    // The system's own backend: IOCP over AFD on Windows, where the
+    // connect binds its unnamed end through AFD before it connects.
+    var r: reactor.Runtime = undefined;
+    r.init(gpa, .{ .max_tasks = 64, .stack_size = .fromRaw(256 << 10) }) catch |err| switch (err) {
+        error.BackendUnavailable => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer r.deinit();
+    try r.start();
+    const io = r.io();
+    var stream = try net.connectUnix(io, &address);
+    defer stream.deinit(io);
+    var buffer: [16]u8 = undefined;
+    var writer = stream.borrow().writer(io, &buffer);
+    try writer.interface.writeAll("hello");
+    try writer.interface.flush();
+    var got: [5]u8 = undefined;
+    try listener.read(testing.io, &got);
+    try testing.expectEqualStrings("hello", &got);
+}
+
 test "connectUnix names a path past the system's socket address NameTooLong before std copies it, on Threaded too" {
     if (!Io.net.has_unix_sockets or builtin.os.tag == .windows) return error.SkipZigTest;
     const io = testing.io;
