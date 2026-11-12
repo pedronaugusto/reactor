@@ -1,0 +1,14 @@
+{
+  "seams": [
+    { "module": "src/sys/", "rules": ["A007", "A009", "A011", "A015", "P007"], "reason": "the system calls reactor's std.Io runs on, one binding per OS facility" },
+    { "module": "src/backend/", "rules": ["A007", "A009", "A011", "A015", "P007"], "reason": "the kernel I/O backends (io_uring, IOCP, readiness) reactor's std.Io runs on" },
+    { "module": "src/runtime/", "rules": ["A007", "A009", "A011", "A015", "P007"], "reason": "reactor implements std.Io; these are std.Io's own types and the calls its slots make" },
+    { "module": "src/ops/", "rules": ["A007", "A009", "A011", "A015", "P007"], "reason": "reactor implements std.Io; its operations (batches, tasks, lookups) are std.Io's own" },
+    { "module": "src/scheduler/", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; its tasks and groups are the handles std.Io hands out" },
+    { "file": "src/Scheduler.zig", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; the scheduler switches task contexts behind a compiler barrier" },
+    { "file": "src/Loop.zig", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; the loop holds the kernel's completion port and ring" },
+    { "file": "src/backend.zig", "rules": ["A007", "P007"], "reason": "the backend dispatch reads the kernel's ring words as the kernel writes them" },
+    { "file": "src/ext/Overlapped.zig", "rules": ["A007"], "reason": "an overlapped call's status is a word Windows writes when the call completes" },
+    { "module": "src/ext/", "rules": ["P007"], "reason": "reactor's OS extensions (jobs, signals, processes, pipes, receive groups), each a binding to its OS" }
+  ]
+}
