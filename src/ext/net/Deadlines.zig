@@ -71,7 +71,8 @@ pub const Watch = struct {
         /// A named pipe, Windows': its deadlines are kept on a runtime,
         /// where each operation carries its own. No other `Io` can end
         /// one of its operations from outside, so `add` refuses it there.
-        pipe: Io.File,
+        /// Named by its handle: the watch does not own the pipe.
+        pipe: Io.File.Handle,
     };
 
     pub fn init(socket: Io.net.Socket.Handle) Watch {
@@ -79,7 +80,7 @@ pub const Watch = struct {
     }
 
     pub fn initPipe(pipe: Io.File) Watch {
-        return .{ .target = .{ .pipe = pipe } };
+        return .{ .target = .{ .pipe = pipe.handle } };
     }
 
     /// Ends what is under way on the target and after: a socket's

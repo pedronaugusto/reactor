@@ -318,7 +318,7 @@ comptime {
 fn tokenOf(g: *Io.Group) *aegis.Atomic(GroupToken) {
     comptime assert(@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token)));
     comptime assert(@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token)));
-    // aegis: design(A019): std.Io implementation contract: Io.Group keeps its token in an atomic word whose null it reads as no members; this runtime keeps its GroupToken there, in an aegis cell of the same layout, none being null
+    // glint-ignore: A001 -- std.Io keeps a group's token in an atomic word, kept here as an aegis cell of its layout
     return @ptrCast(&g.token);
 }
 

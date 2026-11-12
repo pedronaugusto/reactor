@@ -165,7 +165,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         c.processors[0].loop.backend.iocp.binds_to = c.processors[1].loop.backend.iocp.port;
     };
 
-    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = (aegis.int.Checked(u32).init(options.max_tasks).add(options.max_lookups) catch return error.TooManyTasks).raw() +| 1 });
+    try c.lanes.init(gpa, options.offload, .{ .environ = options.environ, .argv0 = options.argv0, .max_jobs = (jobsFor(options.max_tasks, options.max_lookups) catch return error.TooManyTasks).raw() });
     errdefer c.lanes.deinit(gpa);
 
     try c.initMonitor(workers);
@@ -346,4 +346,10 @@ pub fn running(userdata: ?*anyopaque) *Core {
 /// The kernel mechanism under this runtime; null for a test's own backend.
 pub fn backendKind(c: *const Core) ?backend.Kind {
     return c.processors[0].loop.kind();
+}
+
+/// The jobs a runtime's lanes take: every task and lookup it allows, and one more.
+fn jobsFor(tasks: u32, lookups: u32) aegis.int.Checked(u32).AddError!aegis.int.Checked(u32) {
+    const asked = try aegis.int.Checked(u32).init(tasks).add(lookups);
+    return asked.add(1);
 }
