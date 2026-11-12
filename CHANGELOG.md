@@ -18,6 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `net.abort` reads what the socket answered: an abortive disconnect (Windows) or a shutdown the socket refuses for any reason but having ended already (not connected, reset, disconnected) stops a Debug build there, naming it, where the answer was dropped. Such a refusal leaves a read or write waiting on the socket with nothing to end it, a deadline's included, so it was a silent hang. It is a check, not an error returned: no caller has a way on from one (a deadline's watching task, a server closing its connections).
 - A lookup canceled while it opened or read `/etc/resolv.conf` or `/etc/hosts` is `error.Canceled`, where the open's cancel read as no file (the default server, no hosts entry) and the read's as `NameNotResolved`.
 - A DNS stub lookup canceled while it binds a query's socket or writes a truncated answer's query over TCP is `error.Canceled`, where the bind's cancel moved on to the next server or attempt and the write's read as `NameNotResolved`.
 - A canceled task's wait is `Canceled` whether or not its set is ready: `waitAny`, `wait`, `Wake.wait`, `Job.next`, `Signals.next` and `net.Receiver.next` check for a cancel as they start, as std's own operations do. They returned a ready member, a waiting message, signal or bytes first, so a task looping on a set that stayed ready was never canceled.
