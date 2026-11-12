@@ -29,9 +29,11 @@ const readiness: []const Loop.Backend = switch (builtin.os.tag) {
     else => &.{},
 };
 
-/// Every backend this system has.
+/// Every backend this system has: Windows' IOCP over AFD among them, so
+/// each backend test runs there too.
 const all: []const Loop.Backend = switch (builtin.os.tag) {
     .linux => &.{ .io_uring, .epoll },
+    .windows => &.{.iocp},
     else => readiness,
 };
 
@@ -326,6 +328,9 @@ fn writeLater(io: Io, file: Io.File, bytes: []const u8) !void {
 }
 
 test "a pipe in blocking mode is read when it is ready, and written in pieces it takes whole" {
+    // A POSIX pipe's blocking mode: Windows has no `pipe2`; its pipes are
+    // pipe_test's, handoff_test's and later_test's.
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     for (all) |backend| {
         var r: Runtime = undefined;
         try runtime(&r, backend, 1);
@@ -441,18 +446,21 @@ test "a stream read fills every buffer it is given, a reader's slice and then it
         try testing.expectEqualSlices(u8, sent[0..100], &slice);
         try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
 
-        // A pipe, the same.
-        const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
-        const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
-        const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
-        defer read_end.close(io);
-        defer write_end.close(io);
-        var pw = write_end.writerStreaming(io, &.{});
-        try pw.interface.writeAll(&sent);
-        const n = try (try io.operate(.{ .file_read_streaming = .{ .file = read_end, .data = &data } })).file_read_streaming;
-        try testing.expectEqual(sent.len, n);
-        try testing.expectEqualSlices(u8, sent[0..100], &slice);
-        try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
+        // A POSIX pipe, the same. Windows has no `pipe2`; its pipes are
+        // pipe_test's, handoff_test's and later_test's.
+        if (comptime builtin.os.tag != .windows) {
+            const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
+            const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+            const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+            defer read_end.close(io);
+            defer write_end.close(io);
+            var pw = write_end.writerStreaming(io, &.{});
+            try pw.interface.writeAll(&sent);
+            const n = try (try io.operate(.{ .file_read_streaming = .{ .file = read_end, .data = &data } })).file_read_streaming;
+            try testing.expectEqual(sent.len, n);
+            try testing.expectEqualSlices(u8, sent[0..100], &slice);
+            try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
+        }
     }
 }
 
@@ -527,10 +535,10 @@ test "a task behind the root on the home processor is offered to an idle process
         try runtime(&r, backend, 1);
         defer r.deinit();
         const io = r.io();
-        const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
-        const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
-        const write_end: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
-        defer read_end.close(io);
+        // Something an empty write completes on at once, on every backend.
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const write_end = try tmp.dir.createFile(io, "sink", .{});
         defer write_end.close(io);
         var stop: std.atomic.Value(bool) = .init(false);
         var away: std.atomic.Value(u32) = .init(0);
