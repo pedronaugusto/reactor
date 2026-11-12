@@ -447,6 +447,13 @@ pub fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) ne
     if (!socket.unixPathFits(address.path)) return error.FileNotFound;
     if (outsideBorrowed(r)) return borrowed(r, "netConnectUnix", .{address});
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    if (builtin.os.tag == .windows) {
+        // The system refuses an AF_UNIX endpoint AFD is driven for directly,
+        // as it refuses std 0.17's `Io.Threaded`. Winsock's provider makes and
+        // connects one, answered at once as a Unix socket is, and the handle
+        // is AFD's after: the backend binds it to its port on first use.
+        return @import("../sys/unix_windows.zig").connectUnix(address);
+    }
     const start: socket.Start = if (readiness(r)) .nonblocking else .blocking;
     const fd = socket.openUnix(address, start) catch |err| return switch (err) {
         error.ProtocolUnsupportedByAddressFamily, error.ProtocolUnsupportedBySystem => error.AddressFamilyUnsupported,
