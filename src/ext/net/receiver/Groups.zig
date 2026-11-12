@@ -86,7 +86,7 @@ pub fn deinit(g: *Groups, gpa: Allocator, io: Io) void {
 // Before a disabled ring is enabled, it has no submitter and can be set up here.
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
-    ready: Io.Event = .unset,
+    ready: aegis.Signal(void) = .init(),
     io: Io,
     action: union(enum) { register: struct { entries: BufferRing.Entries, id: BufferRing.Id }, unregister: *BufferRing },
     result: BufferRing.Error!BufferRing = undefined,
@@ -97,7 +97,7 @@ const Command = struct {
             .register => |args| c.result = BufferRing.init(p.loop.backend.io_uring.ring.fd, args.entries, args.id),
             .unregister => |registration| registration.deinit(),
         }
-        c.ready.set(c.io);
+        c.ready.set(c.io, {}) catch aegis.assert.never("a command runs once");
     }
 
     fn execute(c: *Command, p: *Scheduler.Processor) void {
@@ -106,7 +106,7 @@ const Command = struct {
             run(&c.errand, p);
         } else {
             p.send(&c.errand);
-            c.ready.waitUncancelable(c.io);
+            _ = c.ready.waitUncancelable(c.io);
         }
     }
 };

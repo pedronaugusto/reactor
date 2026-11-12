@@ -292,7 +292,7 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
 pub fn deinit(l: *Lanes, gpa: Allocator) void {
     for (l.admission.teardown().admitted) |n| assert(n == 0);
     if (l.mode == .owned) {
-        for (l.reserve_entries) |*entry| if (entry.state == .holding) entry.gate.set(system());
+        for (l.reserve_entries) |*entry| if (entry.state == .holding) entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
         for (&l.reserve_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // unreachable: shutdown is outside a cancelable executor task
         // std's instances restore the signal handlers they saw: last first.
         var i: usize = count;
@@ -359,7 +359,7 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
 /// pool until let go: the reserve a lane grows by.
 const Reserve = struct {
     state: enum { free, holding, let_go } = .free,
-    gate: Io.Event = .unset,
+    gate: aegis.Signal(void) = .init(),
     /// Raised once it runs: whether its thread is one the executor made for it.
     entered: Raised = .{},
     /// Raised once it no longer touches the entry.
@@ -367,7 +367,7 @@ const Reserve = struct {
 
     fn hold(entry: *Reserve) void {
         _ = entry.entered.raise(.acq_rel);
-        entry.gate.waitUncancelable(system());
+        _ = entry.gate.waitUncancelable(system());
         _ = entry.left.raise(.acq_rel);
     }
 };
@@ -616,7 +616,7 @@ fn awaitIdle(l: *Lanes, lane: Lane, launching: *Launch) void {
             for (launching.reserve) |*entry| if (entry.state == .holding) {
                 entry.state = .let_go;
                 launching.held -= 1;
-                entry.gate.set(system());
+                entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
                 break;
             };
         }

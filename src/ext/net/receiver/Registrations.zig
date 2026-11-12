@@ -3,6 +3,7 @@ const Registrations = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
+const aegis = @import("aegis");
 const Scheduler = @import("../../../Scheduler.zig");
 const native = @import("../../native.zig");
 const Buffers = @import("../../../backend/uring/Buffers.zig");
@@ -40,7 +41,7 @@ fn unregister(io: Io, item: Item) void {
 
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
-    ready: Io.Event = .unset,
+    ready: aegis.Signal(void) = .init(),
     awaiting: bool = false,
     io: Io,
     action: union(enum) { register: []u8, unregister: u16 },
@@ -55,7 +56,7 @@ const Command = struct {
             .unregister => |index| ring.buffers.unregister(&ring.ring, index),
         }
         // Direct setup before start has no waiter and must not enter std.Io.
-        if (command.awaiting) command.ready.set(command.io);
+        if (command.awaiting) command.ready.set(command.io, {}) catch aegis.assert.never("a command runs once");
     }
 
     fn execute(command: *Command, owner: *Scheduler.Processor) void {
@@ -64,7 +65,7 @@ const Command = struct {
         if (Scheduler.processor() == owner or (!core.started.raised(.acquire) and !owner.loop.backend.io_uring.enabled)) run(&command.errand, owner) else {
             command.awaiting = true;
             owner.send(&command.errand);
-            command.ready.waitUncancelable(command.io);
+            _ = command.ready.waitUncancelable(command.io);
         }
     }
 };
