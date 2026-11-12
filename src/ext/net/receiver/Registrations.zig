@@ -8,7 +8,7 @@ const Scheduler = @import("../../../Scheduler.zig");
 const native = @import("../../native.zig");
 const Buffers = @import("../../../backend/uring/Buffers.zig");
 pub const Error = Buffers.Error || std.mem.Allocator.Error;
-const Item = struct { owner: *Scheduler.Processor, index: u16 };
+pub const Item = struct { owner: *Scheduler.Processor, index: u16 };
 items: []Item,
 
 pub fn init(gpa: std.mem.Allocator, io: Io, memory: []u8) Error!Registrations {

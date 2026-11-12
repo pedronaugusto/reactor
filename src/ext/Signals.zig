@@ -144,7 +144,7 @@ const Set = std.EnumSet(Signal);
 
 /// One listener: the signals delivered and not yet taken, and the
 /// `Notify` the handler sets.
-const Listener = struct {
+pub const Listener = struct {
     used: bool = false,
     notify: Notify = undefined,
     /// The same kernel object as a member of a wait; see `wake`.

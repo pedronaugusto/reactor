@@ -87,7 +87,7 @@ const Request = scratch.Status;
 
 /// A batch operation while the kernel holds it: the batch's storage has
 /// no room for a status block beside the operation it keeps.
-const Slot = struct {
+pub const Slot = struct {
     status: Request = .{ .owner = .batch },
     /// Its place in the backend's slots, kept in the batch's own word.
     index: u32,
@@ -98,7 +98,7 @@ const Slot = struct {
     request: SlotRequest = .{ .none = {} },
 };
 
-const SlotRequest = union {
+pub const SlotRequest = union {
     none: void,
     receive: struct { info: windows.AFD.RECV_INFO, buffer: [1]windows.AFD.WSABUF(.@"var") },
     send: struct { info: windows.AFD.SEND_INFO, buffer: [1]windows.AFD.WSABUF(.@"const") },

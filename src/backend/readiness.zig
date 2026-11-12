@@ -147,7 +147,7 @@ pub fn Readiness(comptime Poller: type) type {
         const List = records_.List(Waiter);
 
         /// A batch operation waiting, from a pool sized at `init`.
-        const Entry = struct {
+        pub const Entry = struct {
             waiter: Waiter = .{},
             token: pending.Token = undefined,
             outcome: pending.Outcome = undefined,
@@ -158,7 +158,7 @@ pub fn Readiness(comptime Poller: type) type {
             }
         };
 
-        const Fifo = struct {
+        pub const Fifo = struct {
             head: ?*Waiter = null,
             tail: ?*Waiter = null,
 

@@ -188,7 +188,7 @@ pub const Processor = struct {
     /// and every remote push writes an inbox, so the owner's own state must
     /// never share their lines: a producer's write would otherwise evict the
     /// lines a task switch reads.
-    const Remote = struct {
+    pub const Remote = struct {
         inbox: Inbox(Task, "next") = .{},
         cancels: Inbox(CancelMessage, "next") = .{},
         errands: Inbox(Errand, "next") = .{},
@@ -212,7 +212,7 @@ pub const Processor = struct {
         }
     };
 
-    const LatencyState = packed struct(u16) {
+    pub const LatencyState = packed struct(u16) {
         /// The latency queues may hold a task.
         ready: bool = false,
         /// Latency tasks run since a normal one had its turn.
@@ -791,7 +791,7 @@ const Processors = aegis.units.Count(Processor, u32);
 /// A number of things that happened to tasks, over the runtime's life.
 const TaskEvents = aegis.units.Count(Task, u64);
 
-const Shared = struct {
+pub const Shared = struct {
     inject: aegis.BlockingGuarded(Injected) = .init(.{}),
     /// How many tasks the global queue holds, readable without its lock.
     inject_len: aegis.Atomic(Tasks) = .init(.fromRaw(0)),

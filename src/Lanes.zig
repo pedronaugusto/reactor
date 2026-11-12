@@ -205,7 +205,7 @@ const Holders = aegis.units.Count(Job, u32);
 /// Calls a lane ran on the caller's thread.
 const Inlined = aegis.units.Count(State, u64);
 
-const State = struct {
+pub const State = struct {
     cap: u16,
     limit: u32,
     launch: aegis.BlockingGuarded(Launch) = .init(.{}),
@@ -357,7 +357,7 @@ pub fn prepare(l: *Lanes) error{SystemResources}!void {
 
 /// A job that holds one of a lane's threads out of its executor's ready
 /// pool until let go: the reserve a lane grows by.
-const Reserve = struct {
+pub const Reserve = struct {
     state: enum { free, holding, let_go } = .free,
     gate: aegis.Signal(void) = .init(),
     /// Raised once it runs: whether its thread is one the executor made for it.

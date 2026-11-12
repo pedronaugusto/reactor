@@ -12,7 +12,7 @@ pub const Overlapped = extern struct {
     event: ?windows.HANDLE = null,
 };
 
-const Info = extern struct {
+pub const Info = extern struct {
     flags: c_int = 0,
     family: c_int = 0,
     socktype: c_int = 1,

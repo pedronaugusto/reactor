@@ -12,7 +12,7 @@ const shuttle = @import("shuttle");
 /// How many stacks were trimmed, over the runtime's life.
 pub const Count = aegis.units.Count(Trims, u64);
 
-const Record = struct {
+pub const Record = struct {
     task: ?*Task = null,
     bucket: *Bucket = undefined,
     next: ?*Record = null,
@@ -21,7 +21,7 @@ const Record = struct {
     deadline: Io.Timestamp = .zero,
     keep_from: usize = 0,
 };
-const Bucket = struct {
+pub const Bucket = struct {
     op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .{ .raw = .zero, .clock = .awake } } } },
     completion: Loop.Completion = .{ .run = fired },
     loop: ?*Loop = null,

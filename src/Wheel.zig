@@ -40,7 +40,7 @@ pub const Node = struct {
 };
 
 /// Where a node is linked: a level and slot, the overflow list, or nowhere.
-const Place = enum(u16) {
+pub const Place = enum(u16) {
     unlinked = std.math.maxInt(u16),
     overflow = std.math.maxInt(u16) - 1,
     due = std.math.maxInt(u16) - 2,
@@ -59,7 +59,7 @@ const Place = enum(u16) {
     }
 };
 
-const List = struct {
+pub const List = struct {
     head: ?*Node = null,
     tail: ?*Node = null,
 

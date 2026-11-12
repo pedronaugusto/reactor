@@ -29,7 +29,7 @@ pub fn Slab(comptime T: type, comptime Generation: type) type {
             generation: Generation,
         };
 
-        const Slot = struct {
+        pub const Slot = struct {
             generation: Generation = 1,
             value: ?T = null,
             next_free: ?u32 = null,

@@ -18,7 +18,7 @@ pub const Result = struct { count: usize, canonical: ?net.HostName = null };
 const State = enum(u8) { pending, completed, canceled };
 const Finished = enum(u32) { running, finished };
 
-const Record = struct {
+pub const Record = struct {
     occupied: Raised = .{},
     /// Whether the lookup has finished; a free record's has.
     finished: aegis.Atomic(Finished) = .init(.finished),

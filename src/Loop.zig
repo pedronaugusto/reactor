@@ -152,7 +152,7 @@ batch_sink: ?BatchSink = null,
 pressure: if (builtin.os.tag == .linux) backends.Uring.Pressure else void = if (builtin.os.tag == .linux) .{ .complete = Pressure.dispatch } else {},
 owner: std.Thread.Id,
 
-const List = struct {
+pub const List = struct {
     head: ?*Op = null,
     tail: ?*Op = null,
 

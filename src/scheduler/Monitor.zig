@@ -34,7 +34,7 @@ const Stage = @import("stage.zig").Stage;
 const Raised = @import("../sync/Raised.zig");
 
 /// What the monitor remembers of one processor between samples.
-const Sample = struct {
+pub const Sample = struct {
     /// The owner's seat (an opaque `*Scheduler.Seat`) and its stage.
     owner: ?*const anyopaque = null,
     stage: Stage = .first,

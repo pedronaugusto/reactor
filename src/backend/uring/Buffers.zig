@@ -5,7 +5,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 
-const Slot = struct { base: usize = 0, length: usize = 0, users: u32 = 0 };
+pub const Slot = struct { base: usize = 0, length: usize = 0, users: u32 = 0 };
 slots: []Slot,
 enabled: bool,
 registered: u16 = 0,
