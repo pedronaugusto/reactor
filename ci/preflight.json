@@ -6,7 +6,8 @@
     "src/tests.zig"
   ],
   "test_support": [
-    "src/testing/**"
+    "src/testing/**",
+    "src/testing.zig"
   ],
   "test_dependencies": [
     "shakedown",

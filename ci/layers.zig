@@ -3,6 +3,9 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
+    .{ .name = "seam", .patterns = &.{
+        "src/seam.zig",
+    } },
     .{ .name = "system calls", .patterns = &.{
         "src/sys.zig",
         "src/sys/crash.zig",
@@ -123,6 +126,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/net/listen.zig",
         "src/ext/net/resolve.zig",
         "src/ext/net/abort.zig",
+        "src/ext/net/peek.zig",
         "src/ext/net/Deadlines.zig",
         "src/ext/net/message.zig",
         "src/ext/net/Receiver.zig",
@@ -136,7 +140,13 @@ pub const layers: []const gantry.rules.Layer = &.{
 
 pub const entries: []const []const u8 = &.{};
 
-pub const modules: []const gantry.NamedModule = &.{};
+/// The seam in front of reactor's raw socket calls is a module of its
+/// own, so `reactor` and `reactor.testing` share one; `reactor.testing` is
+/// the tests' (`src/testing.zig`, test support).
+pub const modules: []const gantry.NamedModule = &.{
+    .{ .name = "seam", .path = "src/seam.zig", .from = "src/**" },
+    .{ .name = "reactor.testing", .path = "src/testing.zig", .from = "src/**" },
+};
 
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{
