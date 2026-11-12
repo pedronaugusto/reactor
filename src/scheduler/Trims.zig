@@ -38,6 +38,7 @@ const Bucket = struct {
         const first = bucket.head orelse return;
         bucket.op.backend.kind = .{ .timer = .{ .raw = first.deadline, .clock = .awake } };
         bucket.op.completion = &bucket.completion;
+        // glint-ignore: Z026 -- a refused timer leaves the bucket unarmed; the next insert retries
         bucket.loop.?.submit(&bucket.op) catch return;
         bucket.armed = true;
     }
@@ -115,6 +116,7 @@ fn unlink(record: *Record) void {
 fn fired(c: *Loop.Completion, loop: *Loop, op: *Loop.Op) void {
     const bucket: *Bucket = @alignCast(@fieldParentPtr("completion", c)); // safe: the init-reserved bucket owns this timer
     bucket.armed = false;
+    // glint-ignore: Z026 -- a trim timer that ended in error trims nothing; the next insert arms it
     op.backend.result.timer catch return;
     const now = loop.clock.now(.awake);
     while (bucket.head) |record| {

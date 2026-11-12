@@ -545,6 +545,7 @@ pub fn makeNonblocking(fd: posix.fd_t) error{Unexpected}!bool {
 /// Puts `fd` back in blocking mode; a descriptor that refuses stays as it
 /// is, which reactor's own calls never mind (they pass `MSG_DONTWAIT`).
 pub fn makeBlocking(fd: posix.fd_t) void {
+    // glint-ignore: Z026 -- a descriptor that refuses stays as it is, as the doc comment says
     const flags = statusFlags(fd) catch return;
     // glint-ignore: Z026 -- a descriptor that refuses stays as it is, which reactor's own calls never mind
     setStatusFlags(fd, flags & ~nonblock_flag) catch |err| switch (err) {

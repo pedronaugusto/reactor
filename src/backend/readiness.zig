@@ -395,9 +395,11 @@ pub fn Readiness(comptime Poller: type) type {
                 .net_write, .net_send => {},
                 else => return,
             }
+            // glint-ignore: Z026 -- best effort: a descriptor not recorded sends as it stands
             const index = self.recordFor(fd) catch return;
             const r = self.records.at(index);
             if (r.nonblocking) return;
+            // glint-ignore: Z026 -- best effort: a descriptor that refuses sends as it stands
             _ = calls.makeNonblocking(fd) catch return;
             r.nonblocking = true;
         }

@@ -70,6 +70,7 @@ pub const Config = struct {
         var words = std.mem.tokenizeAny(u8, text[0 .. std.mem.findScalar(u8, text, '#') orelse text.len], " \t\r");
         const directive = words.next() orelse return;
         if (std.mem.eql(u8, directive, "nameserver")) {
+            // glint-ignore: Z026 -- a nameserver line that does not parse names no server
             const address = net.IpAddress.parse(words.next() orelse return, 53) catch return;
             if (c.server_count < c.servers.len) {
                 c.servers[c.server_count] = address;
@@ -87,6 +88,7 @@ pub const Config = struct {
                     continue;
                 }
                 const colon = std.mem.findScalar(u8, word, ':') orelse continue;
+                // glint-ignore: Z026 -- an option whose value does not parse is skipped
                 const value = std.fmt.parseInt(u8, word[colon + 1 ..], 10) catch continue;
                 const name = word[0..colon];
                 if (std.mem.eql(u8, name, "ndots")) {
@@ -134,7 +136,9 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
         var domains = std.mem.tokenizeAny(u8, config.search[0..config.search_len], " \t");
         var candidate: [HostName.max_len]u8 = undefined;
         while (domains.next()) |domain| {
+            // glint-ignore: Z026 -- a domain that makes the name too long gives no candidate
             const full = std.mem.print(&candidate, "{s}.{s}", .{ bare, domain }) catch continue;
+            // glint-ignore: Z026 -- a candidate that is no host name is skipped
             _ = HostName.init(full) catch continue;
             if (queryNamed(io, full, port, family, out, &config, canonical)) |n| return n else |err| if (err == error.Canceled) return error.Canceled;
         }
@@ -156,6 +160,7 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
         if (!std.ascii.eqlIgnoreCase(primary, name)) {
             while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue :lines;
         }
+        // glint-ignore: Z026 -- a hosts line whose address does not parse is skipped
         const address = net.IpAddress.parse(text, port) catch continue;
         if (family) |f| if (address != f) continue;
         if (n == out.len) break;

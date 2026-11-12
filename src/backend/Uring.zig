@@ -289,6 +289,7 @@ fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!l
 }
 
 fn probe(u: *Uring) void {
+    // glint-ignore: Z026 -- a kernel that cannot be probed reports no optional opcode
     const p = u.ring.get_probe() catch return;
     // Read by index: a newer kernel may name opcodes this enum does not.
     for (p.ops[0..@min(p.ops_len, p.ops.len)], 0..) |o, i| {

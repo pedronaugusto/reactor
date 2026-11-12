@@ -229,6 +229,7 @@ fn watch(d: *Deadlines, io: Io) void {
             if (idle_ticks > 1) {
                 idle_ticks = 0;
                 d.parked.store(.parked, .seq_cst);
+                // glint-ignore: Z026 -- canceled: the watcher ends with its task
                 if (d.armed.load(.seq_cst).eql(.fromRaw(0))) d.parked.wait(io, .parked) catch return;
                 d.parked.store(.running, .seq_cst);
                 continue;
@@ -236,6 +237,7 @@ fn watch(d: *Deadlines, io: Io) void {
         } else idle_ticks = 0;
         const seen = d.nudge.load(.acquire);
         const tick = d.tick.load(.monotonic).toIoDuration();
+        // glint-ignore: Z026 -- canceled: the watcher ends with its task
         d.nudge.waitTimeout(io, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
         d.scan(io);
     }

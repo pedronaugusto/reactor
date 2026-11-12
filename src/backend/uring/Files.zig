@@ -74,6 +74,7 @@ pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
         f.slots[index].store(.of(fd), .release);
         return;
     }
+    // glint-ignore: Z026 -- a file the ring cannot register goes by its own descriptor
     ring.register_files_update(index, &.{fd}) catch return;
     f.registered[index] = true;
     f.slots[index].store(.of(fd), .release);

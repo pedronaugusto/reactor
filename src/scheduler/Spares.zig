@@ -135,6 +135,7 @@ pub fn Of(comptime Item: type) type {
                     // Joined outside the lock: a spare leaving needs it to see the stop.
                     var held = sp.state.acquireUncancelable(system());
                     defer held.deinit(system());
+                    // glint-ignore: Z026 -- no spare left to join
                     held.value().threads.pop(&thread) catch return;
                 }
                 thread.join();

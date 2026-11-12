@@ -10,5 +10,6 @@
     { "file": "src/backend.zig", "rules": ["A007", "P007"], "reason": "the backend dispatch reads the kernel's ring words as the kernel writes them" },
     { "file": "src/ext/Overlapped.zig", "rules": ["A007"], "reason": "an overlapped call's status is a word Windows writes when the call completes" },
     { "module": "src/ext/", "rules": ["P007"], "reason": "reactor's OS extensions (jobs, signals, processes, pipes, receive groups), each a binding to its OS" }
-  ]
+  ],
+  "test_inputs": [{ "module": "bench/" }]
 }
