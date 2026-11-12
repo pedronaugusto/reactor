@@ -293,7 +293,7 @@ pub fn deinit(l: *Lanes, gpa: Allocator) void {
     for (l.admission.teardown().admitted) |n| assert(n == 0);
     if (l.mode == .owned) {
         for (l.reserve_entries) |*entry| if (entry.state == .holding) entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
-        for (&l.reserve_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // unreachable: shutdown is outside a cancelable executor task
+        for (&l.reserve_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // glint-ignore: Z026 -- shutdown is outside a cancelable executor task
         // std's instances restore the signal handlers they saw: last first.
         var i: usize = count;
         while (i > 0) {
@@ -578,7 +578,7 @@ pub fn cancel(l: *Lanes, job: *Job) void {
     var pending = job.pending.load(.acquire);
     while (true) {
         if (pending.eql(.fromRaw(0))) return;
-        const more = pending.add(.fromRaw(1)) catch unreachable; // unreachable: at most the call and one cancel hold it
+        const more = pending.add(.fromRaw(1)) catch unreachable; // glint-ignore: Z026 -- at most the call and one cancel hold it
         pending = job.pending.cmpxchgWeak(pending, more, .acq_rel, .acquire) orelse break;
     }
     const io = l.executor(job.lane);

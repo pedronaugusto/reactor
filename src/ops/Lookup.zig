@@ -86,7 +86,7 @@ pub fn deinit(l: *Lookup, gpa: Allocator, lanes: *Lanes) void {
     const system = Io.Threaded.global_single_threaded.io();
     for (l.records) |*r| {
         while (r.finished.load(.acquire) == .running) r.finished.waitUncancelable(system, .running);
-        r.job.group.await(lanes.executor(.lookup)) catch unreachable; // unreachable: shutdown runs outside a cancelable Threaded task
+        r.job.group.await(lanes.executor(.lookup)) catch unreachable; // glint-ignore: Z026 -- shutdown runs outside a cancelable Threaded task
     }
     for (l.records) |*r| lanes.retire(&r.job);
     gpa.free(l.records);

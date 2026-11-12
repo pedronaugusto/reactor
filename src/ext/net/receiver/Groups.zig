@@ -65,7 +65,7 @@ pub fn init(gpa: Allocator, io: Io, memory: []u8, length: aegis.units.Bytes(u32)
         g.* = .{ .ring = ring, .owner = p, .ring_buffers = .init(br), .registration = registration, .id = id, .entries = entries, .first = first, .count = count };
         linux.IoUring.buf_ring_init(br);
         for (0..count) |i| {
-            const from = length.convert(usize).mul(@as(usize, first) + i) catch unreachable; // unreachable: `memory` holds every buffer, so their offsets fit a usize
+            const from = length.convert(usize).mul(@as(usize, first) + i) catch unreachable; // glint-ignore: Z026 -- `memory` holds every buffer, so their offsets fit a usize
             linux.IoUring.buf_ring_add(br, memory[from.raw()..][0..length.raw()], @intCast(i), BufferRing.indexMask(entries), @intCast(i));
         }
         linux.IoUring.buf_ring_advance(br, @intCast(count));

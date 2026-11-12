@@ -148,7 +148,7 @@ pub fn run(m: *Monitor, s: anytype) void {
         if (delay.compare(shortest) == .gt) {
             _ = m.slow.raise(.monotonic);
         } else m.slow.clear(.monotonic);
-        m.word.waitTimeout(system(), seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // unreachable: the monitor is no task: nothing cancels it
+        m.word.waitTimeout(system(), seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // glint-ignore: Z026 -- the monitor is no task: nothing cancels it
         if (m.word.load(.acquire) != seen) delay = shortest;
     }
 }
@@ -206,9 +206,9 @@ fn doubled(delay: clocks.Span) clocks.Span {
 fn record(m: *Monitor, stall: Stall) void {
     // The monitor's thread alone records: a plain step, published.
     const n = m.stalls.load(.monotonic);
-    // aegis: no-danger(A004): a ring of the last stalls: only the count's remainder picks the slot to overwrite
+    // glint-ignore: A004 -- no-danger: a ring of the last stalls: only the count's remainder picks the slot to overwrite
     m.records[n.raw() % records_kept] = stall;
-    m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // unreachable: no program records 2^64 stalls
+    m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // glint-ignore: Z026 -- no program records 2^64 stalls
     if (builtin.mode != .debug and builtin.mode != .safe) return;
     for (&m.logged) |*site| {
         if (site.* == stall.site) return;

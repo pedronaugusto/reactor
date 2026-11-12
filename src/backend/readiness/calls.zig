@@ -400,8 +400,8 @@ fn sendMany(fd: posix.fd_t, messages: []net.OutgoingMessage, flags: u32) (net.So
     var iovecs: [64]posix.iovec = undefined;
     const n = @min(messages.len, headers.len);
     for (messages[0..n], headers[0..n], addresses[0..n], iovecs[0..n]) |*m, *h, *a, *v| {
-        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len }; // aegis: boundary(A019): the kernel only reads what a send gives it
-        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined }; // aegis: boundary(A019): the kernel only reads what a send gives it
+        v.* = .{ .base = @constCast(m.data_ptr), .len = m.data_len };
+        h.* = .{ .hdr = .{ .name = &a.any, .namelen = Threaded.addressToPosix(m.address, a), .iov = v[0..1], .iovlen = 1, .control = @constCast(m.control.ptr), .controllen = m.control.len, .flags = 0 }, .len = undefined };
     }
     while (true) {
         const rc = posix.system.sendmmsg(fd, &headers, @intCast(n), flags);
@@ -563,7 +563,7 @@ pub fn connect(fd: posix.fd_t, address: op.Connect.Address) ?ConnectError!void {
         .ip => |*ip| Threaded.addressToPosix(ip, &storage.ip),
         .unix => |unix| unixToPosix(unix, &storage.unix),
     };
-    const rc = posix.system.connect(fd, @ptrCast(&storage), len); // aegis: boundary(A019): the storage is a socket address of the length given
+    const rc = posix.system.connect(fd, @ptrCast(&storage), len);
     return switch (posix.errno(rc)) {
         .SUCCESS => {},
         // Interrupted, a connect goes on by itself.

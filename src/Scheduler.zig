@@ -903,7 +903,6 @@ const Lending = aegis.units.Count(Scheduler, u32);
 /// task was never offered to an idle processor). The address passes through
 /// an assembly statement, which the compiler cannot see through.
 pub noinline fn seatNow() *Seat {
-    // aegis: boundary(A019): the seat's address passes through an assembly statement the compiler cannot see through, so a switch does not merge it with an earlier read (above)
     return asm volatile (""
         : [address] "=r" (-> *Seat),
         : [seat] "0" (&seat),
@@ -1539,7 +1538,7 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
         return p.pushLocal(t, .spawned);
     };
     if (s.scheduling == .per_core) {
-        // aegis: no-danger(A004): a round robin: the count wraps, and only its remainder picks a processor
+        // glint-ignore: A004 -- no-danger: a round robin: the count wraps, and only its remainder picks a processor
         const i = s.shared.placement.fetchAddWrapping(.fromRaw(1), .monotonic).raw() % s.processors.len;
         const p = &s.processors[i];
         t.processor_loop = &p.loop;

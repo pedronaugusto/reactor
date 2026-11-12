@@ -202,7 +202,6 @@ fn waitsForKeys(io: Io) !void {
     defer keys.deinit(io);
     var installed: std.atomic.Value(bool) = .init(false);
     var owner = try io.concurrent(installLater, .{ io, stopped.ends[1], stopped.next, &keys, &installed });
-    // glint-ignore: Z026 -- cleanup should the receive fail first; the owner's own result is judged by `await` below
     defer owner.cancel(io) catch {};
 
     var data: [64]u8 = undefined;
@@ -303,7 +302,6 @@ fn sendsSealed(io: Io) !void {
     installDirection(ends[0], tls_tx, keys) catch return error.SkipZigTest;
 
     var opening = try io.concurrent(openAll, .{ io, ends[1], keys });
-    // glint-ignore: Z026 -- cleanup should the send fail first; the peer's own result is judged by `await` below
     defer opening.cancel(io) catch {};
     var buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &buffer);

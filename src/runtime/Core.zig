@@ -63,7 +63,6 @@ const home_stack_size = 256 << 10;
 pub const Holder = enum(usize) { none = 0, _ };
 
 pub const Stderr = struct {
-    // aegis: design(A007): std.Io implementation contract: lockStderr and unlockStderr: the lock is taken by one vtable call and let go by another, so no guard of a scope can hold it
     mutex: Io.Mutex = .init,
     /// Who holds it, so a holder may lock it again (`depth`).
     holder: aegis.Atomic(Holder) = .init(.none),

@@ -343,7 +343,7 @@ pub fn drainListeners(u: *Uring) void {
         if (!active) return;
         u.enter(.forever) catch |err| std.debug.panic("reactor: draining listeners failed: {t}", .{err});
         var cqes: [256]linux.io_uring_cqe = undefined;
-        const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // unreachable: the ring remains valid until the terminal completions
+        const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // glint-ignore: Z026 -- the ring remains valid until the terminal completions
         for (cqes[0..count]) |cqe| switch (tagOf(cqe.user_data)) {
             .listener => {
                 const target = u.lookup(cqe.user_data) orelse continue;
@@ -397,7 +397,6 @@ fn drainPressure(u: *Uring) void {
 pub fn consumePublished(u: *Uring) void {
     if (u.ring.flags & linux.IORING_SETUP_SQPOLL == 0) return;
     const tail = u.ring.sq.sqe_head;
-    // aegis: boundary(A007): the ring's head is the kernel's to move, in memory it shares with the ring's owner
     while (@atomicLoad(u32, u.ring.sq.head, .acquire) != tail) {
         u.enter(.nowait) catch |err| std.debug.panic("reactor: SQPOLL submission failed: {t}", .{err});
         if (u.ring.cq_ready() == u.ring.cq.cqes.len) u.drainPressure();
@@ -468,7 +467,7 @@ fn queue(u: *Uring, o: *op.Op) error{SystemResources}!void {
                 .unix => |unix| unixToPosix(unix, &a.storage.unix),
             };
             const sqe = u.entry();
-            sqe.prep_connect(c.socket, @ptrCast(&a.storage), a.len); // aegis: boundary(A019): the storage is a socket address of the length given
+            sqe.prep_connect(c.socket, @ptrCast(&a.storage), a.len);
             sqe.user_data = ud;
         },
         .read_at => |r| {
@@ -562,7 +561,7 @@ fn submitSingleAccept(u: *Uring, o: *op.Op) void {
     const a = &o.state.storage.scratch.io_uring.address;
     a.* = .{ .storage = undefined, .len = @sizeOf(@TypeOf(a.storage)) };
     const sqe = u.entry();
-    sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC); // aegis: boundary(A019): the kernel writes a socket address here
+    sqe.prep_accept(o.kind.accept, @ptrCast(&a.storage), &a.len, linux.SOCK.CLOEXEC);
     sqe.user_data = o.state.uring.key;
 }
 
@@ -600,8 +599,8 @@ fn submitIo(u: *Uring, o: *op.Op, operation: *const Io.Operation, ud: u64) void 
                 const bytes = @as([*]const u8, m.iovecs[0].base)[0..m.iovecs[0].len];
                 if (!o.state.uring.use_copy and u.features.zero_copy and bytes.len >= (u.zero_copy_min orelse std.math.maxInt(usize))) sqe.prep_send_zc(w.socket_handle, bytes, posix.MSG.NOSIGNAL, 0) else sqe.prep_send(w.socket_handle, bytes, posix.MSG.NOSIGNAL);
             } else {
-                m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 }; // aegis: boundary(A019): the kernel only reads what a send gives it
-                sqe.prep_sendmsg(w.socket_handle, @ptrCast(&m.header), posix.MSG.NOSIGNAL); // aegis: boundary(A019): msghdr and msghdr_const share their layout
+                m.header = .{ .name = null, .namelen = 0, .iov = &m.iovecs, .iovlen = count, .control = if (w.control.len == 0) null else @constCast(w.control.ptr), .controllen = @intCast(w.control.len), .flags = 0 };
+                sqe.prep_sendmsg(w.socket_handle, @ptrCast(&m.header), posix.MSG.NOSIGNAL);
             }
         },
         .net_receive => |r| {
@@ -616,9 +615,9 @@ fn submitIo(u: *Uring, o: *op.Op, operation: *const Io.Operation, ud: u64) void 
             o.state.storage.scratch = .{ .io_uring = .{ .message = undefined } };
             const m = &o.state.storage.scratch.io_uring.message;
             const message = &s.messages[0];
-            m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len }; // aegis: boundary(A019): the kernel only reads what a send gives it
-            m.header = .{ .name = &m.address.any, .namelen = Threaded.addressToPosix(message.address, &m.address), .iov = &m.iovecs, .iovlen = 1, .control = if (message.control.len == 0) null else @constCast(message.control.ptr), .controllen = @intCast(message.control.len), .flags = 0 }; // aegis: boundary(A019): the kernel only reads what a send gives it
-            sqe.prep_sendmsg(s.socket_handle, @ptrCast(&m.header), results.sendFlags(s.flags)); // aegis: boundary(A019): msghdr and msghdr_const share their layout
+            m.iovecs[0] = .{ .base = @constCast(message.data_ptr), .len = message.data_len };
+            m.header = .{ .name = &m.address.any, .namelen = Threaded.addressToPosix(message.address, &m.address), .iov = &m.iovecs, .iovlen = 1, .control = if (message.control.len == 0) null else @constCast(message.control.ptr), .controllen = @intCast(message.control.len), .flags = 0 };
+            sqe.prep_sendmsg(s.socket_handle, @ptrCast(&m.header), results.sendFlags(s.flags));
         },
         .device_io_control => unreachable, // unreachable: device control runs borrowed
     }
@@ -779,7 +778,6 @@ fn enter(u: *Uring, wait: Wait) error{ SystemResources, Unexpected }!void {
 }
 
 fn pendingInKernel(u: *Uring) bool {
-    // aegis: boundary(A007): the ring's flags are the kernel's to set, in memory it shares with the ring's owner
     const flags = @atomicLoad(u32, u.ring.sq.flags, .acquire);
     if (flags & linux.IORING_SQ_CQ_OVERFLOW != 0) return true;
     if (u.taskrun_flag) return flags & linux.IORING_SQ_TASKRUN != 0;
@@ -908,7 +906,7 @@ fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
         if (o.kind == .io and o.kind.io == .net_write) {
             o.state.uring = .{ .use_copy = true };
             u.active -= 1;
-            u.queue(o) catch unreachable; // unreachable: its own entry was freed just above
+            u.queue(o) catch unreachable; // glint-ignore: Z026 -- its own entry was freed just above
             return;
         }
     }
@@ -1006,7 +1004,7 @@ fn scatter(iovecs: []posix.iovec, splat_buffer: *[Threaded.splat_buffer_size]u8,
     const add = struct {
         fn f(v: []posix.iovec, count: *usize, bytes: []const u8) void {
             if (bytes.len == 0 or count.* == v.len) return;
-            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len }; // aegis: boundary(A019): the kernel only reads what a send gives it
+            v[count.*] = .{ .base = @constCast(bytes.ptr), .len = bytes.len };
             count.* += 1;
         }
     }.f;

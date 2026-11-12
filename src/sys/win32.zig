@@ -11,21 +11,16 @@ pub const infinite: windows.DWORD = 0xFFFF_FFFF;
 /// The most handles one `WaitForMultipleObjects` takes.
 pub const maximum_wait_objects = 64;
 
-// aegis: boundary(A019): kernel32's CreateEventW, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn CreateEventW(
     lpEventAttributes: ?*windows.SECURITY_ATTRIBUTES,
     bManualReset: windows.BOOL,
     bInitialState: windows.BOOL,
     lpName: ?windows.LPCWSTR,
 ) callconv(.winapi) ?windows.HANDLE;
-// aegis: boundary(A019): kernel32's SetEvent, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn SetEvent(hEvent: windows.HANDLE) callconv(.winapi) windows.BOOL;
-// aegis: boundary(A019): kernel32's ResetEvent, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn ResetEvent(hEvent: windows.HANDLE) callconv(.winapi) windows.BOOL;
 
-// aegis: boundary(A019): kernel32's WaitForSingleObject, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn WaitForSingleObject(hHandle: windows.HANDLE, dwMilliseconds: windows.DWORD) callconv(.winapi) windows.DWORD;
-// aegis: boundary(A019): kernel32's WaitForMultipleObjects, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn WaitForMultipleObjects(
     nCount: windows.DWORD,
     lpHandles: [*]const windows.HANDLE,
@@ -34,7 +29,6 @@ pub extern "kernel32" fn WaitForMultipleObjects(
 ) callconv(.winapi) windows.DWORD;
 
 pub const synchronize: windows.DWORD = 0x0010_0000;
-// aegis: boundary(A019): kernel32's DuplicateHandle, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn DuplicateHandle(
     hSourceProcessHandle: windows.HANDLE,
     hSourceHandle: windows.HANDLE,
@@ -46,7 +40,6 @@ pub extern "kernel32" fn DuplicateHandle(
 ) callconv(.winapi) windows.BOOL;
 
 /// A port not attached to a file: `FileHandle` is `INVALID_HANDLE_VALUE`.
-// aegis: boundary(A019): kernel32's CreateIoCompletionPort, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn CreateIoCompletionPort(
     FileHandle: windows.HANDLE,
     ExistingCompletionPort: ?windows.HANDLE,
@@ -56,7 +49,6 @@ pub extern "kernel32" fn CreateIoCompletionPort(
 
 /// For a job's message, the byte count is the message, the key the one
 /// the job was associated with, and the overlapped pointer a process id.
-// aegis: boundary(A019): kernel32's GetQueuedCompletionStatus, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn GetQueuedCompletionStatus(
     CompletionPort: windows.HANDLE,
     lpNumberOfBytesTransferred: *windows.DWORD,
@@ -65,7 +57,6 @@ pub extern "kernel32" fn GetQueuedCompletionStatus(
     dwMilliseconds: windows.DWORD,
 ) callconv(.winapi) windows.BOOL;
 
-// aegis: boundary(A019): kernel32's SetInformationJobObject, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn SetInformationJobObject(
     hJob: windows.HANDLE,
     JobObjectInformationClass: c_int,
@@ -95,7 +86,6 @@ pub const job_msg = struct {
 };
 
 pub const HandlerRoutine = *const fn (dwCtrlType: windows.DWORD) callconv(.winapi) windows.BOOL;
-// aegis: boundary(A019): kernel32's SetConsoleCtrlHandler, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn SetConsoleCtrlHandler(HandlerRoutine: ?HandlerRoutine, Add: windows.BOOL) callconv(.winapi) windows.BOOL;
 
 /// `CTRL_*_EVENT`.

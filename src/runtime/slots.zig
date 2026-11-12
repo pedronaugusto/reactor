@@ -329,7 +329,7 @@ fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.
 
 fn futexWaitUncancelable(userdata: ?*anyopaque, ptr: *const u32, expected: u32) void {
     const r = Core.running(userdata);
-    futex.wait(&r.scheduler, &r.futex, ptr, expected, .none, false) catch unreachable; // unreachable: not cancelable
+    futex.wait(&r.scheduler, &r.futex, ptr, expected, .none, false) catch unreachable; // glint-ignore: Z026 -- not cancelable
 }
 
 fn futexWake(userdata: ?*anyopaque, ptr: *const u32, max_waiters: u32) void {

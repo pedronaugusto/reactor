@@ -91,7 +91,6 @@ test "DNS queries a local server and ignores a mismatched reply" {
     config.servers[0] = socket.address;
     config.server_count = 1;
     var server = try io.concurrent(serve, .{ io, socket });
-    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer server.cancel(io) catch {};
     var addresses: [2]Io.net.IpAddress = undefined;
     try testing.expectEqual(@as(usize, 2), try stub.query(io, "local.example", 80, .ip4, &addresses, &config));
@@ -144,7 +143,6 @@ test "DNS follows a CNAME-only reply and retains the canonical name" {
     config.servers[0] = socket.address;
     config.server_count = 1;
     var server = try io.concurrent(serveCname, .{ io, socket });
-    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer server.cancel(io) catch {};
     var addresses: [2]Io.net.IpAddress = undefined;
     var canonical: stub.Name = .{};
@@ -208,10 +206,8 @@ test "DNS retries a truncated UDP answer over TCP" {
     config.servers[0] = udp.address;
     config.server_count = 1;
     var datagram = try io.concurrent(serveTruncated, .{ io, udp });
-    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer datagram.cancel(io) catch {};
     var stream = try io.concurrent(serveTcp, .{ io, &server });
-    // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
     defer stream.cancel(io) catch {};
     var addresses: [2]Io.net.IpAddress = undefined;
     try testing.expectEqual(@as(usize, 2), try stub.query(io, "truncated.example", 80, .ip4, &addresses, &config));
@@ -249,7 +245,6 @@ test "a cancel that stops the read of resolv.conf or the hosts file is Canceled,
             const made = made: {
                 const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
                 defer faults.deinit();
-                // glint-ignore: Z026 -- a read under faults may fail; the test counts the calls it made, not its result
                 read(faults.io()) catch {};
                 break :made faults.count(call);
             };

@@ -24,7 +24,7 @@ pub fn lookup(name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpA
     @memcpy(name_buffer[0..name.len], name);
     name_buffer[name.len] = 0;
     var port_buffer: [8]u8 = undefined;
-    const port_text = std.mem.printSentinel(&port_buffer, "{d}", .{port}, 0) catch unreachable; // unreachable: a u16 is at most five digits
+    const port_text = std.mem.printSentinel(&port_buffer, "{d}", .{port}, 0) catch unreachable; // glint-ignore: Z026 -- a u16 is at most five digits
     const hints: std.c.addrinfo = .{
         .flags = .{ .NUMERICSERV = true, .CANONNAME = canonical_buffer != null },
         .family = if (family) |f| switch (f) {

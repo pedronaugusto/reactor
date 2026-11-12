@@ -83,7 +83,7 @@ pub fn Of(comptime Item: type) type {
             if (state.idle + state.starting > state.waiting.len()) return true;
             if (state.threads.len() == sp.cap) return false;
             var thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, body, .{ context, null }) catch return false;
-            state.threads.append(&thread) catch unreachable; // unreachable: fewer threads than `cap`, checked above
+            state.threads.append(&thread) catch unreachable; // glint-ignore: Z026 -- fewer threads than `cap`, checked above
             state.starting += 1;
             return true;
         }

@@ -603,7 +603,6 @@ test "later: native zero-copy send completes ownership before payload reuse" {
         defer peer.close(testing.io);
         var payload: [64 << 10]u8 = @splat(0x6d);
         var reader = try testing.io.concurrent(drainPayload, .{ peer.socket, payload.len });
-        // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
         defer _ = reader.cancel(testing.io) catch {};
         var sent: usize = 0;
         var notified = false;
@@ -1013,7 +1012,6 @@ test "later: canceling native zero-copy sends drains ownership before poisoning 
         const peer = try server.accept(testing.io);
         defer peer.close(testing.io);
         var reader = try testing.io.concurrent(drainCanceledPayload, .{peer.socket});
-        // glint-ignore: Z026 -- cleanup after the test has judged the task; cancel hands back the task's own result, which the test no longer reads
         defer _ = reader.cancel(testing.io) catch {};
         var bytes: [64 << 10]u8 = @splat(0x61);
         var op: Loop.Op = .{ .backend = .{ .kind = .{ .io = .{ .net_write = .{ .socket_handle = stream.socket.handle, .data = &.{&bytes} } } } } };

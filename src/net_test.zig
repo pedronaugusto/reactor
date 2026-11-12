@@ -289,7 +289,6 @@ test "abort ends a read another task waits in" {
     try io.sleep(.fromMilliseconds(10), .awake);
     net.abort(io, stream.socket.handle);
     // End of stream, or an error: either way, not waiting.
-    // glint-ignore: Z026 -- after the abort a read may end or fail, and either way it did not wait, which is what the test asks
     if (reading.await(io)) |n| try testing.expectEqual(@as(usize, 0), n) else |_| {}
 }
 

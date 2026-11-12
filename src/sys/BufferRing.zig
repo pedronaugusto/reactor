@@ -19,7 +19,7 @@ pub const Error = error{ Unsupported, SystemResources, Unexpected };
 
 /// The mask the kernel's ring arithmetic takes: the entries are a power of two.
 pub fn indexMask(entries: Entries) u16 {
-    const last = entries.sub(.fromRaw(1)) catch unreachable; // unreachable: a ring holds at least two entries
+    const last = entries.sub(.fromRaw(1)) catch unreachable; // glint-ignore: Z026 -- a ring holds at least two entries
     return last.raw(); // c-os-boundary: the kernel's ring arithmetic
 }
 
@@ -44,12 +44,12 @@ pub fn init(fd: linux.fd_t, entries: Entries, id: Id) Error!BufferRing {
     const bytes = ringBytes(entries);
     const offset: u64 = 0x80000000 | (@as(u64, id.raw()) << 16);
     const memory = posix.mmap(null, bytes, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, offset) catch return error.SystemResources;
-    return .{ .br = @ptrCast(memory.ptr), .entries = entries, .id = id, .fd = fd }; // aegis: boundary(A019): the kernel maps an array of io_uring_buf entries here
+    return .{ .br = @ptrCast(memory.ptr), .entries = entries, .id = id, .fd = fd };
 }
 
 pub fn deinit(ring: *BufferRing) void {
     unregister(ring.fd, ring.id);
-    const memory: [*]align(std.heap.page_size_min) u8 = @ptrCast(ring.br); // aegis: boundary(A019): init mapped this buffer ring
+    const memory: [*]align(std.heap.page_size_min) u8 = @ptrCast(ring.br);
     posix.munmap(memory[0..ringBytes(ring.entries)]);
     ring.* = undefined;
 }

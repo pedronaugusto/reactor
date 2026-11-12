@@ -110,7 +110,6 @@ fn exchange(io: Io, file: Io.File, blocking: bool) !void {
     setBuffer(client.socket.handle, posix.SO.SNDBUF, 16 << 10);
 
     var reading = try io.concurrent(drain, .{ io, server, "head" });
-    // glint-ignore: Z026 -- cleanup should the send fail first; the reader's own result is judged by `await` below
     defer reading.cancel(io) catch {};
     var buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &buffer);

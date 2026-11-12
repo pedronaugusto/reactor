@@ -35,7 +35,7 @@ pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Fa
                     canceled = true;
                     const protection = io.swapCancelProtection(.blocked);
                     defer _ = io.swapCancelProtection(protection);
-                    while (win32.WaitForSingleObject(request.overlapped.event.?, 0) == win32.wait_timeout) io.sleep(.fromMilliseconds(1), .awake) catch unreachable; // unreachable: cancellation is protected
+                    while (win32.WaitForSingleObject(request.overlapped.event.?, 0) == win32.wait_timeout) io.sleep(.fromMilliseconds(1), .awake) catch unreachable; // glint-ignore: Z026 -- cancellation is protected
                     break;
                 };
             }

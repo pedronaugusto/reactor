@@ -81,7 +81,7 @@ fn run(r: *Core, o: *Loop.Op, options: perform.Options) perform.Error!void {
 /// the workers in turn, or the home processor when there are none.
 fn elsewhere(r: *Core) *Processor {
     if (r.processors.len == 1) return &r.processors[0];
-    // aegis: no-danger(A004): a round robin: the count wraps, and only its remainder picks a processor
+    // glint-ignore: A004 -- no-danger: a round robin: the count wraps, and only its remainder picks a processor
     return &r.processors[1 + r.scheduler.shared.placement.fetchAddWrapping(.fromRaw(1), .monotonic).raw() % (r.processors.len - 1)];
 }
 

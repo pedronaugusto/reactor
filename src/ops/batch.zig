@@ -216,7 +216,7 @@ fn drainAll(s: *Scheduler, batch: *Io.Batch, where: Where) void {
     while (index != .none) : (index = batch.storage[index.toIndex()].pending.node.next) {
         loop_internal.cancelPending(&p.loop, .of(batch, index.toIndex()));
     }
-    while (batch.pending.head != .none) _ = w.park(.empty, null) catch unreachable; // unreachable: not cancelable
+    while (batch.pending.head != .none) _ = w.park(.empty, null) catch unreachable; // glint-ignore: Z026 -- not cancelable
 }
 
 /// Parks until the batch has a completion (`any`) or nothing pending

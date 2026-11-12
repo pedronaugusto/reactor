@@ -653,7 +653,7 @@ fn timeoutFor(b: *Iocp, span: timeline.Span) ?u64 {
 
 /// `span` in the 100 ns units of Windows timers, rounded up.
 fn hectoNanoseconds(span: timeline.Span) u64 {
-    return std.math.divCeil(u64, span.raw(), 100) catch unreachable; // unreachable: the divisor is a constant
+    return std.math.divCeil(u64, span.raw(), 100) catch unreachable; // glint-ignore: Z026 -- the divisor is a constant
 }
 
 /// A timer armed this close before the deadline asked for is kept: the
@@ -667,7 +667,7 @@ fn armTimer(b: *Iocp, span: timeline.Span) bool {
     const at = now.add(span) catch timeline.Awake.fromRaw(std.math.maxInt(u64)); // a wait past the timeline's end is its end
     if (b.timer_armed) {
         if (b.timer_at.compare(at) != .gt) {
-            const early = b.timer_at.durationTo(at) catch unreachable; // unreachable: the timer is not later than `at`, checked above
+            const early = b.timer_at.durationTo(at) catch unreachable; // glint-ignore: Z026 -- the timer is not later than `at`, checked above
             if (early.compare(timer_slack) != .gt) return true;
         }
         switch (sys.disarmWaitPacket(b.timer_packet)) {
@@ -697,7 +697,6 @@ fn dispatch(b: *Iocp, e: sys.Entry, sink: anytype) void {
         },
         else => {},
     }
-    // aegis: boundary(A019): NT gives back a request's APC context as it was given, and reactor gives every request the address of its status header
     const status: *Request = @ptrFromInt(e.context);
     switch (status.owner) {
         .operation => {

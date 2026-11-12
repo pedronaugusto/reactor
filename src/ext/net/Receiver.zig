@@ -346,7 +346,7 @@ const Native = struct {
         var held = state.mailbox.acquireUncancelable(system());
         defer held.deinit(system());
         // One closer, and no deadline: it waits until the request is over.
-        while (!held.value().ended) held.waitUncancelable(&state.changed, io, .none) catch unreachable; // unreachable: one closer waits, with no deadline
+        while (!held.value().ended) held.waitUncancelable(&state.changed, io, .none) catch unreachable; // glint-ignore: Z026 -- one closer waits, with no deadline
         const mailbox = held.value();
         const pool = state.receiver.pool;
         while (mailbox.head) |index| {

@@ -40,7 +40,6 @@ pub const fsctl_pipe_disconnect: windows.CTL_CODE = .{
     .Access = .ANY,
 };
 
-// aegis: boundary(A019): kernel32's CreateFileW, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn CreateFileW(
     lpFileName: windows.LPCWSTR,
     dwDesiredAccess: windows.DWORD,
@@ -51,7 +50,6 @@ pub extern "kernel32" fn CreateFileW(
     hTemplateFile: ?windows.HANDLE,
 ) callconv(.winapi) windows.HANDLE;
 
-// aegis: boundary(A019): kernel32's CreateNamedPipeW, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn CreateNamedPipeW(
     lpName: windows.LPCWSTR,
     dwOpenMode: windows.DWORD,
@@ -63,7 +61,6 @@ pub extern "kernel32" fn CreateNamedPipeW(
     lpSecurityAttributes: ?*windows.SECURITY_ATTRIBUTES,
 ) callconv(.winapi) windows.HANDLE;
 
-// aegis: boundary(A019): advapi32's ConvertStringSecurityDescriptorToSecurityDescriptorW, declared as Microsoft's Win32 documentation gives it
 pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     StringSecurityDescriptor: windows.LPCWSTR,
     StringSDRevision: windows.DWORD,
@@ -71,5 +68,4 @@ pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     SecurityDescriptorSize: ?*windows.ULONG,
 ) callconv(.winapi) windows.BOOL;
 
-// aegis: boundary(A019): kernel32's LocalFree, declared as Microsoft's Win32 documentation gives it
 pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;

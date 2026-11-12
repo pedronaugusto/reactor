@@ -26,17 +26,11 @@ pub const Info = extern struct {
     next: ?*Info = null,
 };
 
-// aegis: boundary(A019): ws2_32's WSAStartup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSAStartup(version: u16, data: *anyopaque) callconv(.winapi) c_int;
-// aegis: boundary(A019): ws2_32's WSACleanup, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn WSACleanup() callconv(.winapi) c_int;
-// aegis: boundary(A019): ws2_32's GetAddrInfoExW, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExW(name: [*:0]const u16, service: [*:0]const u16, namespace: u32, provider: ?*anyopaque, hints: *const Info, result: *?*Info, timeout: ?*anyopaque, overlapped: *Overlapped, completion: ?*anyopaque, cancel_handle: *?windows.HANDLE) callconv(.winapi) c_int;
-// aegis: boundary(A019): ws2_32's GetAddrInfoExCancel, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExCancel(handle: *?windows.HANDLE) callconv(.winapi) c_int;
-// aegis: boundary(A019): ws2_32's GetAddrInfoExOverlappedResult, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn GetAddrInfoExOverlappedResult(overlapped: *Overlapped) callconv(.winapi) c_int;
-// aegis: boundary(A019): ws2_32's FreeAddrInfoExW, declared as Microsoft's Winsock documentation gives it
 extern "ws2_32" fn FreeAddrInfoExW(info: *Info) callconv(.winapi) void;
 
 pub const Error = error{ NameNotResolved, SystemResources, Unexpected };
@@ -60,7 +54,7 @@ pub const Request = struct {
         const count = std.unicode.utf8ToUtf16Le(&r.name, name) catch return error.NameNotResolved;
         r.name[count] = 0;
         var text: [8]u8 = undefined;
-        const digits = std.mem.print(&text, "{d}", .{port}) catch unreachable; // unreachable: eight bytes hold a u16
+        const digits = std.mem.print(&text, "{d}", .{port}) catch unreachable; // glint-ignore: Z026 -- eight bytes hold a u16
         for (digits, 0..) |digit, i| r.service[i] = digit;
         r.service[digits.len] = 0;
         const hints: Info = .{ .flags = 2, .family = if (family) |f| switch (f) {

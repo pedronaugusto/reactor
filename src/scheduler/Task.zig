@@ -360,14 +360,12 @@ pub fn unlockGroup(g: *Io.Group) void {
 /// in its awaiter. Under the lock.
 fn listedOf(g: *Io.Group) *?*Task {
     if (awaiterOf(g)) |a| return &a.members;
-    // aegis: design(A019): std.Io implementation contract: Io.Group gives the implementation one word, `state`, where this runtime keeps the first listed member while the group is not awaited
     return @ptrCast(&g.state);
 }
 
 /// The group's awaiter, if it is awaited. Under the lock.
 fn awaiterOf(g: *Io.Group) ?*Awaiter {
     if (g.state & group_awaited == 0) return null;
-    // aegis: design(A019): std.Io implementation contract: Io.Group gives the implementation one word, `state`, where this runtime keeps the awaiter, its low bit set, while the group is awaited
     return @ptrFromInt(g.state & ~group_awaited);
 }
 

@@ -102,7 +102,7 @@ pub fn init(shortest: Io.Duration) Deadlines {
 
 /// A tenth of `d`, between a millisecond and a second.
 fn tickFor(d: Io.Duration) clock.Span {
-    const tenth = clock.spanOf(d).divTrunc(10) catch unreachable; // unreachable: the divisor is a constant
+    const tenth = clock.spanOf(d).divTrunc(10) catch unreachable; // glint-ignore: Z026 -- the divisor is a constant
     const shortest: clock.Span = .literal("1ms");
     const longest: clock.Span = .literal("1s");
     if (tenth.compare(shortest) == .lt) return shortest;

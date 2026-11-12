@@ -112,11 +112,8 @@ const Watchdog = struct {
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
         var output = std.Io.File.stderr().writer(io, &buffer);
-        // glint-ignore: Z026 -- the watchdog is ending the process; a failed write to stderr has nowhere to be reported
         output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
-        // glint-ignore: Z026 -- the watchdog is ending the process; a failed dump has nowhere to be reported
         w.runtime.dump(&output.interface) catch {};
-        // glint-ignore: Z026 -- the watchdog is ending the process; a failed flush has nowhere to be reported
         output.interface.flush() catch {};
         std.process.exit(70);
     }

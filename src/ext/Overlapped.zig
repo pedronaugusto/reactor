@@ -90,7 +90,6 @@ pub fn start(o: *Overlapped, comptime begin: anytype, handle: windows.HANDLE, co
 /// writes the status block before it signals the event.
 pub fn ended(o: *const Overlapped) bool {
     if (!o.outstanding) return false;
-    // aegis: boundary(A007): the kernel writes the status block as the call ends, so it is read atomically where it lies
     return @atomicLoad(windows.NTSTATUS, &o.iosb.u.Status, .acquire) != .PENDING;
 }
 

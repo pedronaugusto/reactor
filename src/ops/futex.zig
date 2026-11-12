@@ -120,7 +120,6 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
     var w: Waiter = .{ .ptr = ptr, .task = t, .bucket = b, .scheduler = s };
     if (cancelable) try t.enterWait(&w.hook);
     var held = b.acquire();
-    // aegis: design(A007): std.Io implementation contract: futexWait's word is the caller's, read where it lies as every waker writes it
     if (@atomicLoad(u32, ptr, .seq_cst) != expected) {
         held.deinit();
         t.leaveWait();
@@ -153,7 +152,6 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
 fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout: Io.Timeout, cancelable: bool) error{Canceled}!void {
     var w: Waiter = .{ .ptr = ptr, .task = null, .bucket = b, .scheduler = s };
     var held = b.acquire();
-    // aegis: design(A007): std.Io implementation contract: futexWait's word is the caller's, read where it lies as every waker writes it
     if (@atomicLoad(u32, ptr, .seq_cst) != expected) {
         held.deinit();
         return;
