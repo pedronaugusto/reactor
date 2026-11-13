@@ -87,39 +87,48 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
     };
     const deadline = options.timeout.toDeadline(io);
     const Race = union(enum) {
-        connected: Error!net.Stream,
+        connected: Error!owned.Stream,
         expired: Io.Cancelable!void,
     };
     var buffer: [2]Race = undefined;
     var race: Io.Select(Race) = .init(io, &buffer);
     defer while (race.cancel()) |late| switch (late) {
         // glint-ignore: Z026 -- a late connect that failed made no stream to close
-        .connected => |result| if (result) |stream| stream.close(io) else |_| {},
+        .connected => |result| if (result) |stream| {
+            var held = stream;
+            held.deinit(io);
+        } else |_| {},
         .expired => {},
     };
-    race.concurrent(.connected, net.IpAddress.connect, .{ address, io, plain }) catch
+    race.concurrent(.connected, connectOwned, .{ address, io, plain }) catch
         return .{ .stream = .init(try address.connect(io, plain)), .timeout_enforced = false };
     race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, io }) catch {
         // The connect runs already: wait for it, unbounded.
         return switch (try race.await()) {
-            .connected => |result| .{ .stream = .init(try result), .timeout_enforced = false },
+            .connected => |result| .{ .stream = try result, .timeout_enforced = false },
             .expired => unreachable, // unreachable: no timer task was started
         };
     };
     return switch (try race.await()) {
-        .connected => |result| .{ .stream = .init(try result) },
+        .connected => |result| .{ .stream = try result },
         .expired => |result| expired: {
             try result;
             // A connection already made remains the caller's, even if the
             // timer's result reached the select first.
             while (race.cancel()) |late| switch (late) {
                 // glint-ignore: Z026 -- a late connect that failed made no stream: the timeout stands
-                .connected => |connected| if (connected) |stream| break :expired .{ .stream = .init(stream) } else |_| {},
+                .connected => |connected| if (connected) |stream| break :expired .{ .stream = stream } else |_| {},
                 .expired => {},
             };
             break :expired error.Timeout;
         },
     };
+}
+
+/// The race's connect: the stream it makes, owned from the moment it exists, so the select's
+/// result holds an owner, never a bare stream.
+fn connectOwned(address: *const net.IpAddress, io: Io, options: net.IpAddress.ConnectOptions) Error!owned.Stream {
+    return .init(try address.connect(io, options));
 }
 
 pub const UnixError = net.UnixAddress.ConnectError || error{NameTooLong};
