@@ -16,6 +16,7 @@ const HostName = Io.net.HostName;
 
 const getaddrinfo = @import("../../sys/getaddrinfo.zig");
 const native = @import("../native.zig");
+const aegis = @import("aegis");
 
 /// The most addresses one lookup keeps.
 pub const max_addresses = 32;
@@ -39,7 +40,7 @@ pub const Error = error{
 /// in the resolver's order: the address itself when `host` is one, IPv6
 /// brackets allowed.
 pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpAddress) Error![]IpAddress {
-    std.debug.assert(out.len != 0);
+    aegis.assert.invariant(out.len != 0, "out.len != 0");
     if (literal(host, port)) |address| {
         if (options.family) |f| if (address != f) return error.NameNotResolved;
         out[0] = address;

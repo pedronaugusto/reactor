@@ -55,11 +55,11 @@ pub fn init(gpa: std.mem.Allocator, count: u32, processors: u16) std.mem.Allocat
     return .{ .records = records, .buckets = buckets };
 }
 pub fn deinit(trims: *Trims, gpa: std.mem.Allocator) void {
-    for (trims.records) |*record| std.debug.assert(record.task == null);
+    for (trims.records) |*record| aegis.assert.invariant(record.task == null, "record.task == null");
     // A shared timer can outlast its last candidate. Stop it while its
     // loop is still alive; canceled callbacks do not inspect any stack.
     for (trims.buckets) |*bucket| {
-        std.debug.assert(bucket.head == null);
+        aegis.assert.invariant(bucket.head == null, "bucket.head == null");
         if (bucket.armed) bucket.loop.?.cancel(&bucket.op);
     }
     gpa.free(trims.buckets);
@@ -72,7 +72,7 @@ pub fn deinit(trims: *Trims, gpa: std.mem.Allocator) void {
 pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Records, pool: *const shuttle.Pool, counter: *aegis.Atomic(Count), sp: usize) void {
     const record = &trims.records[task.stack.?.raw()];
     const bucket = &trims.buckets[processor];
-    std.debug.assert(record.task == null);
+    aegis.assert.invariant(record.task == null, "record.task == null");
     bucket.loop = loop;
     bucket.records = records;
     bucket.pool = pool;
@@ -96,8 +96,8 @@ pub fn arm(trims: *Trims, loop: *Loop, processor: u16, task: *Task, records: *Re
 /// pin. The shared timer remains armed for its original deadline.
 pub fn beforeRun(trims: *Trims, loop: *Loop, task: *Task) void {
     const record = &trims.records[task.stack.?.raw()];
-    std.debug.assert(record.task == task);
-    std.debug.assert(record.bucket.loop == loop);
+    aegis.assert.invariant(record.task == task, "record.task == task");
+    aegis.assert.invariant(record.bucket.loop == loop, "record.bucket.loop == loop");
     if (record.queued) unlink(record);
     record.task = null;
     task.pins -= 1;

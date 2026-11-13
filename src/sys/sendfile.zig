@@ -8,6 +8,7 @@
 //! (`room` bounds it).
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const posix = std.posix;
 const Io = std.Io;
 
@@ -51,8 +52,8 @@ pub const Sent = union(enum) {
 /// the kernel moves past what it sent.
 pub fn send(socket: Io.net.Socket.Handle, file: Io.File.Handle, offset: ?u64, count: usize) Error!Sent {
     if (comptime !supported) @compileError("sendfile is Linux's and Darwin's");
-    std.debug.assert(count > 0);
-    std.debug.assert(count <= max_count);
+    aegis.assert.invariant(count > 0, "count > 0");
+    aegis.assert.invariant(count <= max_count, "count <= max_count");
     if (comptime is_darwin) return sendDarwin(socket, file, offset.?, count);
     return sendLinux(socket, file, offset, count);
 }

@@ -7,7 +7,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Raised = @import("../sync/Raised.zig");
@@ -47,7 +47,7 @@ pub fn Of(comptime Item: type) type {
 
         pub fn deinit(sp: *Spares) void {
             const state = sp.state.teardown();
-            assert(state.threads.len() == 0);
+            assert(state.threads.len() == 0, "state.threads.len() == 0");
             state.waiting.deinit(noCleanup(*Item));
             state.threads.deinit(noCleanup(std.Thread));
             sp.* = undefined;

@@ -17,7 +17,7 @@
 //! then, as std's `operateTimeout` does with its batch on its stack.
 const builtin = @import("builtin");
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
@@ -28,6 +28,7 @@ const Task = @import("../scheduler/Task.zig");
 const Processor = @import("../Scheduler.zig").Processor;
 const Scheduler = @import("../Scheduler.zig");
 const perform = @import("perform.zig");
+const aegis = @import("aegis");
 
 const Index = Io.Operation.OptionalIndex;
 
@@ -81,7 +82,7 @@ const Waiter = struct {
 
     /// Kept on the task, where the batch's completions find it, until `leave`.
     fn enter(w: *Waiter) void {
-        assert(w.task.batch_wait == null);
+        assert(w.task.batch_wait == null, "w.task.batch_wait == null");
         w.task.batch_wait = &w.node;
     }
 

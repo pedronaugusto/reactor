@@ -17,7 +17,7 @@ const Deadlines = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const clock = @import("../../clock.zig");
@@ -130,7 +130,7 @@ pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
 /// Every watch must have been removed.
 pub fn deinit(d: *Deadlines, io: Io) void {
     var held = d.watching.acquireUncancelable(io);
-    assert(held.value().watches.first == null);
+    assert(held.value().watches.first == null, "held.value().watches.first == null");
     var task = held.value().task;
     held.deinit(io);
     if (task) |*running| running.cancel(io);
@@ -156,7 +156,7 @@ pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
 /// Stops watching `w`, which has no operation under way. Once this
 /// returns, nothing touches `w` or its socket.
 pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
-    assert(w.deadline.load(.monotonic).eql(unarmed));
+    assert(w.deadline.load(.monotonic).eql(unarmed), "w.deadline.load(.monotonic).eql(unarmed)");
     if (native.runtimeOf(io) != null or w.target == .pipe) return;
     var held = d.watching.acquireUncancelable(io);
     defer held.deinit(io);

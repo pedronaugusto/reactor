@@ -2,6 +2,7 @@
 //! READ_FIXED/WRITE_FIXED may use any subrange of that registered memory.
 const Buffers = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const linux = std.os.linux;
 const posix = std.posix;
 
@@ -21,8 +22,8 @@ pub fn init(gpa: std.mem.Allocator, ring: *linux.IoUring, count: u16) std.mem.Al
 
 pub fn deinit(b: *Buffers, gpa: std.mem.Allocator) void {
     for (b.slots) |slot| {
-        std.debug.assert(slot.base == 0);
-        std.debug.assert(slot.users == 0);
+        aegis.assert.invariant(slot.base == 0, "slot.base == 0");
+        aegis.assert.invariant(slot.users == 0, "slot.users == 0");
     }
     gpa.free(b.slots);
     b.* = undefined;
@@ -41,7 +42,7 @@ pub fn register(b: *Buffers, ring: *linux.IoUring, memory: []u8) Error!u16 {
 }
 
 pub fn unregister(b: *Buffers, ring: *linux.IoUring, index: u16) void {
-    std.debug.assert(b.slots[index].users == 0);
+    aegis.assert.invariant(b.slots[index].users == 0, "b.slots[index].users == 0");
     const Empty = extern struct { base: ?[*]u8 = null, length: usize = 0 };
     var empty: Empty = .{};
     update(ring.fd, index, @ptrCast(&empty)) catch |err| std.debug.panic("reactor: unregistering a fixed buffer failed: {t}", .{err});
@@ -74,6 +75,6 @@ pub fn use(b: *Buffers, sqe: *linux.io_uring_sqe) ?u16 {
 }
 
 pub fn release(b: *Buffers, index: u16) void {
-    std.debug.assert(b.slots[index].users > 0);
+    aegis.assert.invariant(b.slots[index].users > 0, "b.slots[index].users > 0");
     b.slots[index].users -= 1;
 }

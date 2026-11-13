@@ -9,7 +9,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
@@ -114,7 +114,7 @@ pub const Deadline = struct {
         if (!d.armed) return;
         d.armed = false;
         const p = d.processor;
-        assert(Scheduler.processor() == p);
+        assert(Scheduler.processor() == p, "Scheduler.processor() == p");
         if (d.op.backend.state.current() != .idle) {
             p.loop.cancel(&d.op);
             // A wheel timer is delivered inside the cancel; the kernel's

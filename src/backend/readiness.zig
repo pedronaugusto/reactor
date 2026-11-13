@@ -27,7 +27,7 @@
 //! `wait` (its own events), `decode`, `wake`, `woken`, `handle`,
 //! `armClock` and `clockFired`.
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -43,6 +43,7 @@ const kernel_time = @import("kernel_time.zig");
 const KernelTime = kernel_time.KernelTime;
 
 pub const Waiter = @import("readiness/Waiter.zig");
+const aegis = @import("aegis");
 pub const Direction = records_.Direction;
 pub const Directions = records_.Directions;
 pub const How = Waiter.How;
@@ -153,7 +154,7 @@ pub fn Readiness(comptime Poller: type) type {
             outcome: pending.Outcome = undefined,
 
             fn of(w: *Waiter) *Entry {
-                assert(w.owner == .batch);
+                assert(w.owner == .batch, "w.owner == .batch");
                 return @alignCast(@fieldParentPtr("waiter", w)); // safe: a waiter with no operation is an entry's
             }
         };
@@ -223,7 +224,7 @@ pub fn Readiness(comptime Poller: type) type {
 
         /// The operation whose scratch holds `w`.
         fn opOf(w: *Waiter) *op.Op {
-            assert(w.owner == .operation);
+            assert(w.owner == .operation, "w.owner == .operation");
             const scratch: *op.Scratch = @alignCast(@fieldParentPtr(Poller.name, w));
             const storage: *op.State.Storage = @alignCast(@fieldParentPtr("scratch", scratch));
             const state: *op.State = @alignCast(@fieldParentPtr("storage", storage));
@@ -640,7 +641,7 @@ pub fn Readiness(comptime Poller: type) type {
         /// Frees an idle record, deregistering its descriptor.
         fn letGo(self: *Self, index: u32) SubmitError!void {
             const r = self.records.at(index);
-            assert(r.idle());
+            assert(r.idle(), "r.idle()");
             if (r.epoch == closes.epoch(r.fd) and !r.registered.none()) {
                 try self.room();
                 self.poller.deregister(r.fd, r.registered, .open);

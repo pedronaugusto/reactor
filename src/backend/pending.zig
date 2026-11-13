@@ -6,7 +6,8 @@
 //! keeps the token in a table of its own and hands it the key.
 const builtin = @import("builtin");
 const std = @import("std");
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const net = Io.net;
 
@@ -25,7 +26,7 @@ pub const Token = struct {
     at: u32,
 
     pub fn of(b: *Io.Batch, at: u32) Token {
-        assert(at < max_operations);
+        assert(at < max_operations, "at < max_operations");
         return .{ .owner = b, .at = at };
     }
 
@@ -69,7 +70,7 @@ const Packed = if (is_windows) extern union {
 
     comptime {
         // The last word is the backend's (`backendWord`).
-        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata) - @sizeOf(usize));
+        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata) - @sizeOf(usize), "@sizeOf(Packed) <= @sizeOf(Pending.Userdata) - @sizeOf(usize)");
     }
 } else extern union {
     file_read: extern struct { handle: Io.File.Handle, flags: u32, data_ptr: [*]const []u8, data_len: usize },
@@ -80,7 +81,7 @@ const Packed = if (is_windows) extern union {
     net_write: extern struct { handle: net.Socket.Handle, splat: u32, header_ptr: [*]const u8, header_len: usize, data_ptr: [*]const []const u8, data_len: usize, control_ptr: [*]const u8, control_len: usize },
 
     comptime {
-        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata));
+        assert(@sizeOf(Packed) <= @sizeOf(Pending.Userdata), "@sizeOf(Packed) <= @sizeOf(Pending.Userdata)");
     }
 };
 
@@ -155,6 +156,6 @@ fn unpackWindows(tag: Io.Operation.Tag, d: *const Packed) Io.Operation {
 /// Windows: the word after the packed operation, the backend's own (its
 /// record of the call while the kernel holds it).
 pub fn backendWord(p: *Pending) *usize {
-    comptime assert(is_windows);
+    comptime assert(is_windows, "is_windows");
     return &p.userdata[p.userdata.len - 1];
 }

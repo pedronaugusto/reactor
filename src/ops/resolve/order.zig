@@ -1,6 +1,7 @@
 //! Stable RFC 6724 destination selection: usable route, matching scope,
 //! destination precedence, then the resolver's original order.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const net = Io.net;
 
@@ -17,7 +18,7 @@ pub fn before(a: Rank, b: Rank) bool {
 }
 
 pub fn sort(io: Io, addresses: []net.IpAddress) Io.Cancelable!void {
-    std.debug.assert(addresses.len <= 64);
+    aegis.assert.invariant(addresses.len <= 64, "addresses.len <= 64");
     if (addresses.len < 2) return;
     var ranks: [64]Rank = undefined;
     for (addresses, ranks[0..addresses.len]) |address, *r| {

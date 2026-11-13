@@ -12,6 +12,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const op = @import("../op.zig");
+const aegis = @import("aegis");
 
 pub const bound = 8;
 pub const Slot = struct {
@@ -162,7 +163,7 @@ pub fn submit(a: *Accept, u: anytype, o: *op.Op) bool {
 }
 
 fn arm(_: *Accept, u: anytype, r: *Record) void {
-    std.debug.assert(!r.closing);
+    aegis.assert.invariant(!r.closing, "!r.closing");
     for (&r.slots) |*slot| {
         if (r.count + r.pending >= r.ahead) break;
         if (slot.active) continue;
@@ -249,7 +250,7 @@ fn stop(u: anytype, r: *Record) void {
 /// A slot is retained until its sole completion, including after close.
 pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, sink: anytype) void {
     const r = slot.record;
-    std.debug.assert(slot.active);
+    aegis.assert.invariant(slot.active, "slot.active");
     slot.active = false;
     r.pending -= 1;
     r.armed = r.pending != 0;
@@ -260,7 +261,7 @@ pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, si
             o.result = .{ .accept = peer(slot, cqe.res) };
             sink.complete(o);
         } else {
-            std.debug.assert(r.count < bound);
+            aegis.assert.invariant(r.count < bound, "r.count < bound");
             r.sockets[(r.first + r.count) % bound] = peer(slot, cqe.res);
             r.count += 1;
             // Grow only when a connection arrives before its consumer.
@@ -286,9 +287,9 @@ pub fn complete(a: *Accept, u: anytype, slot: *Slot, cqe: linux.io_uring_cqe, si
 /// Shutdown has no live task operations; release late accepted descriptors.
 pub fn drain(a: *Accept, slot: *Slot, result: i32) void {
     const r = slot.record;
-    std.debug.assert(slot.active);
-    std.debug.assert(r.closing);
-    std.debug.assert(r.head == null);
+    aegis.assert.invariant(slot.active, "slot.active");
+    aegis.assert.invariant(r.closing, "r.closing");
+    aegis.assert.invariant(r.head == null, "r.head == null");
     if (result >= 0) _ = linux.close(result);
     slot.active = false;
     r.pending -= 1;

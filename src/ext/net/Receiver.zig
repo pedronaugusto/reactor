@@ -56,8 +56,8 @@ pub const Pool = struct {
     pub const InitError = Groups.Error || Registrations.Error;
 
     pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Pool {
-        std.debug.assert(!options.buffer_len.eql(.fromRaw(0)));
-        std.debug.assert(options.buffers > 0);
+        aegis.assert.invariant(!options.buffer_len.eql(.fromRaw(0)), "!options.buffer_len.eql(.fromRaw(0))");
+        aegis.assert.invariant(options.buffers > 0, "options.buffers > 0");
         // Sizes come from the caller: a pool too large to count is too large to allocate.
         const length = options.buffer_len.convert(usize);
         const size = length.mul(options.buffers) catch return error.OutOfMemory;
@@ -84,7 +84,7 @@ pub const Pool = struct {
 
     /// Every buffer given back; before the owning runtime stops.
     pub fn deinit(p: *Pool, gpa: Allocator, io: Io) void {
-        std.debug.assert(p.receivers.load(.acquire).eql(.fromRaw(0)));
+        aegis.assert.invariant(p.receivers.load(.acquire).eql(.fromRaw(0)), "p.receivers.load(.acquire).eql(.fromRaw(0))");
         if (builtin.os.tag == .linux) {
             if (p.groups) |*groups| groups.deinit(gpa, io);
             if (p.fixed) |*fixed| fixed.deinit(gpa, io);
@@ -174,8 +174,8 @@ pub fn next(r: *Receiver, io: Io, timeout: Io.Timeout) NextError![]const u8 {
 pub fn release(r: *Receiver, bytes: []const u8) void {
     const index = r.lent orelse return;
     const start = @intFromPtr(r.pool.buffer(index).ptr); // safe: an address compared, never dereferenced
-    std.debug.assert(@intFromPtr(bytes.ptr) >= start); // safe: an address compared, never dereferenced
-    std.debug.assert(@intFromPtr(bytes.ptr) < start + r.pool.buffer_len); // safe: an address compared, never dereferenced
+    aegis.assert.invariant(@intFromPtr(bytes.ptr) >= start, "@intFromPtr(bytes.ptr) >= start"); // safe: an address compared, never dereferenced
+    aegis.assert.invariant(@intFromPtr(bytes.ptr) < start + r.pool.buffer_len, "@intFromPtr(bytes.ptr) < start + r.pool.buffer_len"); // safe: an address compared, never dereferenced
     r.giveBack();
 }
 
@@ -280,7 +280,7 @@ const Native = struct {
         if (final) state.owner.release(state.receiver.socket);
         if (cqe.flags & std.os.linux.IORING_CQE_F_BUFFER != 0) {
             const local: u32 = @as(u16, @truncate(cqe.flags >> 16));
-            std.debug.assert(local < state.group.count);
+            aegis.assert.invariant(local < state.group.count, "local < state.group.count");
             const index = state.group.first + local;
             if (cqe.res <= 0 or mailbox.closed) {
                 state.group.give(pool.memory, pool.buffer_len, local);

@@ -6,7 +6,7 @@
 //! processor meanwhile, where all of them complete.
 const std = @import("std");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
@@ -14,6 +14,7 @@ const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
 const Processor = Scheduler.Processor;
 const perform = @import("perform.zig");
+const aegis = @import("aegis");
 
 /// The most members one wait takes.
 pub const max = 64;
@@ -94,8 +95,8 @@ fn handleOf(w: Loop.Waitable) Io.File.Handle {
 /// task until `deadline`. A member that completes in the same pass as an
 /// earlier one is not reported: the earliest completion wins.
 pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.Timestamp) Error!usize {
-    assert(members.len > 0);
-    assert(members.len <= max);
+    assert(members.len > 0, "members.len > 0");
+    assert(members.len <= max, "members.len <= max");
     const p = Scheduler.processor().?;
     const t = p.current.?;
     var ops: [max]Loop.Op = undefined;
@@ -130,6 +131,6 @@ pub fn first(s: *Scheduler, members: []const Loop.Waitable, deadline: ?Io.Clock.
     if (w.first) |i| return i;
     if (w.failure) |e| return e;
     if (w.requested) return t.acknowledge();
-    assert(w.timed_out);
+    assert(w.timed_out, "w.timed_out");
     return error.Timeout;
 }

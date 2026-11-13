@@ -8,6 +8,7 @@ const std = @import("std");
 const Task = @import("../scheduler/Task.zig");
 const Scheduler = @import("../Scheduler.zig");
 const Lanes = @import("../Lanes.zig");
+const aegis = @import("aegis");
 
 fn ReturnOf(comptime F: type) type {
     return @typeInfo(@typeInfo(F).pointer.child).@"fn".return_type.?;
@@ -103,7 +104,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
 }
 
 fn perform(comptime R: type, comptime raw: bool, comptime control_: bool, lanes: *Lanes, lane: Lanes.Lane, func: anytype, args: anytype) R {
-    if (comptime !raw) std.debug.assert(lanes.started);
+    if (comptime !raw) aegis.assert.invariant(lanes.started, "lanes.started");
     if (lanes.inlined()) return direct(lanes, lane, func, args);
     const t = Scheduler.current() orelse return fromThread(R, raw, control_, lanes, lane, func, args);
     // The caller is woken by its own scheduler: a task of another runtime

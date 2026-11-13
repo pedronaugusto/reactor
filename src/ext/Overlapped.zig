@@ -16,9 +16,10 @@ const Overlapped = @This();
 const builtin = @import("builtin");
 const std = @import("std");
 const windows = std.os.windows;
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const win32 = @import("../sys/win32.zig");
 const sys_windows = @import("../sys/windows.zig");
+const aegis = @import("aegis");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -60,7 +61,7 @@ pub fn signaling(event: windows.HANDLE) Overlapped {
 
 /// Once no call is outstanding.
 pub fn deinit(o: *Overlapped) void {
-    assert(!o.outstanding);
+    assert(!o.outstanding, "!o.outstanding");
     if (o.owns_event) windows.CloseHandle(o.event);
     o.* = undefined;
 }
@@ -69,7 +70,7 @@ pub fn deinit(o: *Overlapped) void {
 /// status block when the call ended at once (it succeeded at once, or
 /// failed); null while it is outstanding, until a wait reports it.
 pub fn start(o: *Overlapped, comptime begin: anytype, handle: windows.HANDLE, context: anytype) ?windows.IO_STATUS_BLOCK {
-    assert(!o.outstanding);
+    assert(!o.outstanding, "!o.outstanding");
     // A `Wake`'s event is left as it is: other calls may have set it.
     if (o.owns_event) _ = win32.ResetEvent(o.event);
     o.iosb = .{ .u = .{ .Status = .PENDING }, .Information = 0 };
@@ -96,7 +97,7 @@ pub fn ended(o: *const Overlapped) bool {
 /// What the call ended with, once `ended` says it has (a wait that reported
 /// it says so). The handle may then take the next call.
 pub fn take(o: *Overlapped) windows.IO_STATUS_BLOCK {
-    assert(o.ended());
+    assert(o.ended(), "o.ended()");
     o.outstanding = false;
     return o.iosb;
 }
@@ -106,6 +107,6 @@ pub fn take(o: *Overlapped) windows.IO_STATUS_BLOCK {
 /// reached it, which `take` hands back. Until then it is outstanding, and
 /// its buffers the kernel's.
 pub fn cancel(o: *Overlapped) void {
-    assert(o.outstanding);
+    assert(o.outstanding, "o.outstanding");
     sys_windows.cancel(o.handle, &o.iosb);
 }

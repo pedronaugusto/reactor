@@ -8,7 +8,7 @@ const Scheduler = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const clocks = @import("clock.zig");
@@ -207,8 +207,8 @@ pub const Processor = struct {
         line: [0]u8 align(std.atomic.cache_line) = .{},
 
         comptime {
-            assert(@alignOf(Remote) == std.atomic.cache_line);
-            assert(@sizeOf(Remote) % std.atomic.cache_line == 0);
+            assert(@alignOf(Remote) == std.atomic.cache_line, "@alignOf(Remote) == std.atomic.cache_line");
+            assert(@sizeOf(Remote) % std.atomic.cache_line == 0, "@sizeOf(Remote) % std.atomic.cache_line == 0");
         }
     };
 
@@ -742,7 +742,7 @@ pub const Processor = struct {
         // A look of the monitor's may be under way: it ends with the word
         // as it found it.
         while (p.lease.cmpxchgWeak(word, word.with(.home_back), .release, .monotonic)) |seen| {
-            assert(seen == word or seen == word.with(.claimed));
+            assert(seen == word or seen == word.with(.claimed), "seen == word or seen == word.with(.claimed)");
             std.atomic.spinLoopHint();
         }
         leave();
@@ -811,8 +811,8 @@ pub const Shared = struct {
     line: [0]u8 align(std.atomic.cache_line) = .{},
 
     comptime {
-        assert(@alignOf(Shared) == std.atomic.cache_line);
-        assert(@sizeOf(Shared) % std.atomic.cache_line == 0);
+        assert(@alignOf(Shared) == std.atomic.cache_line, "@alignOf(Shared) == std.atomic.cache_line");
+        assert(@sizeOf(Shared) % std.atomic.cache_line == 0, "@sizeOf(Shared) % std.atomic.cache_line == 0");
     }
 };
 
@@ -916,7 +916,7 @@ noinline fn heldNow() ?*Processor {
 
 /// The calling thread now holds `p`.
 pub fn enter(p: *Processor) void {
-    assert(heldNow() == null);
+    assert(heldNow() == null, "heldNow() == null");
     seatNow().held = p;
     p.on_home_thread = std.Thread.getCurrentId() == p.scheduler.home_thread;
 }

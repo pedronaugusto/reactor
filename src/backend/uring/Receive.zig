@@ -3,6 +3,7 @@ const Receive = @This();
 const std = @import("std");
 const linux = std.os.linux;
 const BufferRing = @import("../../sys/BufferRing.zig");
+const aegis = @import("aegis");
 
 socket: linux.fd_t,
 group: BufferRing.Id,
@@ -17,7 +18,7 @@ key: u64 = 0,
 /// Called only by the thread owning the ring. `SystemResources` when the
 /// ring's table has no room for it.
 pub fn arm(r: *Receive, u: anytype) error{SystemResources}!void {
-    std.debug.assert(!r.active);
+    aegis.assert.invariant(!r.active, "!r.active");
     r.key = u.register(.receiver, .{ .receiver = r }) orelse return error.SystemResources;
     const sqe = u.entry();
     sqe.prep_recv(r.socket, &.{}, 0);

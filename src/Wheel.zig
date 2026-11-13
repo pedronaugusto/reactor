@@ -15,7 +15,8 @@
 const Wheel = @This();
 
 const std = @import("std");
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert.invariant;
 const Tick = @import("clock.zig").Tick;
 
 pub const levels = 7;
@@ -99,7 +100,7 @@ pub fn init(now: Tick) Wheel {
 /// Links `n` to fire at `deadline`. A deadline already passed fires at the
 /// next `advance`.
 pub fn arm(w: *Wheel, n: *Node, deadline: Tick) void {
-    assert(!n.armed());
+    assert(!n.armed(), "!n.armed()");
     n.deadline = deadline;
     w.count += 1;
     w.place(n);

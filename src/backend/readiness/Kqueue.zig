@@ -15,7 +15,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const Raised = @import("../../sync/Raised.zig");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const posix = std.posix;
 const c = std.c;
 
@@ -24,6 +24,7 @@ const calls = @import("calls.zig");
 const Wait = @import("../wait.zig").Wait;
 const timeline = @import("../../clock.zig");
 const kernel_time = @import("../kernel_time.zig");
+const aegis = @import("aegis");
 
 const Kqueue = @This();
 
@@ -137,7 +138,7 @@ pub fn deinit(k: *Kqueue) void {
 }
 
 fn queue(k: *Kqueue, e: Event) void {
-    assert(k.change_count < max_changes);
+    assert(k.change_count < max_changes, "k.change_count < max_changes");
     k.changes[k.change_count] = e;
     k.change_count += 1;
 }

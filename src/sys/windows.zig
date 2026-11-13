@@ -251,5 +251,5 @@ pub fn setTimer(timer: Handle, due: i64) TimerError!void {
 }
 
 comptime {
-    if (builtin.os.tag == .windows) std.debug.assert(@sizeOf(Entry) == 32);
+    if (builtin.os.tag == .windows) aegis.assert.invariant(@sizeOf(Entry) == 32, "@sizeOf(Entry) == 32");
 }

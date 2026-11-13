@@ -10,7 +10,7 @@ const perform = @import("../ops/perform.zig");
 const native = @import("native.zig");
 const wait = @import("wait.zig");
 const win32 = @import("../sys/win32.zig");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const windows = std.os.windows;
 
 const is_windows = builtin.os.tag == .windows;
@@ -57,6 +57,7 @@ fn singleCompletion(sqe: std.os.linux.io_uring_sqe) bool {
 
 pub const Completion = Overlapped.Completion;
 pub const Overlapped = @import("Overlapped.zig");
+const aegis = @import("aegis");
 
 /// Issue an NT overlapped call on `handle`, `start(context, iosb,
 /// completion)`, and wait for it to end or `timeout` to pass. Any `Io`:
@@ -92,7 +93,7 @@ pub fn overlapped(io: Io, comptime start: anytype, handle: windows.HANDLE, conte
     wait.wait(io, .{ .overlapped = &request }, timeout) catch |err| {
         request.cancel();
         // Its end is at once; the frame holds what the kernel writes until it.
-        assert(win32.WaitForSingleObject(request.event, win32.infinite) == win32.wait_object_0);
+        assert(win32.WaitForSingleObject(request.event, win32.infinite) == win32.wait_object_0, "win32.WaitForSingleObject(request.event, win32.infinite) == win32.wait_object_0");
         const ended = request.take();
         if (ended.u.Status != .CANCELLED) {
             // It completed as it was canceled: the cancel is still asked.

@@ -9,7 +9,7 @@
 //! `slice` so a cancel is seen between them.
 const builtin = @import("builtin");
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const aegis = @import("aegis");
 const clock = @import("../clock.zig");
@@ -145,8 +145,8 @@ pub fn wait(io: Io, what: Waitable, timeout: Io.Timeout) WaitError!void {
 /// The lowest index of a member that is ready, waiting until one is or
 /// `timeout` passes. At most `max` members.
 pub fn waitAny(io: Io, set: []const Waitable, timeout: Io.Timeout) WaitError!usize {
-    assert(set.len > 0);
-    assert(set.len <= max);
+    assert(set.len > 0, "set.len > 0");
+    assert(set.len <= max, "set.len <= max");
     // A canceled task gets Canceled whether or not a member is ready, as std's operations
     // do (Threaded's `Syscall.start`): a loop on a set that stays ready is still canceled.
     try io.checkCancel();

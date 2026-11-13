@@ -125,7 +125,7 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
     r.published.clear(.monotonic);
     r.notified.clear(.monotonic);
     r.state.store(.pending, .monotonic);
-    std.debug.assert(lanes.started);
+    aegis.assert.invariant(lanes.started, "lanes.started");
     if (!lanes.admit(&r.job)) return error.SystemResources;
     t.enterWait(&r.hook) catch |err| {
         lanes.retire(&r.job);

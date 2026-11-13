@@ -17,7 +17,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const Raised = @import("sync/Raised.zig");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -265,7 +265,7 @@ pub fn adopt(l: *Loop) void {
 }
 
 pub fn deinit(l: *Loop, gpa: Allocator) void {
-    assert(l.in_flight == 0);
+    assert(l.in_flight == 0, "l.in_flight == 0");
     l.backend.deinit(gpa);
     l.* = undefined;
 }
@@ -297,7 +297,7 @@ pub fn submit(l: *Loop, o: *Op) SubmitError!void {
 pub fn start(l: *Loop, o: *Op) SubmitError!bool {
     l.installPressure();
     l.assertOwner();
-    assert(o.backend.state.current() == .idle);
+    assert(o.backend.state.current() == .idle, "o.backend.state.current() == .idle");
     if (l.in_flight == l.max_ops) return error.QueueFull;
     o.backend.state = .{};
     switch (o.backend.kind) {
@@ -474,7 +474,7 @@ pub fn complete(l: *Loop, entries: []const PortEntry) u32 {
 // The loop's own.
 
 fn assertOwner(l: *const Loop) void {
-    if (builtin.mode == .debug) assert(l.owner == std.Thread.getCurrentId());
+    if (builtin.mode == .debug) assert(l.owner == std.Thread.getCurrentId(), "l.owner == std.Thread.getCurrentId()");
 }
 
 /// The result of an operation that moves no bytes, which needs no

@@ -13,7 +13,7 @@
 const Task = @This();
 
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const aegis = @import("aegis");
 const clocks = @import("../clock.zig");
@@ -239,12 +239,12 @@ pub fn acknowledge(t: *Task) error{Canceled} {
 /// A call made elsewhere (on a lane) returned the cancel: this task has
 /// seen it.
 pub fn acknowledged(t: *Task) void {
-    assert(t.cancelRequested());
+    assert(t.cancelRequested(), "t.cancelRequested()");
     t.execution.protection.acknowledged = true;
 }
 
 pub fn recancel(t: *Task) void {
-    assert(t.execution.protection.acknowledged);
+    assert(t.execution.protection.acknowledged, "t.execution.protection.acknowledged");
     t.execution.protection.acknowledged = false;
 }
 
@@ -310,14 +310,14 @@ pub const GroupToken = enum(usize) {
 const group_awaited: usize = 0b1;
 
 comptime {
-    assert(@alignOf(Awaiter) > group_awaited);
-    assert(@alignOf(Task) > group_awaited);
+    assert(@alignOf(Awaiter) > group_awaited, "@alignOf(Awaiter) > group_awaited");
+    assert(@alignOf(Task) > group_awaited, "@alignOf(Task) > group_awaited");
 }
 
 /// `g`'s token word, as this runtime keeps it.
 fn tokenOf(g: *Io.Group) *aegis.Atomic(GroupToken) {
-    comptime assert(@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token)));
-    comptime assert(@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token)));
+    comptime assert(@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token)), "@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token))");
+    comptime assert(@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token)), "@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token))");
     // glint-ignore: A001 -- std.Io keeps a group's token in an atomic word, kept here as an aegis cell of its layout
     return @ptrCast(&g.token);
 }
@@ -413,7 +413,7 @@ pub fn leaveGroup(t: *Task) ?*Awaiter {
     const awaiter = awaiterOf(g);
     // No member is listed now: the group's list goes back to its `state`, empty.
     if (awaiter) |a| {
-        assert(a.members == null);
+        assert(a.members == null, "a.members == null");
         g.state = 0;
     }
     unlockGroup(g);
@@ -422,7 +422,7 @@ pub fn leaveGroup(t: *Task) ?*Awaiter {
 
 /// Under the lock, with members counted: `a` waits for them.
 pub fn awaitGroup(g: *Io.Group, a: *Awaiter) void {
-    assert(awaiterOf(g) == null);
+    assert(awaiterOf(g) == null, "awaiterOf(g) == null");
     a.members = listedOf(g).*;
     g.state = @intFromPtr(a) | group_awaited; // safe: an address with a flag in its low bit, read back by `awaiterOf`
 }
@@ -442,7 +442,7 @@ pub fn cancelGroup(g: *Io.Group) void {
 /// owner's again.
 pub fn settleGroup(g: *Io.Group) void {
     const token = lockGroup(g);
-    assert(token.members() == 0);
-    assert(g.state == 0);
+    assert(token.members() == 0, "token.members() == 0");
+    assert(g.state == 0, "g.state == 0");
     tokenOf(g).store(.none, .release);
 }

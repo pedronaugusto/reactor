@@ -19,7 +19,7 @@ const Uring = @This();
 const std = @import("std");
 const Raised = @import("../sync/Raised.zig");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const net = Io.net;
 const linux = std.os.linux;
@@ -789,7 +789,7 @@ pub fn complete(u: *Uring, cqe: linux.io_uring_cqe, sink: anytype) void {
     const ud = cqe.user_data;
     const tag = tagOf(ud);
     if (u.draining_pressure and (tag == .batch or tag == .batch_ready)) {
-        std.debug.assert(u.deferred_count < u.deferred.len);
+        aegis.assert.invariant(u.deferred_count < u.deferred.len, "u.deferred_count < u.deferred.len");
         u.deferred[(u.deferred_head + u.deferred_count) % u.deferred.len] = cqe;
         u.deferred_count += 1;
         return;

@@ -5,7 +5,8 @@
 //! descriptor closes or, idle, to make room.
 const std = @import("std");
 const closes = @import("closes.zig");
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert.invariant;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -171,7 +172,7 @@ pub fn Records(comptime Waiter: type) type {
 
         /// A new record for `fd`, which has none; null when all are taken.
         pub fn insert(t: *Self, fd: posix.fd_t) ?u32 {
-            assert(t.find(fd) == null);
+            assert(t.find(fd) == null, "t.find(fd) == null");
             const index = t.free;
             if (index == none) return null;
             const r = &t.records[index];
@@ -186,8 +187,8 @@ pub fn Records(comptime Waiter: type) type {
         /// Frees record `index`, which has nobody waiting.
         pub fn remove(t: *Self, index: u32) void {
             const r = &t.records[index];
-            assert(r.in_use);
-            assert(r.idle());
+            assert(r.in_use, "r.in_use");
+            assert(r.idle(), "r.idle()");
             const mask = t.slots.len - 1;
             var i = t.home(r.fd);
             while (t.slots[i] != index + 1) i = (i + 1) & mask;

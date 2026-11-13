@@ -31,7 +31,7 @@ const Lanes = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Raised = @import("sync/Raised.zig");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const SlotPool = @import("lanes/SlotPool.zig");
@@ -290,7 +290,7 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
 }
 
 pub fn deinit(l: *Lanes, gpa: Allocator) void {
-    for (l.admission.teardown().admitted) |n| assert(n == 0);
+    for (l.admission.teardown().admitted) |n| assert(n == 0, "n == 0");
     if (l.mode == .owned) {
         for (l.reserve_entries) |*entry| if (entry.state == .holding) entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
         for (&l.reserve_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch unreachable; // glint-ignore: Z026 -- shutdown is outside a cancelable executor task
@@ -346,7 +346,7 @@ pub fn countInline(l: *Lanes, lane: Lane) void {
 /// Readies the lanes for calls. Owned lanes start no thread here: each
 /// grows as its calls need (`launch`).
 pub fn prepare(l: *Lanes) error{SystemResources}!void {
-    assert(!l.started);
+    assert(!l.started, "!l.started");
     switch (l.mode) {
         .none => {},
         .injected => if (l.capacity < 4) return error.SystemResources,
@@ -485,8 +485,8 @@ fn dispatch(l: *Lanes, job: *Job) Dispatch {
 /// After execution and cancellation have retired, release their reservation.
 /// Running slots may already serve queued calls; their reservations are distinct.
 pub fn retire(l: *Lanes, job: *Job) void {
-    assert(!job.held());
-    assert(job.pending.load(.acquire).eql(.fromRaw(0)));
+    assert(!job.held(), "!job.held()");
+    assert(job.pending.load(.acquire).eql(.fromRaw(0)), "job.pending.load(.acquire).eql(.fromRaw(0))");
     const reservation = if (job.executor) |*r| r else return;
     var held = l.admission.acquireUncancelable(system());
     defer held.deinit(system());

@@ -25,8 +25,8 @@ pub fn init(gpa: Allocator, count: u32) Allocator.Error!SlotPool {
 
 /// A pool with a caller-chosen fixed block size, for std calls with scratch arenas.
 pub fn initSized(gpa: Allocator, count: u32, size: usize) Allocator.Error!SlotPool {
-    std.debug.assert(size >= slot_len);
-    std.debug.assert(size % slot_alignment.toByteUnits() == 0);
+    aegis.assert.invariant(size >= slot_len, "size >= slot_len");
+    aegis.assert.invariant(size % slot_alignment.toByteUnits() == 0, "size % slot_alignment.toByteUnits() == 0");
     const buffer = try gpa.alignedAlloc(u8, slot_alignment, @as(usize, count) * size);
     errdefer gpa.free(buffer);
     var p: SlotPool = .{ .buffer = buffer, .links = try gpa.alloc(aegis.Atomic(FreeList.Link), count), .size = size };

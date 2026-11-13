@@ -7,7 +7,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const Raised = @import("../sync/Raised.zig");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert.invariant;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -251,7 +251,7 @@ fn homeScheduler(home: *Processor) noreturn {
 }
 
 pub fn start(c: *Core) StartError!void {
-    assert(!c.started.raised(.acquire));
+    assert(!c.started.raised(.acquire), "!c.started.raised(.acquire)");
     try c.lanes.prepare();
     // Publish startup before adoption: native setup must go to each owner.
     _ = c.started.raise(.acq_rel);
@@ -268,7 +268,7 @@ pub fn start(c: *Core) StartError!void {
 }
 
 pub fn run(c: *Core, mode: Loop.RunMode) void {
-    assert(Scheduler.current() == &c.root);
+    assert(Scheduler.current() == &c.root, "Scheduler.current() == &c.root");
     const Serve = struct {
         after: Scheduler.After = .{ .run = serveRoot },
         mode: Loop.RunMode,
@@ -292,7 +292,7 @@ pub fn stop(c: *Core) void {
     // The home processor back first, should it have gone to a spare while
     // the host ran its own code; it stays held from here.
     _ = Scheduler.fromUser();
-    assert(c.scheduler.stacks.inUse() == 0);
+    assert(c.scheduler.stacks.inUse() == 0, "c.scheduler.stacks.inUse() == 0");
     // The monitor first: it reads the seats of the threads that end next.
     if (c.scheduler.monitor) |m| m.stop();
     _ = c.scheduler.stopping.raise(.release);
@@ -305,7 +305,7 @@ pub fn stop(c: *Core) void {
 
 pub fn deinit(c: *Core) void {
     c.stop();
-    assert(c.scheduler.stacks.inUse() == 0);
+    assert(c.scheduler.stacks.inUse() == 0, "c.scheduler.stacks.inUse() == 0");
     Scheduler.leave();
     c.deinitMonitor();
     c.lookup.deinit(c.gpa, &c.lanes);
@@ -338,7 +338,7 @@ pub fn of(userdata: ?*anyopaque) *Core {
 /// Fixed std.Io signatures require a successfully started runtime.
 pub fn running(userdata: ?*anyopaque) *Core {
     const core = of(userdata);
-    assert(core.started.raised(.acquire));
+    assert(core.started.raised(.acquire), "core.started.raised(.acquire)");
     return core;
 }
 

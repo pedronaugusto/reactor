@@ -29,7 +29,7 @@ pub const look: Millis = .fromRaw(0);
 /// reports it, and so does a number no descriptor has, which `poll` itself
 /// skips. A signal ends the wait early, as a timeout.
 pub fn descriptors(entries: []const Entry, wait: Millis) Error!?usize {
-    std.debug.assert(entries.len <= max);
+    aegis.assert.invariant(entries.len <= max, "entries.len <= max");
     for (entries, 0..) |e, i| if (e.handle < 0) return i;
     if (comptime darwin) if (wait.compare(look) == .eq) if (selected(entries)) |ready| return ready;
     var fds: [max]posix.pollfd = undefined;
@@ -107,7 +107,7 @@ fn selected(entries: []const Entry) ?(Error!?usize) {
 /// The lowest index of a signaled object within `wait`; null
 /// when none was.
 pub fn objects(handles: []const std.os.windows.HANDLE, wait: Millis) Error!?usize {
-    std.debug.assert(handles.len <= win32.maximum_wait_objects);
+    aegis.assert.invariant(handles.len <= win32.maximum_wait_objects, "handles.len <= win32.maximum_wait_objects");
     const rc = win32.WaitForMultipleObjects(@intCast(handles.len), handles.ptr, .FALSE, wait.raw());
     if (rc == win32.wait_timeout) return null;
     if (rc == win32.wait_failed) return error.Unexpected;
