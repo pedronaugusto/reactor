@@ -6,9 +6,12 @@
     { "module": "src/ops/", "rules": ["A007", "A009", "A011", "A015", "P007"], "reason": "reactor implements std.Io; its operations (batches, tasks, lookups) are std.Io's own" },
     { "module": "src/scheduler/", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; its tasks and groups are the handles std.Io hands out" },
     { "file": "src/Scheduler.zig", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; the scheduler switches task contexts behind a compiler barrier" },
-    { "file": "src/Loop.zig", "rules": ["A007", "A011", "P007"], "reason": "reactor implements std.Io; the loop holds the kernel's completion port and ring" },
+    { "file": "src/Loop.zig", "rules": ["A007", "A009", "A011", "P007"], "reason": "reactor implements std.Io; the loop holds the kernel's completion port and ring, and reads the operations it is asked to run" },
     { "file": "src/backend.zig", "rules": ["A007", "P007"], "reason": "the backend dispatch reads the kernel's ring words as the kernel writes them" },
     { "file": "src/ext/Overlapped.zig", "rules": ["A007"], "reason": "an overlapped call's status is a word Windows writes when the call completes" },
+    { "file": "src/ext/net/Receiver.zig", "rules": ["A009"], "reason": "a receive group runs the Io's socket reads for its caller, who takes the bytes in through its own seam" },
+    { "file": "src/ext/net/pipe.zig", "rules": ["A009"], "reason": "a pipe's timed read runs the Io's read for its caller, who takes the bytes in through its own seam" },
+    { "file": "src/ext/wait.zig", "rules": ["A009"], "reason": "waits for a handle's readiness through a read of no bytes, which takes nothing in" },
     { "module": "src/ext/", "rules": ["P007"], "reason": "reactor's OS extensions (jobs, signals, processes, pipes, receive groups), each a binding to its OS" }
   ],
   "test_inputs": [{ "module": "bench/" }]
