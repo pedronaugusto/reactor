@@ -3,7 +3,6 @@
 //! after the call.
 const std = @import("std");
 const windows = std.os.windows;
-const ws2_32 = windows.ws2_32;
 const Handle = windows.HANDLE;
 const Threaded = std.Io.Threaded;
 
