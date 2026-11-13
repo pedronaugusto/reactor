@@ -112,7 +112,7 @@ pub fn applyThrough(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress
 }
 
 /// `options` as the seam's hook is told them.
-fn told(options: Options) seam.Asked {
+pub fn told(options: Options) seam.Asked {
     return .{
         .nodelay = options.nodelay,
         .keepalive = if (options.keepalive) |k| k == .on else null,

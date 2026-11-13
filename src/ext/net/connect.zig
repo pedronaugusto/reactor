@@ -10,6 +10,7 @@ const dial = @import("../../sys/dial.zig");
 const sys_socket = @import("../../sys/socket.zig");
 const afd = @import("../../sys/afd.zig");
 const options_file = @import("options.zig");
+const seam = @import("seam");
 const unix_windows = @import("../../sys/unix_windows.zig");
 const Loop = @import("../../Loop.zig");
 const Scheduler = @import("../../Scheduler.zig");
@@ -153,6 +154,21 @@ fn runtimeTask(io: Io) ?*Core {
 /// before the connect: the options, the bind and the interface.
 fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
     if (options.local_address) |local| if (@as(net.IpAddress.Family, local) != @as(net.IpAddress.Family, address.*)) return error.AddressFamilyUnsupported;
+    // Under an `Io` whose sockets are not the system's (a test's hook,
+    // `reactor.testing`) no socket is made here: the hook makes the
+    // connection, told what this one would have done to its socket.
+    if (seam.hookOf(io)) |hook| {
+        const socket = try hook.connect(hook.ctx, address, .{
+            .local_address = options.local_address,
+            .reuse_address = options.reuse_address,
+            .interface = options.interface,
+            .mode = options.mode,
+            .protocol = options.protocol,
+            .timeout = options.timeout,
+            .asked = options_file.told(options.socket.unconnected()),
+        });
+        return .{ .stream = .init(.{ .socket = socket }) };
+    }
     const core = runtimeTask(io);
     // A readiness backend connects in non-blocking mode, as any other `Io`
     // does here: a socket made in it is spared the switch there and back,

@@ -15,6 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `net.peek(io, handle)` and `net.Peek`: a look at a socket that neither waits nor takes anything (`recv` with `MSG_PEEK` and `MSG_DONTWAIT`), behind the seam: null on Windows and WASI and under a hooked `Io`, where the caller reads through its `Io`. It was uplink's own raw call.
 - `reactor.testing`, made by the build's `testing(reactor, shakedown)`: a `Seam` whose `io()` is an `Io` over a base (a `Sim`'s) where reactor's raw socket calls ask the test instead, as airlock's seam does: the options asked are recorded (`asked()`), never set, and a peek answers nothing. Production reactor carries one compare of a vtable slot.
+- A `net.connect` that makes its own socket (a `local_address`, an `interface`, `reuse_address`, or an option set before the connect) goes behind the seam too: under a hooked `Io` no system socket is made, and `reactor.testing`'s `Seam` makes the connection on the base's simulation (shakedown's `Sim.socketsOf`): bound where asked, its port shared only as `reuse_address` asks, ended at its `timeout`, its options told (`asked()`). Over a base that is not a simulation's it panics and says why: there is no system socket to make under a hooked `Io`. A connect restricted to an `interface` ends the simulation's run as unmodeled.
 
 ### Fixed
 
@@ -28,7 +29,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Pins aegis c8982a8, still 0.2.4: six additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`), the aegis the development build's preflight selects. Nothing reactor calls changed.
+- Pins aegis c43e90d, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `Signal`; `io.ReadEnd` and `io.WriteEnd`; fault points), the aegis that the development build's shakedown (1ffc7b0, `Sim.socketsOf`) and preflight select. Nothing reactor calls changed.
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.
 - A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
 - `net.connectUnix` returns `net.ConnectUnixError`, std's `UnixAddress.ConnectError` with `NameTooLong`.
