@@ -87,6 +87,8 @@ pub fn deinit(g: *Groups, gpa: Allocator, io: Io) void {
 const Command = struct {
     errand: Scheduler.Errand = .{ .run = run },
     ready: aegis.Signal(void) = .init(),
+    /// Whether a task waits on `ready`: set when the command is sent to its ring's owner.
+    awaiting: bool = false,
     io: Io,
     action: union(enum) { register: struct { entries: BufferRing.Entries, id: BufferRing.Id }, unregister: *BufferRing },
     result: BufferRing.Error!BufferRing = undefined,
@@ -97,7 +99,9 @@ const Command = struct {
             .register => |args| c.result = BufferRing.init(p.loop.backend.io_uring.ring.fd, args.entries, args.id),
             .unregister => |registration| registration.deinit(),
         }
-        c.ready.set(c.io, {}) catch aegis.assert.never("a command runs once");
+        // Direct setup before start has no waiter and must not enter std.Io: setting the signal
+        // wakes through the runtime's futex, which only a started runtime serves.
+        if (c.awaiting) c.ready.set(c.io, {}) catch aegis.assert.never("a command runs once");
     }
 
     fn execute(c: *Command, p: *Scheduler.Processor) void {
@@ -105,6 +109,7 @@ const Command = struct {
         if (Scheduler.processor() == p or (!core.started.raised(.acquire) and !p.loop.backend.io_uring.enabled)) {
             run(&c.errand, p);
         } else {
+            c.awaiting = true;
             p.send(&c.errand);
             _ = c.ready.waitUncancelable(c.io);
         }
