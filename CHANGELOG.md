@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `net.PipeListener.accept` (also `net.pipe.PipeListener.accept`) and `net.pipe.connectPipe` return the pipe's owner, an `aegis.own.OwnedIo` over the `Io.File` released once by `deinit(io)`, where each returned the `Io.File` for the caller to close.
+- `net.Deadlines.Watch.Target.pipe` is the pipe's `Io.File.Handle`, where it was the `Io.File` (a watch is made by `net.Deadlines.Watch.initPipe` as before); `net.Deadlines.nudge` and `net.Deadlines.parked` are `aegis.Atomic` cells, where each was a `std.atomic.Value(u32)`.
+- `Loop.ready` and `Loop.reaped` are of the public type `Loop.List`, and `Signals.listener` points at the public `Signals.Listener`: each type was private, and is otherwise unchanged.
 - `net.setOptions` takes the `Io` first, `setOptions(io, socket, options)`: a socket's options are set behind reactor's seam, where an `Io` whose sockets are not the system's (a simulation's, through `reactor.testing`) is told the options and no raw `setsockopt` runs. The options step inside `net.connect` goes through it too. Write `setOptions(io, ...)` where `setOptions(...)` was.
 - A handle reactor's own calls hand back comes with its one owner, an `aegis.own.OwnedIo`, where it was a bare `Io.File`, `Io.net.Stream` or `Io.net.Server` the caller was told to close: `net.connectPipe` and `PipeListener.accept` give a `net.owned.File`, `net.connectUnix` and `net.Connected.stream` a `net.owned.Stream`, `net.listen` a `net.owned.Server`. `deinit(io)` closes it; `borrow()` lends the handle; `take` moves it out to be kept.
 
