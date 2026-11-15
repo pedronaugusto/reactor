@@ -117,6 +117,14 @@ pub const Result = union {
     raw: Io.Cancelable!RawResult,
 };
 
+/// Whether a timer ran to its deadline: one that did not was canceled, the
+/// only way a timer ends early.
+pub fn expired(timer: Io.Cancelable!void) bool {
+    return if (timer) |_| true else |err| switch (err) {
+        error.Canceled => false,
+    };
+}
+
 pub const ConnectError = Io.net.IpAddress.ConnectError || Io.net.UnixAddress.ConnectError || Io.Cancelable;
 
 /// Where an operation is between `submit` and its completion.

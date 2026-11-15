@@ -228,7 +228,7 @@ pub fn init(gpa: Allocator, options: Options) (InitError || Allocator.Error)!Uri
     errdefer u.targets.deinit(gpa);
     u.ring = try setup(options, &u.features, &u.taskrun_flag);
     errdefer u.ring.deinit();
-    u.probe();
+    u.supported = probe(&u.ring);
     u.features.waitid = !options.off.waitid and u.has(.WAITID);
     u.features.msg_ring = !options.off.msg_ring and u.has(.MSG_RING);
     u.features.linked_timeout = !options.off.linked_timeout and u.has(.LINK_TIMEOUT);
@@ -288,14 +288,17 @@ fn setup(options: Options, features: *Features, taskrun_flag: *bool) InitError!l
     return error.BackendUnavailable;
 }
 
-fn probe(u: *Uring) void {
-    // glint-ignore: Z026 -- a kernel that cannot be probed reports no optional opcode
-    const p = u.ring.get_probe() catch return;
+/// The optional opcodes `ring`'s kernel supports: none where it cannot be
+/// probed.
+fn probe(ring: *linux.IoUring) std.EnumSet(linux.IORING_OP) {
+    var supported: std.EnumSet(linux.IORING_OP) = .empty;
+    const p = ring.get_probe() catch return supported;
     // Read by index: a newer kernel may name opcodes this enum does not.
     for (p.ops[0..@min(p.ops_len, p.ops.len)], 0..) |o, i| {
         if (o.flags & linux.IO_URING_OP_SUPPORTED == 0) continue;
-        if (std.enums.fromInt(linux.IORING_OP, i)) |known| u.supported.insert(known);
+        if (std.enums.fromInt(linux.IORING_OP, i)) |known| supported.insert(known);
     }
+    return supported;
 }
 
 pub fn has(u: *const Uring, opcode: linux.IORING_OP) bool {
@@ -913,24 +916,7 @@ fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
     u.active -= 1;
     if (ownership.timed_out and primary.err() == .CANCELED) o.state.canceled = true;
     o.result = results.of(o, primary);
-    u.finishOp(o, primary);
     sink.complete(o);
-}
-
-/// What a completion leaves to do: the rest of a multi-message send.
-fn finishOp(u: *Uring, o: *op.Op, cqe: linux.io_uring_cqe) void {
-    _ = u;
-    _ = cqe;
-    switch (o.kind) {
-        .io => |operation| switch (operation) {
-            // glint-ignore: Z026 -- a send that failed has no rest to send: its error is the result already
-            .net_send => |s| if (o.result.io) |r| if (r.net_send[0] == null and s.messages.len > 1) {
-                o.result = .{ .io = .{ .net_send = results.sendRest(s, 1) } };
-            } else {} else |_| {},
-            else => {},
-        },
-        else => {},
-    }
 }
 
 fn armWake(u: *Uring) void {

@@ -13,6 +13,7 @@ const assert = aegis.assert.invariant;
 const Io = std.Io;
 
 const Loop = @import("../Loop.zig");
+const timers = @import("../backend/op.zig");
 const Task = @import("../scheduler/Task.zig");
 const Processor = @import("../Scheduler.zig").Processor;
 const Scheduler = @import("../Scheduler.zig");
@@ -104,8 +105,8 @@ pub const Deadline = struct {
             d.waiting = false;
             return d.scheduler.ready(d.task, .completed);
         }
-        // glint-ignore: Z026 -- a timer that ended in an error was canceled, so the deadline does not fire
-        if (o.backend.result.timer) |_| d.fire(d) else |_| {}
+        // A canceled timer's deadline does not fire.
+        if (timers.expired(o.backend.result.timer)) d.fire(d);
     }
 
     /// From the task that armed it: no `fire` after this, and the loop
@@ -375,11 +376,11 @@ const Elsewhere = struct {
 
     fn expired(c: *Loop.Completion, l: *Loop, t: *Loop.Op) void {
         const e: *Elsewhere = @alignCast(@fieldParentPtr("expiring", c)); // safe: the field belongs to this record
-        // glint-ignore: Z026 -- a timer that ended in an error was canceled, so the operation did not time out
-        if (t.backend.result.timer) |_| {
+        // A canceled timer: the operation did not time out.
+        if (timers.expired(t.backend.result.timer)) {
             e.timed_out = true;
             l.cancel(e.op);
-        } else |_| {}
+        }
         e.settle();
     }
 
