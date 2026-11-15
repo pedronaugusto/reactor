@@ -22,6 +22,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Darwin, where a send ignores `MSG_DONTWAIT`, a readiness loop's send to a socket it cannot record or put in non-blocking mode fails its submission (`SystemResources` or `Unexpected`), where the send went ahead in blocking mode and could hold the loop's thread until the peer read, forever where the reader was another task of that loop.
+- On kqueue, a wake whose trigger the kqueue refused leaves no wake pending, so the next wake triggers again (as IOCP's already did), where every later wake was dropped until some other event woke the loop.
+- On the readiness backends, a connect that put a blocking socket in non-blocking mode and cannot put it back fails with `Unexpected`, where it succeeded with the socket left in non-blocking mode; a connect that failed, or was canceled, still reports its own error.
+- On the readiness backends, an idle descriptor is let go from inside the poller's events only where its changelist has room, the next event trying again, where letting it go handed a full changelist to the kernel from inside the events it had given, which takes the next events into the buffer still being read.
+- A `resolv.conf` option whose value is past 255 (`ndots:300`) is clamped as any value past the option's range is, as resolv.conf(5) says, where the option was skipped.
 - On Windows a Unix socket connects on the runtime: its `netConnectUnix` connects through Winsock, as `net.connectUnix` does for every other `Io`, where it drove AFD itself and the system refused the endpoint at its bind (`STATUS_INVALID_PARAMETER`), so every Unix socket connect on IOCP failed. The handle is bound to the port on first use like any other. The raw AFD path (`openUnix`'s Windows half, the unnamed bind, IOCP's Unix connect) is gone. Every backend test now runs on IOCP too, where none had.
 - `net.abort` reads what the socket answered: an abortive disconnect (Windows) or a shutdown the socket refuses for any reason but having ended already (not connected, reset, disconnected) stops a Debug build there, naming it, where the answer was dropped. Such a refusal leaves a read or write waiting on the socket with nothing to end it, a deadline's included, so it was a silent hang. It is a check, not an error returned: no caller has a way on from one (a deadline's watching task, a server closing its connections).
 - A lookup canceled while it opened or read `/etc/resolv.conf` or `/etc/hosts` is `error.Canceled`, where the open's cancel read as no file (the default server, no hosts entry) and the read's as `NameNotResolved`.
@@ -32,6 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `net.Deadlines` keeps its watching task in a group, the new field `net.Deadlines.watcher`, which `deinit` cancels; the task ends by that cancel, where it was a future whose cancel dropped the task's end.
+- On io_uring, a regular file the ring cannot register keeps its slot as a file that is no regular one does, going by its own descriptor without a registration tried on each submission, where the slot stayed free and the next submission on the file tried again.
 - Pins aegis c43e90d, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `Signal`; `io.ReadEnd` and `io.WriteEnd`; fault points), the aegis that the development build's shakedown (1ffc7b0, `Sim.socketsOf`) and preflight select. Nothing reactor calls changed.
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.
 - A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
