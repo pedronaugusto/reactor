@@ -65,10 +65,12 @@ test "concurrent runs a task whose result await returns" {
 
 test "a stack the system refuses to make usable refuses the spawn, and a later spawn takes it" {
     try skipWithoutFibers();
-    // The refusal is made real by taking the stack's address space away
-    // from the pool's reservation, which its first commit then fails on.
-    // Windows releases a reservation only whole.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // The refusal is made real by mapping a file opened only for reading
+    // over the stack's address space, which no system makes writable: the
+    // first commit's mprotect fails there with EACCES. (A hole in the range
+    // is no refusal on FreeBSD, whose mprotect skips it.) Windows releases
+    // a reservation only whole, and OpenBSD commits by mapping in place.
+    if (builtin.os.tag == .windows or builtin.os.tag == .openbsd) return error.SkipZigTest;
     var d: Driver = undefined;
     try d.init(testing.allocator, 3, .{ .max_tasks = 2, .stack_size = .fromRaw(256 << 10), .offload = .none });
     defer d.deinit();
@@ -78,7 +80,16 @@ test "a stack the system refuses to make usable refuses the spawn, and a later s
     // The first stack a task takes is the pool's first.
     const first = stacks.stackOf(0);
     const range: []align(std.heap.page_size_min) u8 = @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(first.base))[0 .. first.end - first.base]; // safe: the pool's first stack, never handed out
-    std.posix.munmap(range);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const file = try tmp.dir.createFile(testing.io, "pages", .{});
+        defer file.close(testing.io);
+        try file.setLength(testing.io, range.len);
+    }
+    const read_only = try tmp.dir.openFile(testing.io, "pages", .{});
+    defer read_only.close(testing.io);
+    _ = try std.posix.mmap(range.ptr, range.len, .{ .READ = true }, .{ .TYPE = .SHARED, .FIXED = true }, read_only.handle, 0);
     try testing.expectError(error.ConcurrencyUnavailable, io.concurrent(addOne, .{41}));
     // `async` runs the function where it is, as std's does.
     var inline_future = io.async(addOne, .{1});
