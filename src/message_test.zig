@@ -20,9 +20,16 @@ fn ms(n: i64) Io.Timeout {
 
 const small: reactor.Runtime.Options = .{ .max_tasks = 256, .stack_size = .fromRaw(256 << 10), .offload = .none };
 
+/// Where a control message's data starts, as `CMSG_DATA` puts it: the header
+/// rounded up to a long, or to four bytes on Darwin.
+const data_at = std.mem.alignForward(usize, @sizeOf(posix.system.cmsghdr), if (is_windows or builtin.os.tag.isDarwin()) 4 else @sizeOf(c_long));
+
 /// A control message holding one descriptor.
 const Rights = extern struct {
     header: posix.system.cmsghdr align(@alignOf(usize)),
+    /// Up to `CMSG_DATA`: FreeBSD's header is 12 bytes and its data starts
+    /// at the next long, where Linux's header is 16 and Darwin aligns to 4.
+    gap: [data_at - @sizeOf(posix.system.cmsghdr)]u8 = @splat(0),
     fd: posix.fd_t,
     pad: [@sizeOf(usize) - @sizeOf(posix.fd_t) % @sizeOf(usize)]u8 = @splat(0),
 };
