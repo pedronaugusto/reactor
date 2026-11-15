@@ -1,6 +1,7 @@
 //! The extended Windows resolver through an overlapped event: on a
 //! runtime its wait packet goes to the task's completion port.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const lookup = @import("../../sys/lookup_windows.zig");
 const win32 = @import("../../sys/win32.zig");
@@ -35,7 +36,7 @@ pub fn resolve(io: Io, name: []const u8, port: u16, family: ?Io.net.IpAddress.Fa
                     canceled = true;
                     const protection = io.swapCancelProtection(.blocked);
                     defer _ = io.swapCancelProtection(protection);
-                    while (win32.WaitForSingleObject(request.overlapped.event.?, 0) == win32.wait_timeout) io.sleep(.fromMilliseconds(1), .awake) catch unreachable; // glint-ignore: Z026 -- cancellation is protected
+                    while (win32.WaitForSingleObject(request.overlapped.event.?, 0) == win32.wait_timeout) io.sleep(.fromMilliseconds(1), .awake) catch aegis.assert.never("cancellation is protected");
                     break;
                 };
             }

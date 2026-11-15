@@ -74,10 +74,8 @@ pub const Parts = struct { sec: u64, nsec: u32 };
 
 pub fn parts(span: Span) Parts {
     const seconds = span.convert(.second, u64, .down);
-    // glint-ignore: Z026 -- whole seconds back in nanoseconds are no more than the span
-    const whole = seconds.convert(.nanosecond, u64, .exact) catch unreachable;
-    // glint-ignore: Z026 -- what is left of the span past its whole seconds is below a second
-    const rest = span.saturatingSub(whole).convert(.nanosecond, u32, .exact) catch unreachable;
+    const whole = seconds.convert(.nanosecond, u64, .exact) catch aegis.assert.never("whole seconds back in nanoseconds are no more than the span");
+    const rest = span.saturatingSub(whole).convert(.nanosecond, u32, .exact) catch aegis.assert.never("what is left of the span past its whole seconds is below a second");
     return .{ .sec = seconds.raw(), .nsec = rest.raw() };
 }
 

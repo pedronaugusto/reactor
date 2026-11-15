@@ -271,22 +271,11 @@ pub const GroupToken = enum(usize) {
     none = 0,
     _,
 
-    pub const AddError = error{Overflow};
-    pub const SubError = error{Overflow};
-
     const locked: usize = 0b001;
     const canceled: usize = 0b010;
     const held: usize = 0b100;
     /// One member, as members are counted in and out.
     const member: GroupToken = @fromBackingInt(0b1000);
-
-    pub fn add(a: GroupToken, b: GroupToken) AddError!GroupToken {
-        return @fromBackingInt(std.math.add(usize, @backingInt(a), @backingInt(b)) catch return error.Overflow);
-    }
-
-    pub fn sub(a: GroupToken, b: GroupToken) SubError!GroupToken {
-        return @fromBackingInt(std.math.sub(usize, @backingInt(a), @backingInt(b)) catch return error.Overflow);
-    }
 
     fn has(t: GroupToken, bit: usize) bool {
         return @backingInt(t) & bit != 0;
@@ -315,12 +304,41 @@ comptime {
 }
 
 /// `g`'s token word, as this runtime keeps it.
-fn tokenOf(g: *Io.Group) *aegis.Atomic(GroupToken) {
-    comptime assert(@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token)), "@sizeOf(aegis.Atomic(GroupToken)) == @sizeOf(@TypeOf(g.token))");
-    comptime assert(@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token)), "@alignOf(aegis.Atomic(GroupToken)) == @alignOf(@TypeOf(g.token))");
-    // glint-ignore: A001 -- std.Io keeps a group's token in an atomic word, kept here as an aegis cell of its layout
-    return @ptrCast(&g.token);
+fn tokenOf(g: *Io.Group) TokenWord {
+    comptime assert(@sizeOf(std.atomic.Value(usize)) == @sizeOf(@TypeOf(g.token)), "@sizeOf(std.atomic.Value(usize)) == @sizeOf(@TypeOf(g.token))");
+    comptime assert(@alignOf(std.atomic.Value(usize)) == @alignOf(@TypeOf(g.token)), "@alignOf(std.atomic.Value(usize)) == @alignOf(@TypeOf(g.token))");
+    return .{ .word = @ptrCast(&g.token) };
 }
+
+/// std.Io's own atomic word of a group, its bits read as a `GroupToken`:
+/// std keeps an optional pointer there, of a usize's size and alignment,
+/// and this runtime its token.
+const TokenWord = struct {
+    word: *std.atomic.Value(usize),
+
+    fn load(w: TokenWord, comptime order: std.builtin.AtomicOrder) GroupToken {
+        return @fromBackingInt(w.word.load(order));
+    }
+
+    fn store(w: TokenWord, token: GroupToken, comptime order: std.builtin.AtomicOrder) void {
+        w.word.store(@backingInt(token), order);
+    }
+
+    fn cmpxchgWeak(w: TokenWord, expected: GroupToken, new: GroupToken, comptime success: std.builtin.AtomicOrder, comptime failure: std.builtin.AtomicOrder) ?GroupToken {
+        const found = w.word.cmpxchgWeak(@backingInt(expected), @backingInt(new), success, failure) orelse return null;
+        return @fromBackingInt(found);
+    }
+
+    /// Adds `delta`, wrapping at the word's width; the token as it was.
+    fn fetchAddWrapping(w: TokenWord, delta: GroupToken, comptime order: std.builtin.AtomicOrder) GroupToken {
+        return @fromBackingInt(w.word.fetchAdd(@backingInt(delta), order));
+    }
+
+    /// Subtracts `delta`, wrapping at the word's width; the token as it was.
+    fn fetchSubWrapping(w: TokenWord, delta: GroupToken, comptime order: std.builtin.AtomicOrder) GroupToken {
+        return @fromBackingInt(w.word.fetchSub(@backingInt(delta), order));
+    }
+};
 
 /// Sets `bit` in `g`'s token.
 fn markGroup(g: *Io.Group, bit: usize, comptime order: std.builtin.AtomicOrder) GroupToken {

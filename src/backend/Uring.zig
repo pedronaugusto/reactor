@@ -343,7 +343,7 @@ pub fn drainListeners(u: *Uring) void {
         if (!active) return;
         u.enter(.forever) catch |err| std.debug.panic("reactor: draining listeners failed: {t}", .{err});
         var cqes: [256]linux.io_uring_cqe = undefined;
-        const count = u.ring.copy_cqes(&cqes, 0) catch unreachable; // glint-ignore: Z026 -- the ring remains valid until the terminal completions
+        const count = u.ring.copy_cqes(&cqes, 0) catch aegis.assert.never("the ring remains valid until the terminal completions");
         for (cqes[0..count]) |cqe| switch (tagOf(cqe.user_data)) {
             .listener => {
                 const target = u.lookup(cqe.user_data) orelse continue;
@@ -906,7 +906,7 @@ fn settle(u: *Uring, o: *op.Op, sink: anytype) void {
         if (o.kind == .io and o.kind.io == .net_write) {
             o.state.uring = .{ .use_copy = true };
             u.active -= 1;
-            u.queue(o) catch unreachable; // glint-ignore: Z026 -- its own entry was freed just above
+            u.queue(o) catch aegis.assert.never("its own entry was freed just above");
             return;
         }
     }

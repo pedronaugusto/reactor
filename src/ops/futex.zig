@@ -111,9 +111,15 @@ const Release = struct {
     }
 };
 
+/// What a wait reports: `error.Canceled` where it is `cancelable`, and
+/// nothing where it is not.
+pub fn Waited(comptime cancelable: bool) type {
+    return if (cancelable) error{Canceled}!void else void;
+}
+
 /// Waits while `ptr.*` is `expected`, until a wake, `timeout`, a cancel
 /// (when `cancelable`), or spuriously. Only `error.Canceled` is reported.
-pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeout: Io.Timeout, cancelable: bool) error{Canceled}!void {
+pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeout: Io.Timeout, comptime cancelable: bool) Waited(cancelable) {
     const b = table.bucket(ptr);
     const p = Scheduler.processor() orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
     const t = p.current orelse return waitThread(s, b, ptr, expected, timeout, cancelable);
@@ -143,13 +149,14 @@ pub fn wait(s: *Scheduler, table: *Table, ptr: *const u32, expected: u32, timeou
     // Back on the processor that armed the timer: disarm it there.
     w.deadline.disarm();
     t.leaveWait();
-    if (w.outcome == .canceled) return t.acknowledge();
+    // Only a cancelable wait entered the hook a cancel reaches.
+    if (cancelable and w.outcome == .canceled) return t.acknowledge();
 }
 
 /// A thread outside the runtime waits on a kernel futex of its own. A
 /// thread `Io.Threaded` runs a task on (a lane's) is cancelled by
 /// `Threaded`'s own mechanism.
-fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout: Io.Timeout, cancelable: bool) error{Canceled}!void {
+fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout: Io.Timeout, comptime cancelable: bool) Waited(cancelable) {
     var w: Waiter = .{ .ptr = ptr, .task = null, .bucket = b, .scheduler = s };
     var held = b.acquire();
     if (@atomicLoad(u32, ptr, .seq_cst) != expected) {
@@ -159,7 +166,7 @@ fn waitThread(s: *Scheduler, b: *Bucket, ptr: *const u32, expected: u32, timeout
     held.value().append(&w);
     held.deinit();
     const sys = Scheduler.system();
-    const outcome: error{Canceled}!void = if (cancelable)
+    const outcome: Waited(cancelable) = if (cancelable)
         w.word.waitTimeout(sys, .waiting, timeout.toDeadline(sys))
     else
         w.word.waitUncancelable(sys, .waiting);

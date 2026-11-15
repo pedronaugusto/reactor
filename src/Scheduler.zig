@@ -791,6 +791,32 @@ const Processors = aegis.units.Count(Processor, u32);
 /// A number of things that happened to tasks, over the runtime's life.
 const TaskEvents = aegis.units.Count(Task, u64);
 
+/// A round robin's turn: a count that wraps, of which only the remainder
+/// by how many take turns names whose turn it is.
+const Turn = enum(u32) {
+    _,
+
+    pub const AddError = error{Overflow};
+    pub const SubError = error{Overflow};
+
+    pub const first: Turn = @fromBackingInt(0);
+    /// From one taker's turn to the next's.
+    pub const step: Turn = @fromBackingInt(1);
+
+    pub fn add(a: Turn, b: Turn) AddError!Turn {
+        return @fromBackingInt(std.math.add(u32, @backingInt(a), @backingInt(b)) catch return error.Overflow);
+    }
+
+    pub fn sub(a: Turn, b: Turn) SubError!Turn {
+        return @fromBackingInt(std.math.sub(u32, @backingInt(a), @backingInt(b)) catch return error.Overflow);
+    }
+
+    /// Which of `takers` (at least one) this turn is.
+    pub fn of(t: Turn, takers: usize) usize {
+        return @backingInt(t) % takers;
+    }
+};
+
 pub const Shared = struct {
     inject: aegis.BlockingGuarded(Injected) = .init(.{}),
     /// How many tasks the global queue holds, readable without its lock.
@@ -802,7 +828,7 @@ pub const Shared = struct {
     /// Stacks given back to the system in part (`Trims`).
     stack_trims: aegis.Atomic(Trims.Count) = .init(.fromRaw(0)),
     /// Round robin for tasks started outside a processor under `per_core`.
-    placement: aegis.Atomic(Processors) = .init(.fromRaw(0)),
+    placement: aegis.Atomic(Turn) = .init(.first),
     /// Tasks taken from another processor's queue.
     steals: aegis.Atomic(TaskEvents) = .init(.fromRaw(0)),
     /// Tasks made to yield by their budget.
@@ -1538,9 +1564,7 @@ pub inline fn place(s: *Scheduler, t: *Task) void {
         return p.pushLocal(t, .spawned);
     };
     if (s.scheduling == .per_core) {
-        // glint-ignore: A004 -- no-danger: a round robin: the count wraps, and only its remainder picks a processor
-        const i = s.shared.placement.fetchAddWrapping(.fromRaw(1), .monotonic).raw() % s.processors.len;
-        const p = &s.processors[i];
+        const p = &s.processors[s.shared.placement.fetchAddWrapping(.step, .monotonic).of(s.processors.len)];
         t.processor_loop = &p.loop;
         return p.pushRemote(t);
     }
