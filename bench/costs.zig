@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     if (stack) try stacks(runtime.io(), count) else try processes(runtime.io(), init.io, count);
     const elapsed = before.durationTo(Io.Clock.awake.now(init.io)).nanoseconds;
     var buffer: [1024]u8 = undefined;
-    var stdout = Io.File.stdout().writer(init.io, &buffer);
+    var stdout = Io.File.stdout().writerStreaming(init.io, &buffer);
     try stdout.interface.print("{{\"io\":\"reactor\",\"workload\":\"{s}\",\"name\":\"{s}\",\"value\":{d:.3},\"unit\":\"ns/call\"}}\n", .{
         args[1],
         if (stack) "deep and shallow park + await" else "spawn exit-zero child + wait",

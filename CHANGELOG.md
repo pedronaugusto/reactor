@@ -23,6 +23,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - The message test puts the descriptor it passes where `CMSG_DATA` reads it on each system: FreeBSD's control header is 12 bytes and its data starts at the next long, so the test's descriptor sat 4 bytes early and the kernel saw a message with no rights in it. Tests only.
+- The test of a stack the system refuses to make usable maps a read-only file over the stack, which `mprotect` refuses on every POSIX system, where it unmapped the stack: FreeBSD's `mprotect` skips a hole in its range, so an unmapped stack was no refusal there and the spawn wrote into it. Tests only.
 - On Darwin, where a send ignores `MSG_DONTWAIT`, a readiness loop's send to a socket it cannot record or put in non-blocking mode fails its submission (`SystemResources` or `Unexpected`), where the send went ahead in blocking mode and could hold the loop's thread until the peer read, forever where the reader was another task of that loop.
 - On kqueue, a wake whose trigger the kqueue refused leaves no wake pending, so the next wake triggers again (as IOCP's already did), where every later wake was dropped until some other event woke the loop.
 - On the readiness backends, a connect that put a blocking socket in non-blocking mode and cannot put it back fails with `Unexpected`, where it succeeded with the socket left in non-blocking mode; a connect that failed, or was canceled, still reports its own error.
@@ -38,6 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Development: the benches write standard output and standard error through a streaming writer, where a positional one wrote them at an offset: output appended to a file was written over from its start (glint P014).
 - `net.Deadlines` keeps its watching task in a group, the new field `net.Deadlines.watcher`, which `deinit` cancels; the task ends by that cancel, where it was a future whose cancel dropped the task's end.
 - On io_uring, a regular file the ring cannot register keeps its slot as a file that is no regular one does, going by its own descriptor without a registration tried on each submission, where the slot stayed free and the next submission on the file tried again.
 - Pins aegis c43e90d, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `Signal`; `io.ReadEnd` and `io.WriteEnd`; fault points), the aegis that the development build's shakedown (1ffc7b0, `Sim.socketsOf`) and preflight select. Nothing reactor calls changed.

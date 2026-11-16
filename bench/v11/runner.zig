@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var overall: usize = 0;
     const log_io = std.Io.Threaded.global_single_threaded.io();
     var buffer: [4096]u8 = undefined;
-    var output = std.Io.File.stdout().writer(log_io, &buffer);
+    var output = std.Io.File.stdout().writerStreaming(log_io, &buffer);
     for (builtin.test_functions) |test_fn| {
         testing.allocator_instance = .init(std.heap.page_allocator, .{ .canary = 0xc3a701ba, .check_write_after_free = true });
         var allocator_alive = true;
@@ -111,7 +111,7 @@ const Watchdog = struct {
         }
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
-        var output = std.Io.File.stderr().writer(io, &buffer);
+        var output = std.Io.File.stderr().writerStreaming(io, &buffer);
         output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
         w.runtime.dump(&output.interface) catch {};
         output.interface.flush() catch {};
