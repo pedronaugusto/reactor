@@ -54,7 +54,13 @@ fn writeSide(io: Io, rendezvous: *Rendezvous) !void {
 fn readSide(io: Io, rendezvous: *Rendezvous) !void {
     rendezvous.blocked_on = Scheduler.processor().?.index;
     var writer = try io.concurrent(writeSide, .{ io, rendezvous });
-    const file = try Io.Dir.cwd().openFile(io, rendezvous.path, .{ .mode = .read_only });
+    // A reader's open that fails (a file system that refuses to open a
+    // pipe) still takes the writer back: a task never awaited or canceled
+    // keeps its stack past the runtime's stop.
+    const file = Io.Dir.cwd().openFile(io, rendezvous.path, .{ .mode = .read_only }) catch |err| {
+        writer.cancel(io) catch {};
+        return err;
+    };
     file.close(io);
     try writer.await(io);
 }
