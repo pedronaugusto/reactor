@@ -1411,6 +1411,11 @@ pub fn handOff(s: *Scheduler, p: *Processor, word: Lease, owner: *Seat, stage: S
         p.lease.store(word, .release);
         return false;
     }
+    // Counted before the spare is given the processor: whatever the spare
+    // then runs comes after the count, so a reader that has seen it run sees
+    // the handoff counted (`Runtime.stats`), where a count the monitor made
+    // once this returned could still be on its way.
+    if (s.monitor) |m| _ = m.handoffs.fetchAddWrapping(.fromRaw(1), .monotonic);
     p.lease.store(word.with(.handed), .release);
     s.spares.post(p);
     return true;

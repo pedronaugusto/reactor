@@ -80,6 +80,8 @@ parked: Raised = .{},
 stalls: aegis.Atomic(Stalls) = .init(.fromRaw(0)),
 /// Set by `stop`.
 quit: Raised = .{},
+/// Processors handed to a spare, counted by `Scheduler.handOff` before the
+/// spare is given each one.
 handoffs: aegis.Atomic(Handoffs) = .init(.fromRaw(0)),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
@@ -182,7 +184,8 @@ fn look(m: *Monitor, s: anytype, p: anytype, sample: *Sample, t: clocks.Awake) b
             } else {
                 watching = true;
                 if (m.handoff and clocks.since(sample.stage_since, t).compare(m.handoff_after) != .lt) {
-                    if (s.handOff(p, word, owner, stage)) _ = m.handoffs.fetchAddWrapping(.fromRaw(1), .monotonic);
+                    // `handOff` counts a processor it hands on, before the spare has it.
+                    _ = s.handOff(p, word, owner, stage);
                 }
             }
         }
