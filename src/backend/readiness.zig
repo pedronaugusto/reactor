@@ -111,6 +111,16 @@ const Action = enum {
     fired,
 };
 
+/// A connect's result once its socket, put in non-blocking mode for it, is
+/// back in blocking mode: a socket that cannot be put back fails a connect
+/// that succeeded, as its caller asked for one that blocks; a connect that
+/// failed reports its own error.
+fn restored(result: op.ConnectError!void, fd: posix.fd_t) op.ConnectError!void {
+    const back = calls.makeBlocking(fd);
+    try result;
+    return back;
+}
+
 /// What `action` does to `o`, which `w` waits for.
 fn actOn(o: *op.Op, w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Outcome {
     switch (action) {
@@ -128,8 +138,8 @@ fn actOn(o: *op.Op, w: *Waiter, fd: posix.fd_t, action: Action, room: usize) Out
                 },
                 .accept => o.result = .{ .accept = calls.accept(fd) orelse if (may_wait) return .wait else error.SystemResources },
                 .connect => {
-                    o.result = .{ .connect = if (may_wait) calls.connected(fd) else error.Unexpected };
-                    if (w.restore) calls.makeBlocking(fd);
+                    const result: op.ConnectError!void = if (may_wait) calls.connected(fd) else error.Unexpected;
+                    o.result = .{ .connect = if (w.restore) restored(result, fd) else result };
                 },
                 // A registration refused because the descriptor is
                 // not open is ready, as `poll` says (`POLLNVAL`).
@@ -242,7 +252,7 @@ pub fn Readiness(comptime Poller: type) type {
                 .io => |operation| {
                     const fd, const direction = calls.subject(operation);
                     const how = calls.howOf(operation);
-                    self.nonblockingToSend(operation, fd);
+                    try self.nonblockingToSend(operation, fd);
                     // Known not ready: wait for the event without a call.
                     if (how == .call and self.notReady(fd, direction)) return self.park(w, fd, direction, how);
                     if (self.now(operation, fd, direction, how)) |result| {
@@ -279,8 +289,7 @@ pub fn Readiness(comptime Poller: type) type {
                         return true;
                     });
                     if (calls.connect(c.socket, c.address)) |result| {
-                        if (w.restore) calls.makeBlocking(c.socket);
-                        o.result = .{ .connect = result };
+                        o.result = .{ .connect = if (w.restore) restored(result, c.socket) else result };
                         return true;
                     }
                     return self.park(w, c.socket, .write, .connect);
@@ -387,21 +396,21 @@ pub fn Readiness(comptime Poller: type) type {
         }
 
         /// A socket about to be written is in non-blocking mode where its
-        /// send would otherwise wait for room (`socket.send_honors_dontwait`).
-        /// Once for the record; a descriptor that cannot be switched is left
-        /// to the call, which reports it.
-        fn nonblockingToSend(self: *Self, operation: Io.Operation, fd: posix.fd_t) void {
+        /// send would otherwise wait for room (`socket.send_honors_dontwait`),
+        /// once for the record. A socket that cannot be recorded or switched
+        /// fails the submission: in blocking mode its send could hold the
+        /// loop's thread until the peer reads, which on a loop whose reader
+        /// is another of its tasks is forever.
+        fn nonblockingToSend(self: *Self, operation: Io.Operation, fd: posix.fd_t) SubmitError!void {
             if (comptime socket.send_honors_dontwait) return;
             switch (operation) {
                 .net_write, .net_send => {},
                 else => return,
             }
-            // glint-ignore: Z026 -- best effort: a descriptor not recorded sends as it stands
-            const index = self.recordFor(fd) catch return;
+            const index = try self.recordFor(fd);
             const r = self.records.at(index);
             if (r.nonblocking) return;
-            // glint-ignore: Z026 -- best effort: a descriptor that refuses sends as it stands
-            _ = calls.makeNonblocking(fd) catch return;
+            _ = try calls.makeNonblocking(fd);
             r.nonblocking = true;
         }
 
@@ -455,23 +464,25 @@ pub fn Readiness(comptime Poller: type) type {
                 .record => {
                     const r = self.records.at(w.record);
                     r.waiters[@backingInt(w.direction)].remove(w);
-                    if (w.restore) calls.makeBlocking(r.fd);
+                    o.result = if (w.restore) .{ .connect = restored(error.Canceled, r.fd) } else canceled(o);
                 },
-                .timer => self.timers[@backingInt(w.clock)].remove(w),
+                .timer => {
+                    self.timers[@backingInt(w.clock)].remove(w);
+                    o.result = canceled(o);
+                },
             }
-            o.result = canceled(o);
             self.finish(w);
         }
 
         /// A batch's operation, kept in its storage under `token`.
         pub fn submitPending(self: *Self, token: pending.Token, operation: Io.Operation) SubmitError!void {
+            const fd, const direction = calls.subject(operation);
+            const how = calls.howOf(operation);
+            try self.nonblockingToSend(operation, fd);
             const w = self.free_entries orelse return error.SystemResources;
             self.free_entries = w.next;
             const e = Entry.of(w);
             e.* = .{ .token = token };
-            const fd, const direction = calls.subject(operation);
-            const how = calls.howOf(operation);
-            self.nonblockingToSend(operation, fd);
             if (self.now(operation, fd, direction, how)) |result| {
                 e.outcome = .{ .result = result };
                 return self.finish(&e.waiter);
@@ -640,10 +651,23 @@ pub fn Readiness(comptime Poller: type) type {
 
         /// Frees an idle record, deregistering its descriptor.
         fn letGo(self: *Self, index: u32) SubmitError!void {
+            if (deregisters(self.records.at(index))) try self.room();
+            self.release(index);
+        }
+
+        /// Whether letting go of `r` deregisters its descriptor: it is the
+        /// one registered, not one opened since under its number.
+        fn deregisters(r: anytype) bool {
+            return r.epoch == closes.epoch(r.fd) and !r.registered.none();
+        }
+
+        /// Frees an idle record, where the poller's changelist has room for
+        /// its deregistration if it needs one.
+        fn release(self: *Self, index: u32) void {
             const r = self.records.at(index);
             assert(r.idle(), "r.idle()");
-            if (r.epoch == closes.epoch(r.fd) and !r.registered.none()) {
-                try self.room();
+            if (deregisters(r)) {
+                assert(!self.poller.full(), "!self.poller.full()");
                 self.poller.deregister(r.fd, r.registered, .open);
             }
             self.records.remove(index);
@@ -734,10 +758,10 @@ pub fn Readiness(comptime Poller: type) type {
                     if (e.priority) r.ready = r.ready.with(.{ .priority = true });
                     if (r.idle()) {
                         r.idle_events += 1;
-                        // glint-ignore: Z026 -- no room to deregister now: the next event tries again
-                        if (r.idle_events >= 2) self.letGo(index) catch |err| switch (err) {
-                            error.SystemResources, error.Unexpected => {},
-                        };
+                        // Let go where the changelist has room now: a full
+                        // one is not handed over from inside the events it
+                        // gave, and the next event tries again.
+                        if (r.idle_events >= 2 and !(deregisters(r) and self.poller.full())) self.release(index);
                         return;
                     }
                     r.idle_events = 0;

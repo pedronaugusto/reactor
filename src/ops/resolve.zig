@@ -70,8 +70,8 @@ pub const Config = struct {
         var words = std.mem.tokenizeAny(u8, text[0 .. std.mem.findScalar(u8, text, '#') orelse text.len], " \t\r");
         const directive = words.next() orelse return;
         if (std.mem.eql(u8, directive, "nameserver")) {
-            // glint-ignore: Z026 -- a nameserver line that does not parse names no server
-            const address = net.IpAddress.parse(words.next() orelse return, 53) catch return;
+            // A nameserver line whose address does not parse names no server.
+            const address = addressOf(words.next() orelse return, 53) orelse return;
             if (c.server_count < c.servers.len) {
                 c.servers[c.server_count] = address;
                 c.server_count += 1;
@@ -88,8 +88,12 @@ pub const Config = struct {
                     continue;
                 }
                 const colon = std.mem.findScalar(u8, word, ':') orelse continue;
-                // glint-ignore: Z026 -- an option whose value does not parse is skipped
-                const value = std.fmt.parseInt(u8, word[colon + 1 ..], 10) catch continue;
+                // A value past a byte's is clamped like any past the option's
+                // range; one that is no number is skipped.
+                const value = std.fmt.parseInt(u8, word[colon + 1 ..], 10) catch |err| switch (err) {
+                    error.Overflow => std.math.maxInt(u8),
+                    error.InvalidCharacter => continue,
+                };
                 const name = word[0..colon];
                 if (std.mem.eql(u8, name, "ndots")) {
                     c.ndots = clamped(Ndots, value);
@@ -136,15 +140,31 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
         var domains = std.mem.tokenizeAny(u8, config.search[0..config.search_len], " \t");
         var candidate: [HostName.max_len]u8 = undefined;
         while (domains.next()) |domain| {
-            // glint-ignore: Z026 -- a domain that makes the name too long gives no candidate
-            const full = std.mem.print(&candidate, "{s}.{s}", .{ bare, domain }) catch continue;
-            // glint-ignore: Z026 -- a candidate that is no host name is skipped
-            _ = HostName.init(full) catch continue;
+            const full = candidateIn(&candidate, bare, domain) orelse continue;
             if (queryNamed(io, full, port, family, out, &config, canonical)) |n| return n else |err| if (err == error.Canceled) return error.Canceled;
         }
     }
     if (!first) return queryNamed(io, bare, port, family, out, &config, canonical);
     return error.NameNotResolved;
+}
+
+/// `bare` in the search domain `domain`, written into `buffer`: the name a
+/// lookup tries for that domain; null where the two make no host name (too
+/// long, or a domain that is none).
+fn candidateIn(buffer: *[HostName.max_len]u8, bare: []const u8, domain: []const u8) ?[]const u8 {
+    const full = std.mem.print(buffer, "{s}.{s}", .{ bare, domain }) catch |err| switch (err) {
+        error.NoSpaceLeft => return null,
+    };
+    HostName.validate(full) catch |err| switch (err) {
+        error.NameTooLong, error.InvalidHostName => return null,
+    };
+    return full;
+}
+
+/// The address a configuration line writes, at `port`; null for text that
+/// writes none.
+fn addressOf(text: []const u8, port: u16) ?net.IpAddress {
+    return net.IpAddress.parse(text, port) catch null;
 }
 
 fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress, canonical: *Name) Error!?usize {
@@ -160,8 +180,8 @@ fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out
         if (!std.ascii.eqlIgnoreCase(primary, name)) {
             while (words.next()) |alias| if (std.ascii.eqlIgnoreCase(alias, name)) break else {} else continue :lines;
         }
-        // glint-ignore: Z026 -- a hosts line whose address does not parse is skipped
-        const address = net.IpAddress.parse(text, port) catch continue;
+        // A hosts line whose address does not parse is skipped.
+        const address = addressOf(text, port) orelse continue;
         if (family) |f| if (address != f) continue;
         if (n == out.len) break;
         out[n] = address;
@@ -312,8 +332,8 @@ fn tcp(r: Request, server: net.IpAddress, q: []const u8, deadline: Io.Timeout) E
         .expired => |expired| done: {
             try expired;
             while (race.cancel()) |late| switch (late) {
-                // glint-ignore: Z026 -- a late reply that failed resolved nothing: the timeout's answer stands
-                .reply => |reply| if (reply) |n| break :done n else |_| {},
+                // A late reply that failed resolved nothing: the timeout's answer stands.
+                .reply => |reply| break :done reply catch error.NameNotResolved,
                 .expired => {},
             };
             break :done error.NameNotResolved;

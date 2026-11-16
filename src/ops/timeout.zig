@@ -30,8 +30,8 @@ fn race(io: Io, operation: Io.Operation, deadline: Io.Timeout) Error!Io.Operatio
         .expired => |result| expired: {
             try result;
             while (select.cancel()) |late| switch (late) {
-                // glint-ignore: Z026 -- a late operation that failed gave no value: the timeout stands
-                .completed => |completed| if (completed) |value| break :expired value else |_| {},
+                // A late operation that failed gave no value: the timeout stands.
+                .completed => |completed| break :expired completed catch error.Timeout,
                 .expired => {},
             };
             break :expired error.Timeout;

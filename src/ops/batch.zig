@@ -42,6 +42,14 @@ fn ownerOf(batch: *const Io.Batch) ?*Task {
 
 const Until = enum { any, empty };
 
+/// What a park reports: an `any` wait may be canceled, an `empty` one not.
+fn Parked(comptime until: Until) type {
+    return switch (until) {
+        .any => error{Canceled}!Ended,
+        .empty => Ended,
+    };
+}
+
 /// How a wait on a batch ended, when not canceled.
 const Ended = enum { completed, timed_out };
 
@@ -100,7 +108,7 @@ const Waiter = struct {
 
     /// Parks until the batch has a completion (`any`) or nothing pending
     /// (`empty`); `any` waits are cancelable, and end at `deadline`.
-    fn park(w: *Waiter, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!Ended {
+    fn park(w: *Waiter, comptime until: Until, deadline: ?Io.Clock.Timestamp) Parked(until) {
         const t = w.task;
         if (until == .any) try t.enterWait(&w.hook);
         w.woken = false;
@@ -121,7 +129,7 @@ const Waiter = struct {
         return switch (w.outcome) {
             .completed => .completed,
             .timed_out => .timed_out,
-            .canceled => t.acknowledge(),
+            .canceled => if (until == .any) t.acknowledge() else aegis.assert.never("an empty wait enters no hook a cancel reaches"),
         };
     }
 
@@ -217,12 +225,12 @@ fn drainAll(s: *Scheduler, batch: *Io.Batch, where: Where) void {
     while (index != .none) : (index = batch.storage[index.toIndex()].pending.node.next) {
         loop_internal.cancelPending(&p.loop, .of(batch, index.toIndex()));
     }
-    while (batch.pending.head != .none) _ = w.park(.empty, null) catch unreachable; // glint-ignore: Z026 -- not cancelable
+    while (batch.pending.head != .none) _ = w.park(.empty, null);
 }
 
 /// Parks until the batch has a completion (`any`) or nothing pending
 /// (`empty`); `any` waits are cancelable, and end at `deadline`.
-fn wait(s: *Scheduler, batch: *Io.Batch, until: Until, deadline: ?Io.Clock.Timestamp) error{Canceled}!Ended {
+fn wait(s: *Scheduler, batch: *Io.Batch, comptime until: Until, deadline: ?Io.Clock.Timestamp) Parked(until) {
     var w: Waiter = .of(s, batch, .complete);
     w.enter();
     defer w.leave();

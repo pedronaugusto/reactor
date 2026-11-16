@@ -6,6 +6,7 @@ const aegis = @import("aegis");
 const Io = std.Io;
 const Task = @import("Task.zig");
 const Loop = @import("../Loop.zig");
+const timers = @import("../backend/op.zig");
 const Records = @import("Records.zig");
 const shuttle = @import("shuttle");
 
@@ -38,9 +39,10 @@ pub const Bucket = struct {
         const first = bucket.head orelse return;
         bucket.op.backend.kind = .{ .timer = .{ .raw = first.deadline, .clock = .awake } };
         bucket.op.completion = &bucket.completion;
-        // glint-ignore: Z026 -- a refused timer leaves the bucket unarmed; the next insert retries
-        bucket.loop.?.submit(&bucket.op) catch return;
-        bucket.armed = true;
+        // A refused timer leaves the bucket unarmed: the next insert retries.
+        bucket.armed = if (bucket.loop.?.submit(&bucket.op)) |_| true else |err| switch (err) {
+            error.QueueFull, error.SystemResources, error.Unexpected => false,
+        };
     }
 };
 records: []Record,
@@ -116,8 +118,8 @@ fn unlink(record: *Record) void {
 fn fired(c: *Loop.Completion, loop: *Loop, op: *Loop.Op) void {
     const bucket: *Bucket = @alignCast(@fieldParentPtr("completion", c)); // safe: the init-reserved bucket owns this timer
     bucket.armed = false;
-    // glint-ignore: Z026 -- a trim timer that ended in error trims nothing; the next insert arms it
-    op.backend.result.timer catch return;
+    // A canceled trim timer trims nothing; the next insert arms it.
+    if (!timers.expired(op.backend.result.timer)) return;
     const now = loop.clock.now(.awake);
     while (bucket.head) |record| {
         if (record.deadline.nanoseconds > now.nanoseconds) break;

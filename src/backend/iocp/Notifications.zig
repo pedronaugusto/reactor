@@ -64,13 +64,17 @@ pub const Record = struct {
     fn take(mailbox: *Mailbox) NextError!?Message {
         if (!mailbox.occupied) return error.Unexpected;
         var message: Message = undefined;
-        // glint-ignore: Z026 -- an empty ring holds no message: the overflow, else none, answers below
-        if (mailbox.messages.pop(&message)) |_| return message else |_| {}
-        if (mailbox.overflow) {
-            mailbox.overflow = false;
-            return error.SystemResources;
-        }
-        return null;
+        mailbox.messages.pop(&message) catch |err| switch (err) {
+            // An empty ring holds no message: the overflow, else none, answers.
+            error.Empty => {
+                if (mailbox.overflow) {
+                    mailbox.overflow = false;
+                    return error.SystemResources;
+                }
+                return null;
+            },
+        };
+        return message;
     }
 };
 

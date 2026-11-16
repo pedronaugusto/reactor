@@ -55,6 +55,12 @@ pub const Stall = struct {
 };
 
 pub const records_kept = 32;
+/// A place in the ring of the latest stalls: stepping past the last wraps
+/// to the first, as the ring holds a power of two.
+const RecordSlot = std.math.IntFittingRange(0, records_kept - 1);
+comptime {
+    if (!std.math.isPowerOfTwo(records_kept)) @compileError("the ring of stalls wraps by its slot's width");
+}
 const sites_logged = 64;
 const shortest: clocks.Span = .literal("20us");
 const no_site = std.math.maxInt(usize);
@@ -77,6 +83,8 @@ quit: Raised = .{},
 handoffs: aegis.Atomic(Handoffs) = .init(.fromRaw(0)),
 /// The latest stalls, a ring: `stalls` says how many were ever recorded.
 records: [records_kept]Stall = undefined,
+/// Where the next stall is recorded, over the oldest once the ring is full.
+next_record: RecordSlot = 0,
 /// The sites a stall was logged for (safe builds log each site once).
 logged: [sites_logged]usize = @splat(no_site),
 
@@ -148,7 +156,7 @@ pub fn run(m: *Monitor, s: anytype) void {
         if (delay.compare(shortest) == .gt) {
             _ = m.slow.raise(.monotonic);
         } else m.slow.clear(.monotonic);
-        m.word.waitTimeout(system(), seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch unreachable; // glint-ignore: Z026 -- the monitor is no task: nothing cancels it
+        m.word.waitTimeout(system(), seen, .{ .duration = .{ .raw = delay.toIoDuration(), .clock = .awake } }) catch aegis.assert.never("the monitor is no task: nothing cancels it");
         if (m.word.load(.acquire) != seen) delay = shortest;
     }
 }
@@ -206,9 +214,9 @@ fn doubled(delay: clocks.Span) clocks.Span {
 fn record(m: *Monitor, stall: Stall) void {
     // The monitor's thread alone records: a plain step, published.
     const n = m.stalls.load(.monotonic);
-    // glint-ignore: A004 -- no-danger: a ring of the last stalls: only the count's remainder picks the slot to overwrite
-    m.records[n.raw() % records_kept] = stall;
-    m.stalls.store(n.add(.fromRaw(1)) catch unreachable, .release); // glint-ignore: Z026 -- no program records 2^64 stalls
+    m.records[m.next_record] = stall;
+    m.next_record +%= 1;
+    m.stalls.store(n.add(.fromRaw(1)) catch aegis.assert.never("no program records 2^64 stalls"), .release);
     if (builtin.mode != .debug and builtin.mode != .safe) return;
     for (&m.logged) |*site| {
         if (site.* == stall.site) return;

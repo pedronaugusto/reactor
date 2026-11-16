@@ -69,13 +69,8 @@ pub fn use(f: *Files, ring: *linux.IoUring, sqe: *linux.io_uring_sqe) void {
     }
     const index = vacant orelse return;
     const fd = sqe.fd;
-    if (!regular(fd)) {
-        f.registered[index] = false;
-        f.slots[index].store(.of(fd), .release);
-        return;
-    }
-    // glint-ignore: Z026 -- a file the ring cannot register goes by its own descriptor
-    ring.register_files_update(index, &.{fd}) catch return;
+    if (!regular(fd)) return f.unregistered(index, fd);
+    ring.register_files_update(index, &.{fd}) catch return f.unregistered(index, fd);
     f.registered[index] = true;
     f.slots[index].store(.of(fd), .release);
     sqe.fd = @intCast(index);
@@ -109,6 +104,14 @@ pub fn remove(f: *Files, u: anytype, fd: linux.fd_t) void {
         slot.store(.tombstone, .release);
         return;
     }
+}
+
+/// Keeps `fd` in slot `index` unregistered: a file that is no regular one,
+/// or one the ring cannot register, goes by its own descriptor, and its
+/// slot says so, so it is not tried again.
+fn unregistered(f: *Files, index: u32, fd: linux.fd_t) void {
+    f.registered[index] = false;
+    f.slots[index].store(.of(fd), .release);
 }
 
 fn regular(fd: linux.fd_t) bool {

@@ -1,6 +1,7 @@
 //! Winsock's cancellable extended resolver. An OVERLAPPED event belongs
 //! to one lookup; its owner waits for the event before releasing storage.
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const windows = std.os.windows;
 const win32 = @import("win32.zig");
@@ -54,7 +55,7 @@ pub const Request = struct {
         const count = std.unicode.utf8ToUtf16Le(&r.name, name) catch return error.NameNotResolved;
         r.name[count] = 0;
         var text: [8]u8 = undefined;
-        const digits = std.mem.print(&text, "{d}", .{port}) catch unreachable; // glint-ignore: Z026 -- eight bytes hold a u16
+        const digits = std.mem.print(&text, "{d}", .{port}) catch aegis.assert.never("eight bytes hold a u16");
         for (digits, 0..) |digit, i| r.service[i] = digit;
         r.service[digits.len] = 0;
         const hints: Info = .{ .flags = 2, .family = if (family) |f| switch (f) {

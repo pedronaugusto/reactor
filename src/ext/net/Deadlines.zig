@@ -28,14 +28,17 @@ const Raised = @import("../../sync/Raised.zig");
 /// Watches with an operation armed.
 const Armed = aegis.units.Count(Watch, u32);
 
-/// What the lock holds: the watched, and the task that keeps their
-/// deadlines. Held by the task while it scans.
+/// What the lock holds: the watched, and whether the task that keeps their
+/// deadlines was started. Held by the task while it scans.
 const Watching = struct {
     watches: std.DoublyLinkedList = .{},
-    task: ?Io.Future(void) = null,
+    started: bool = false,
 };
 
 watching: aegis.BlockingGuarded(Watching) = .init(.{}),
+/// The task that keeps the deadlines, once started: it runs until the
+/// group's cancel ends it.
+watcher: Io.Group = .init,
 /// Watches with an operation armed.
 armed: aegis.Atomic(Armed) = .init(.fromRaw(0)),
 /// Whether the task waits for an operation to be armed; the futex it waits
@@ -102,7 +105,7 @@ pub fn init(shortest: Io.Duration) Deadlines {
 
 /// A tenth of `d`, between a millisecond and a second.
 fn tickFor(d: Io.Duration) clock.Span {
-    const tenth = clock.spanOf(d).divTrunc(10) catch unreachable; // glint-ignore: Z026 -- the divisor is a constant
+    const tenth = clock.spanOf(d).divTrunc(10) catch aegis.assert.never("the divisor is a nonzero constant");
     const shortest: clock.Span = .literal("1ms");
     const longest: clock.Span = .literal("1s");
     if (tenth.compare(shortest) == .lt) return shortest;
@@ -131,9 +134,9 @@ pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
 pub fn deinit(d: *Deadlines, io: Io) void {
     var held = d.watching.acquireUncancelable(io);
     assert(held.value().watches.first == null, "held.value().watches.first == null");
-    var task = held.value().task;
     held.deinit(io);
-    if (task) |*running| running.cancel(io);
+    // Outside the lock, which the task takes to scan.
+    d.watcher.cancel(io);
     d.* = undefined;
 }
 
@@ -148,7 +151,10 @@ pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
     var held = d.watching.acquireUncancelable(io);
     defer held.deinit(io);
     const watching = held.value();
-    if (watching.task == null) watching.task = io.concurrent(watch, .{ d, io }) catch return false;
+    if (!watching.started) {
+        d.watcher.concurrent(io, watch, .{ d, io }) catch return false;
+        watching.started = true;
+    }
     watching.watches.append(&w.node);
     return true;
 }
@@ -221,7 +227,8 @@ fn disarm(d: *Deadlines, w: *Watch) void {
     _ = d.armed.fetchSubWrapping(.fromRaw(1), .seq_cst);
 }
 
-fn watch(d: *Deadlines, io: Io) void {
+/// The watching task: it ends canceled, as its group's cancel ends it.
+fn watch(d: *Deadlines, io: Io) Io.Cancelable!void {
     var idle_ticks: u32 = 0;
     while (true) {
         if (d.armed.load(.seq_cst).eql(.fromRaw(0))) {
@@ -229,16 +236,14 @@ fn watch(d: *Deadlines, io: Io) void {
             if (idle_ticks > 1) {
                 idle_ticks = 0;
                 d.parked.store(.parked, .seq_cst);
-                // glint-ignore: Z026 -- canceled: the watcher ends with its task
-                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) d.parked.wait(io, .parked) catch return;
+                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) try d.parked.wait(io, .parked);
                 d.parked.store(.running, .seq_cst);
                 continue;
             }
         } else idle_ticks = 0;
         const seen = d.nudge.load(.acquire);
         const tick = d.tick.load(.monotonic).toIoDuration();
-        // glint-ignore: Z026 -- canceled: the watcher ends with its task
-        d.nudge.waitTimeout(io, seen, .{ .duration = .{ .raw = tick, .clock = .awake } }) catch return;
+        try d.nudge.waitTimeout(io, seen, .{ .duration = .{ .raw = tick, .clock = .awake } });
         d.scan(io);
     }
 }

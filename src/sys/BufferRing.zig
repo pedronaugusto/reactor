@@ -19,7 +19,7 @@ pub const Error = error{ Unsupported, SystemResources, Unexpected };
 
 /// The mask the kernel's ring arithmetic takes: the entries are a power of two.
 pub fn indexMask(entries: Entries) u16 {
-    const last = entries.sub(.fromRaw(1)) catch unreachable; // glint-ignore: Z026 -- a ring holds at least two entries
+    const last = entries.sub(.fromRaw(1)) catch aegis.assert.never("a ring holds at least two entries");
     return last.raw(); // c-os-boundary: the kernel's ring arithmetic
 }
 

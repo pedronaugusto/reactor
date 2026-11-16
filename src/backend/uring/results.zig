@@ -102,14 +102,15 @@ fn fillMessage(message: *net.IncomingMessage, data: []u8, address: *const Thread
     };
 }
 
+/// The first message went through the ring; the rest go now.
 fn sent(s: Io.Operation.NetSend, n: usize) struct { ?net.Socket.SendError, usize } {
     s.messages[0].data_len = n;
-    return .{ null, 1 };
+    return sendRest(s, 1);
 }
 
 /// After the first message went through the ring: the rest, by one
 /// non-blocking `sendmmsg`, as many as the socket takes now.
-pub fn sendRest(s: Io.Operation.NetSend, from: usize) struct { ?net.Socket.SendError, usize } {
+fn sendRest(s: Io.Operation.NetSend, from: usize) struct { ?net.Socket.SendError, usize } {
     var done = from;
     while (done < s.messages.len) {
         const n = sendMany(s.socket_handle, s.messages[done..], sendFlags(s.flags) | posix.MSG.DONTWAIT) catch |err| switch (err) {

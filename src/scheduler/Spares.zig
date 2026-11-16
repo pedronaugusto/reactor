@@ -83,7 +83,7 @@ pub fn Of(comptime Item: type) type {
             if (state.idle + state.starting > state.waiting.len()) return true;
             if (state.threads.len() == sp.cap) return false;
             var thread = std.Thread.spawn(.{ .stack_size = if (builtin.sanitize_thread) (std.Thread.SpawnConfig{}).stack_size else 512 << 10 }, body, .{ context, null }) catch return false;
-            state.threads.append(&thread) catch unreachable; // glint-ignore: Z026 -- fewer threads than `cap`, checked above
+            state.threads.append(&thread) catch aegis.assert.never("fewer threads than `cap`, checked above");
             state.starting += 1;
             return true;
         }
@@ -107,21 +107,24 @@ pub fn Of(comptime Item: type) type {
             state.idle += 1;
             while (true) {
                 var p: *Item = undefined;
-                // glint-ignore: Z026 -- an empty queue holds no processor yet: the thread waits below for one
-                if (state.waiting.pop(&p)) {
-                    state.idle -= 1;
-                    held.deinit(system());
-                    return p;
-                } else |_| {}
-                if (stopping.raised(.acquire)) {
-                    state.idle -= 1;
-                    held.deinit(system());
-                    return null;
-                }
-                const seen = sp.signal.load(.acquire);
+                state.waiting.pop(&p) catch |err| switch (err) {
+                    // No processor yet: the thread waits for one, unless stopping.
+                    error.Empty => {
+                        if (stopping.raised(.acquire)) {
+                            state.idle -= 1;
+                            held.deinit(system());
+                            return null;
+                        }
+                        const seen = sp.signal.load(.acquire);
+                        held.deinit(system());
+                        sp.signal.waitUncancelable(system(), seen);
+                        held = sp.state.acquireUncancelable(system());
+                        continue;
+                    },
+                };
+                state.idle -= 1;
                 held.deinit(system());
-                sp.signal.waitUncancelable(system(), seen);
-                held = sp.state.acquireUncancelable(system());
+                return p;
             }
         }
 
@@ -129,17 +132,20 @@ pub fn Of(comptime Item: type) type {
         pub fn stop(sp: *Spares) void {
             _ = sp.signal.fetchAddWrapping(.fromRaw(1), .release);
             sp.signal.wake(system(), std.math.maxInt(u32));
-            while (true) {
-                var thread: std.Thread = undefined;
-                {
-                    // Joined outside the lock: a spare leaving needs it to see the stop.
-                    var held = sp.state.acquireUncancelable(system());
-                    defer held.deinit(system());
-                    // glint-ignore: Z026 -- no spare left to join
-                    held.value().threads.pop(&thread) catch return;
-                }
-                thread.join();
-            }
+            // Joined outside the lock: a spare leaving needs it to see the stop.
+            while (sp.started()) |thread| thread.join();
+        }
+
+        /// A started spare not joined yet, taken off the list; null once
+        /// every one is.
+        fn started(sp: *Spares) ?std.Thread {
+            var held = sp.state.acquireUncancelable(system());
+            defer held.deinit(system());
+            var thread: std.Thread = undefined;
+            held.value().threads.pop(&thread) catch |err| switch (err) {
+                error.Empty => return null,
+            };
+            return thread;
         }
     };
 }
