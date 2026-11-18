@@ -351,3 +351,46 @@ hook runs under the bit and unlinks the waiter from its bucket). Every lock
 here is taken uncancelable, since a cancel must not leave one half held, and
 aegis's ordered guards only take a lock that may return `Canceled`; the order
 is kept by this list and the tests rather than a checked rank.
+
+## Why these choices
+
+- **Three layers a user can stop at** (`Loop`, `Runtime`, the extensions over any `Io`), because std 0.17's
+  evented `Io`s are incomplete (its Uring and Dispatch refuse listen, accept, connect and lookup; its Kqueue
+  panics in most slots), its `Threaded` costs a thread per task and panics on a connect timeout, and no Zig `Io`
+  can be driven by a host's loop. A host that owns its loop drives reactor, and reactor never takes the host's
+  thread.
+- **Stackful tasks**, because `std.Io` is blocking-shaped: `io.operate` returns into its caller's frame, so only
+  a task with its own stack can suspend inside it.
+- **Work stealing with a budget by default** (tokio's and Go's shape; one hot connection must not starve its
+  worker), `per_core` shared-nothing as an option.
+- **Backends:** io_uring, with epoll where io_uring is too old, missing or refused (Docker's default seccomp and
+  `kernel.io_uring_disabled` refuse it in common deployments); kqueue on macOS and the BSDs, one backend and no
+  GCD threads; IOCP over AFD on Windows, where std's sockets already are AFD endpoints.
+- **Blocking calls run on lanes, never inline on a worker.** A refused lane call returns its refusal as an
+  error, since running it inline would block the worker the lanes protect.
+- **Cancellation is std's rule, and completion wins**: bytes read, a socket accepted or a connection made are
+  never lost to a cancel. A timeout never returns while the kernel holds an operation (std's Uring did, and the
+  kernel later wrote into freed memory).
+- **Default workers**: the logical CPUs less one, and on Darwin a quarter of them, since loopback-heavy traffic
+  inside one process gains nothing past that there; a compute-bound host sets `workers`.
+- **The resolver is bounded**: a lookup never puts more than the caller's queue holds (std's ignores its own
+  bound), through `getaddrinfo` on the `lookup` lane with libc, `GetAddrInfoExW` on Windows, and reactor's stub
+  resolver elsewhere.
+- **airlock stays a leaf**: its durability options take a `Blocking` executor, and reactor's `blocking`
+  supplies one. A library depends on `std.Io`, never on an `Io` implementation.
+- **reactor's own logic replays deterministically** on a seeded fake backend and a virtual clock, inside its
+  tests only; simulating user code is shakedown's `Sim`, and sharing it would close a cycle.
+
+## Rivals and scope
+
+Measured against tokio (the scheduler's shape, the coop budget), Go's runtime (processor and thread split,
+handoff) and std's `Threaded` (the differential oracle); libuv, Asio, libxev, TigerBeetle and compio are the
+embedding API `Loop` matches; glommio and monoio `per_core`; Seastar, Netty, BEAM and .NET the lanes and budgets.
+Their drivers and results live outside this repository.
+
+Out, and why: pre-emption of CPU-bound tasks and growable stacks (both need the compiler: safe points, stack
+maps); NUMA placement (no affinity today); a live console (`stats` and `dump` are in); io_uring direct
+descriptors (callers pass real descriptors to `setsockopt` and children); NAPI busy poll and zero-copy receive
+(the raw SQE escape reaches them); directory reading as a ring op (none in mainline); DNS caching and DoH (uplink's
+resolver seam); terminals, watching and spawning policy (conduit, lookout); wasm, WASI and 32-bit targets (no
+fiber switch).
