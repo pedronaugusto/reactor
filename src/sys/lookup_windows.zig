@@ -34,7 +34,20 @@ extern "ws2_32" fn GetAddrInfoExCancel(handle: *?windows.HANDLE) callconv(.winap
 extern "ws2_32" fn GetAddrInfoExOverlappedResult(overlapped: *Overlapped) callconv(.winapi) c_int;
 extern "ws2_32" fn FreeAddrInfoExW(info: *Info) callconv(.winapi) void;
 
-pub const Error = error{ NameNotResolved, SystemResources, Unexpected };
+/// A lookup's failures, by std's names: no such name, or none of the family
+/// (`WSAHOST_NOT_FOUND`, `WSANO_DATA`, a name with no UTF-16 spelling); no
+/// usable answer (`WSATRY_AGAIN`, `WSANO_RECOVERY`, and the codes left); an
+/// answer with no address; memory.
+pub const Error = error{ UnknownHostName, NameServerFailure, NoAddressReturned, SystemResources, Unexpected };
+
+/// A Winsock code from a lookup, as std names a lookup's failure.
+pub fn failure(code: c_int) Error {
+    return switch (code) {
+        11001, 11004 => error.UnknownHostName, // WSAHOST_NOT_FOUND, WSANO_DATA
+        8, 10055 => error.SystemResources, // WSA_NOT_ENOUGH_MEMORY, WSAENOBUFS
+        else => error.NameServerFailure, // WSATRY_AGAIN, WSANO_RECOVERY and the rest
+    };
+}
 pub const Result = struct { count: usize, canonical: ?Io.net.HostName = null };
 
 pub const Request = struct {
@@ -52,7 +65,7 @@ pub const Request = struct {
         if (WSAStartup(0x202, &data) != 0) return error.SystemResources;
         r.initialized = true;
         r.overlapped.event = win32.CreateEventW(null, .TRUE, .FALSE, null) orelse return error.SystemResources;
-        const count = std.unicode.utf8ToUtf16Le(&r.name, name) catch return error.NameNotResolved;
+        const count = std.unicode.utf8ToUtf16Le(&r.name, name) catch return error.UnknownHostName;
         r.name[count] = 0;
         var text: [8]u8 = undefined;
         const digits = std.mem.print(&text, "{d}", .{port}) catch aegis.assert.never("eight bytes hold a u16");
@@ -65,7 +78,7 @@ pub const Request = struct {
         switch (GetAddrInfoExW(&r.name, &r.service, 0, null, &hints, &r.result, null, &r.overlapped, null, &r.handle)) {
             0 => {},
             997 => r.pending = true,
-            else => return error.NameNotResolved,
+            else => |code| return failure(code),
         }
     }
 
@@ -76,7 +89,10 @@ pub const Request = struct {
     pub fn finish(r: *Request, out: []Io.net.IpAddress, canonical_buffer: ?*[254]u8) Error!Result {
         const pending = r.pending;
         r.pending = false;
-        if (pending and GetAddrInfoExOverlappedResult(&r.overlapped) != 0) return error.NameNotResolved;
+        if (pending) {
+            const code = GetAddrInfoExOverlappedResult(&r.overlapped);
+            if (code != 0) return failure(code);
+        }
         var item = r.result;
         var n: usize = 0;
         var canonical: ?Io.net.HostName = null;
@@ -91,7 +107,7 @@ pub const Request = struct {
             out[n] = Io.Threaded.addressFromPosix(address);
             n += 1;
         }
-        if (n == 0) return error.NameNotResolved;
+        if (n == 0) return error.NoAddressReturned;
         return .{ .count = n, .canonical = canonical };
     }
 

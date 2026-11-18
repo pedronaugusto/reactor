@@ -508,7 +508,7 @@ test "the loop alone on IOCP: a timer, a real-clock timer, a wake" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var l: Loop = undefined;
     try l.init(testing.allocator, .{});
-    defer l.deinit(testing.allocator);
+    defer l.deinit();
     const system = Io.Threaded.global_single_threaded.io();
     const now = Io.Clock.Timestamp.now(system, .awake);
     var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = now.addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake }) } }, .user_data = 7 };
@@ -536,7 +536,7 @@ test "a host's own port: the loop's entries handed back through complete" {
     defer sys.close(port);
     var l: Loop = undefined;
     try l.init(testing.allocator, .{ .port = port });
-    defer l.deinit(testing.allocator);
+    defer l.deinit();
     // A socket pair made with std's own Io, then read through the loop.
     const system = Io.Threaded.global_single_threaded.io();
     const address: net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -662,7 +662,7 @@ test "the loop alone: a socket's readiness through AFD's poll" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var l: Loop = undefined;
     try l.init(testing.allocator, .{});
-    defer l.deinit(testing.allocator);
+    defer l.deinit();
     const system = Io.Threaded.global_single_threaded.io();
     const address: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try address.listen(system, .{ .reuse_address = true });

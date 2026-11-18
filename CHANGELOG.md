@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `net.resolve` (its `net.ResolveError`) names a failure as std names a lookup's (`HostName.LookupError`), where every failure but a cancel was `NameNotResolved`: `UnknownHostName` (no such name, NXDOMAIN or NODATA), `NameServerFailure` (no server gave a usable answer: each timed out or failed, SERVFAIL, `EAI_AGAIN`, `WSATRY_AGAIN`), `NoAddressReturned` (no address of the family), `DetectingNetworkConfigurationFailed` (`/etc/hosts` or `/etc/resolv.conf` there but unreadable), `ResolvConfParseFailed`, `SystemResources`.
+- `Loop.deinit` takes no allocator: the loop keeps the one `Loop.init` took, in the private field `Loop.gpa`, which a `Loop` now requires beside `Loop.backend`, `Loop.clock`, `Loop.max_ops`, `Loop.owner` and `Loop.wheel` (`Loop.init` makes one).
 - `net.PipeListener.accept` (also `net.pipe.PipeListener.accept`) and `net.pipe.connectPipe` return the pipe's owner, an `aegis.own.OwnedIo` over the `Io.File` released once by `deinit(io)`, where each returned the `Io.File` for the caller to close.
 - `net.Deadlines.Watch.Target.pipe` is the pipe's `Io.File.Handle`, where it was the `Io.File` (a watch is made by `net.Deadlines.Watch.initPipe` as before); `net.Deadlines.nudge` and `net.Deadlines.parked` are `aegis.Atomic` cells, where each was a `std.atomic.Value(u32)`.
 - `Loop.ready` and `Loop.reaped` are of the public type `Loop.List`, and `Signals.listener` points at the public `Signals.Listener`: each type was private, and is otherwise unchanged.
@@ -22,6 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A lookup on a `Runtime` reports why it failed, where every failure was `UnknownHostName`: the stub resolver queried 127.0.0.1:53 when `/etc/resolv.conf` could not be opened for any reason (only its absence means the local server now), read a failed `/etc/hosts` or resolv.conf as no such name, and getaddrinfo's and Winsock's codes were all one.
 - The message test puts the descriptor it passes where `CMSG_DATA` reads it on each system: FreeBSD's control header is 12 bytes and its data starts at the next long, so the test's descriptor sat 4 bytes early and the kernel saw a message with no rights in it. Tests only.
 - The test of a stack the system refuses to make usable maps a read-only file over the stack, which `mprotect` refuses on every POSIX system, where it unmapped the stack: FreeBSD's `mprotect` skips a hole in its range, so an unmapped stack was no refusal there and the spawn wrote into it. Tests only.
 - On Darwin, where a send ignores `MSG_DONTWAIT`, a readiness loop's send to a socket it cannot record or put in non-blocking mode fails its submission (`SystemResources` or `Unexpected`), where the send went ahead in blocking mode and could hold the loop's thread until the peer read, forever where the reader was another task of that loop.

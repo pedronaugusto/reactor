@@ -33,8 +33,8 @@ test "a deadline beyond the end of the timeline waits and cancels" {
     var fake = Fake.init(testing.allocator, .{ .seeded = .{ .seed = 1, .virtual = &virtual } });
     defer fake.deinit();
     var loop: Loop = undefined;
-    loop_internal.initWith(&loop, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 4);
-    defer loop.deinit(testing.allocator);
+    loop_internal.initWith(&loop, testing.allocator, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 4);
+    defer loop.deinit();
     const far: Io.Clock.Timestamp = .{ .clock = .awake, .raw = .{ .nanoseconds = std.math.maxInt(i96) } };
     var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = far } } };
     try loop.submit(&timer);

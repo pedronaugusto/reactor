@@ -9,10 +9,11 @@ const Loop = @import("../Loop.zig");
 const backend = @import("../backend.zig");
 const clock = @import("../clock.zig");
 
-/// A loop over `b` and `source`: the runtime's tests give it the seeded
+/// A loop over `b` and `source`, which frees with `gpa`: the runtime's tests give it the seeded
 /// fake and a virtual clock.
-pub fn initWith(l: *Loop, b: backend.Backend, source: clock.Source, max_ops: u32) void {
+pub fn initWith(l: *Loop, gpa: std.mem.Allocator, b: backend.Backend, source: clock.Source, max_ops: u32) void {
     l.* = .{
+        .gpa = gpa,
         .backend = b,
         .clock = source,
         .wheel = .init(source.ticks()),

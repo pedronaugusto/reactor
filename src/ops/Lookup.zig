@@ -60,7 +60,7 @@ pub const Record = struct {
     fn run(job: *Lanes.Job) void {
         const r: *Record = @alignCast(@fieldParentPtr("job", job)); // safe: the job belongs to this request
         r.result = if (r.state.load(.acquire) == .canceled) error.Canceled else result: {
-            break :result r.provider(r.name[0..r.name_len], r.port, r.family, &r.addresses, &r.canonical_buffer) catch error.UnknownHostName;
+            break :result r.provider(r.name[0..r.name_len], r.port, r.family, &r.addresses, &r.canonical_buffer);
         };
     }
 
@@ -149,6 +149,6 @@ pub fn resolve(l: *Lookup, s: *Scheduler, lanes: *Lanes, provider: Provider, nam
 
 fn direct(lanes: *Lanes, provider: Provider, name: net.HostName, options: net.HostName.LookupOptions, out: []net.IpAddress) net.HostName.LookupError!Result {
     lanes.countInline(.lookup);
-    const result = provider(name.bytes, options.port, options.family, out, options.canonical_name_buffer) catch return error.UnknownHostName;
+    const result = try provider(name.bytes, options.port, options.family, out, options.canonical_name_buffer);
     return .{ .count = result.addresses.len, .canonical = result.canonical };
 }

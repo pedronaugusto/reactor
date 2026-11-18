@@ -29,8 +29,20 @@ pub const Options = struct {
 pub const Error = error{
     /// The name is not a host name.
     InvalidHostName,
-    /// The name has no address, or the resolver failed.
-    NameNotResolved,
+    /// The name does not exist, or has no address of the family asked for.
+    UnknownHostName,
+    /// No server gave a usable answer: none answered, each failed, or the
+    /// answer was no DNS message. Asking again later may succeed.
+    NameServerFailure,
+    /// An answer, or an address written as the name, with no address of the
+    /// family asked for.
+    NoAddressReturned,
+    /// `/etc/hosts` or `/etc/resolv.conf` is there but could not be read.
+    DetectingNetworkConfigurationFailed,
+    /// A resolv.conf line too long to read.
+    ResolvConfParseFailed,
+    /// Memory or descriptors ran out.
+    SystemResources,
     /// No task could run the lookup beside this one, and this target has no
     /// lookup that runs without one.
     ConcurrencyUnavailable,
@@ -42,7 +54,7 @@ pub const Error = error{
 pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpAddress) Error![]IpAddress {
     aegis.assert.invariant(out.len != 0, "out.len != 0");
     if (literal(host, port)) |address| {
-        if (options.family) |f| if (address != f) return error.NameNotResolved;
+        if (options.family) |f| if (address != f) return error.NoAddressReturned;
         out[0] = address;
         return out[0..1];
     }
@@ -57,14 +69,14 @@ pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpA
     }
     var queue: Io.Queue(HostName.LookupResult) = .init(&buffer);
     var future = io.concurrent(HostName.lookup, .{ name, io, &queue, lookup_options }) catch {
-        if (getaddrinfo.available) return (getaddrinfo.lookup(host, port, options.family, out, null) catch return error.NameNotResolved).addresses;
+        if (getaddrinfo.available) return (try getaddrinfo.lookup(host, port, options.family, out, null)).addresses;
         return error.ConcurrencyUnavailable;
     };
     const found = drain(io, &queue, options.family, out) catch |err| switch (err) {
-        // The queue closed empty: a lookup that ended canceled says so first.
-        error.NameNotResolved => {
-            future.await(io) catch |lookup| if (lookup == error.Canceled) return error.Canceled;
-            return error.NameNotResolved;
+        // The queue closed empty: a lookup that failed says why first.
+        error.NoAddressReturned => {
+            future.await(io) catch |lookup| return mapLookup(lookup);
+            return error.NoAddressReturned;
         },
         // The lookup is ended, and its own end gives way to the error that
         // ended this call.
@@ -73,10 +85,7 @@ pub fn resolve(io: Io, host: []const u8, port: u16, options: Options, out: []IpA
             return e;
         },
     };
-    future.await(io) catch |err| return switch (err) {
-        error.Canceled => error.Canceled,
-        else => error.NameNotResolved,
-    };
+    future.await(io) catch |err| return mapLookup(err);
     return found;
 }
 
@@ -94,14 +103,21 @@ fn drain(io: Io, queue: *Io.Queue(HostName.LookupResult), family: ?IpAddress.Fam
         error.Canceled => return error.Canceled,
         error.Closed => {},
     }
-    if (count == 0) return error.NameNotResolved;
+    if (count == 0) return error.NoAddressReturned;
     return out[0..count];
 }
 
+/// std's lookup failure as this call names it: the names they share kept,
+/// a malformed record or a failed socket of the stub's no usable answer.
 fn mapLookup(err: HostName.LookupError) Error {
     return switch (err) {
         error.Canceled => error.Canceled,
-        else => error.NameNotResolved,
+        error.UnknownHostName => error.UnknownHostName,
+        error.NoAddressReturned => error.NoAddressReturned,
+        error.DetectingNetworkConfigurationFailed => error.DetectingNetworkConfigurationFailed,
+        error.ResolvConfParseFailed => error.ResolvConfParseFailed,
+        error.SystemResources, error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded => error.SystemResources,
+        else => error.NameServerFailure,
     };
 }
 

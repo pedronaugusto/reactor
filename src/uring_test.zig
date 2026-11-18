@@ -104,7 +104,7 @@ test "a socket write the send buffer has room for is made at once; one that woul
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
-    defer l.deinit(testing.allocator);
+    defer l.deinit();
     var sockets: [2]linux.fd_t = undefined;
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
     defer for (sockets) |fd| {
@@ -188,7 +188,7 @@ test "the loop alone: a timer and a wake, completions reaped" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
-    defer l.deinit(testing.allocator);
+    defer l.deinit();
     const due = Io.Clock.Timestamp.now(Io.Threaded.global_single_threaded.io(), .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
     var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = due } }, .user_data = 7 };
     try l.submit(&timer);

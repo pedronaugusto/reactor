@@ -235,7 +235,7 @@ fn buildLoop(c: *Core, p: *Processor, how: Construction) InitError!void {
             .kept = if (builtin.os.tag == .linux) &c.kept else null,
             .owner = if (p.index == 0) .caller else .adopter,
         }),
-        .custom => |custom| loop_internal.initWith(&p.loop, .{ .custom = custom.backends.backendFor(custom.backends, p.index) }, custom.clock, 1 << 16),
+        .custom => |custom| loop_internal.initWith(&p.loop, c.gpa, .{ .custom = custom.backends.backendFor(custom.backends, p.index) }, custom.clock, 1 << 16),
     }
 }
 
@@ -314,7 +314,7 @@ pub fn deinit(c: *Core) void {
     own.context.deinit(&c.home_stack);
     own.* = .{};
     c.scheduler.trims.deinit(c.gpa);
-    for (c.processors) |*p| p.loop.deinit(c.gpa);
+    for (c.processors) |*p| p.loop.deinit();
     c.home_stack.deinit();
     c.scheduler.stacks.deinit(c.gpa);
     c.scheduler.records.deinit(c.gpa);

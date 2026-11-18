@@ -560,19 +560,20 @@ fn lookupOnLane(lane_io: Io, host_name: net.HostName, options: net.HostName.Look
     var addresses: [max_kept]net.IpAddress = undefined;
     var canonical: stub.Name = .{};
     const n = if (builtin.os.tag == .windows) windows: {
-        const result = lookup_windows.resolve(lane_io, host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch |err| return if (err == error.Canceled) error.Canceled else error.UnknownHostName;
+        const result = try lookup_windows.resolve(lane_io, host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer);
         kept.canonical = result.canonical;
         break :windows result.count;
     } else if (getaddrinfo.available)
-        (getaddrinfo.lookup(host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer) catch return error.UnknownHostName).addresses.len
+        (try getaddrinfo.lookup(host_name.bytes, options.port, options.family, &addresses, options.canonical_name_buffer)).addresses.len
     else
         stub.lookupNamed(lane_io, host_name, options.port, options.family, &addresses, &canonical) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return error.UnknownHostName,
+            // A reply that is no DNS message is no usable answer.
+            error.InvalidPacket => return error.NameServerFailure,
+            else => |e| return e,
         };
     if (canonical.len != 0) if (options.canonical_name_buffer) |buffer| {
         @memcpy(buffer[0..canonical.len], canonical.bytes[0..canonical.len]);
-        kept.canonical = net.HostName.init(buffer[0..canonical.len]) catch return error.UnknownHostName;
+        kept.canonical = net.HostName.init(buffer[0..canonical.len]) catch return error.InvalidDnsCnameRecord;
     };
     for (addresses[0..n]) |address| keep(kept, .{ .address = address });
 }

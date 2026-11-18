@@ -503,7 +503,7 @@ test "a native receive alone returns from a loop waiting for a completion" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     var sockets: [2]posix.fd_t = undefined;
     try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sockets)));
     defer closeAll(&sockets);
@@ -562,7 +562,7 @@ test "a completion whose key names nothing of the ring's is refused, counted, an
         error.BackendUnavailable => return error.SkipZigTest,
         else => |e| return e,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     const ring = loop.backend.io_uring;
     // A sink that a refused completion never reaches.
     const Unreached = struct {

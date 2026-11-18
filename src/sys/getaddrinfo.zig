@@ -10,10 +10,11 @@ const IpAddress = Io.net.IpAddress;
 /// Whether this target has it.
 pub const available = builtin.link_libc and builtin.os.tag != .windows;
 
-pub const Error = error{
-    /// The name has no address, or the resolver failed.
-    LookupFailed,
-};
+/// getaddrinfo's failures, by std's lookup names: no such name, or none of
+/// the family (`EAI_NONAME`, `EAI_NODATA`); no usable answer from the
+/// resolver (`EAI_AGAIN`, `EAI_FAIL`, and the codes left: the system's own
+/// failure); an answer with no address; memory (`EAI_MEMORY`).
+pub const Error = error{ UnknownHostName, NameServerFailure, NoAddressReturned, SystemResources };
 
 pub const Result = struct { addresses: []IpAddress, canonical: ?Io.net.HostName = null };
 
@@ -21,7 +22,7 @@ pub const Result = struct { addresses: []IpAddress, canonical: ?Io.net.HostName 
 pub fn lookup(name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpAddress, canonical_buffer: ?*[Io.net.HostName.max_len]u8) Error!Result {
     if (!available) @compileError("getaddrinfo needs libc");
     var name_buffer: [Io.net.HostName.max_len:0]u8 = undefined;
-    if (name.len > Io.net.HostName.max_len) return error.LookupFailed;
+    if (name.len > Io.net.HostName.max_len) return error.UnknownHostName;
     @memcpy(name_buffer[0..name.len], name);
     name_buffer[name.len] = 0;
     var port_buffer: [8]u8 = undefined;
@@ -40,7 +41,8 @@ pub fn lookup(name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpA
         .next = null,
     };
     var list: ?*std.c.addrinfo = null;
-    if (@backingInt(std.c.getaddrinfo(name_buffer[0..name.len :0].ptr, port_text.ptr, &hints, &list)) != 0) return error.LookupFailed;
+    const code = std.c.getaddrinfo(name_buffer[0..name.len :0].ptr, port_text.ptr, &hints, &list);
+    if (@backingInt(code) != 0) return failure(code);
     defer if (list) |first| std.c.freeaddrinfo(first);
     var count: usize = 0;
     var canonical: ?Io.net.HostName = null;
@@ -59,6 +61,15 @@ pub fn lookup(name: []const u8, port: u16, family: ?IpAddress.Family, out: []IpA
         out[count] = Io.Threaded.addressFromPosix(@alignCast(@fieldParentPtr("any", addr))); // safe: getaddrinfo's INET and INET6 entries point at a whole sockaddr of their family
         count += 1;
     }
-    if (count == 0) return error.LookupFailed;
+    if (count == 0) return error.NoAddressReturned;
     return .{ .addresses = out[0..count], .canonical = canonical };
+}
+
+/// A getaddrinfo code, as std names a lookup's failure.
+pub fn failure(code: std.c.EAI) Error {
+    if (code == .NONAME) return error.UnknownHostName;
+    if (@hasField(std.c.EAI, "NODATA") and code == @field(std.c.EAI, "NODATA")) return error.UnknownHostName;
+    if (code == .MEMORY) return error.SystemResources;
+    // EAI_AGAIN and EAI_FAIL, and the rest: the resolver gave no usable answer.
+    return error.NameServerFailure;
 }

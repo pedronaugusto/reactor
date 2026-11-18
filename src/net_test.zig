@@ -145,7 +145,7 @@ test "a name with more addresses than a lookup queue holds resolves without wait
     // An address needs no lookup and no task.
     const address = try net.resolve(serial.io(), "[::1]", 443, .{}, &storage);
     try testing.expectEqual(@as(u16, 443), address[0].getPort());
-    try testing.expectError(error.NameNotResolved, net.resolve(serial.io(), "127.0.0.1", 1, .{ .family = .ip6 }, &storage));
+    try testing.expectError(error.NoAddressReturned, net.resolve(serial.io(), "127.0.0.1", 1, .{ .family = .ip6 }, &storage));
     try testing.expectError(error.InvalidHostName, net.resolve(many.io(), "bad name", 1, .{}, &storage));
 }
 

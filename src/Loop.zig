@@ -135,6 +135,8 @@ pub const BatchSink = struct {
     complete: *const fn (context: *anyopaque, token: backends.pending.Token, outcome: backends.pending.Outcome) void,
 };
 
+/// Private: the allocator `init` took, which `deinit` frees with.
+gpa: Allocator,
 backend: backends.Backend,
 clock: clocks.Source,
 // Keep wheel heads at the start, independent of the backend union size.
@@ -190,6 +192,7 @@ pub fn init(l: *Loop, gpa: Allocator, options: Options) InitError!void {
         .iocp => if (builtin.os.tag == .windows) try iocpBackend(gpa, options) else return error.BackendUnavailable,
     };
     l.* = .{
+        .gpa = gpa,
         .backend = native,
         .clock = .system,
         .wheel = .init(clocks.Source.ticks(.system)),
@@ -264,9 +267,9 @@ pub fn adopt(l: *Loop) void {
     }
 }
 
-pub fn deinit(l: *Loop, gpa: Allocator) void {
+pub fn deinit(l: *Loop) void {
     assert(l.in_flight == 0, "l.in_flight == 0");
-    l.backend.deinit(gpa);
+    l.backend.deinit(l.gpa);
     l.* = undefined;
 }
 

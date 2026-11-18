@@ -8,7 +8,14 @@ const HostName = net.HostName;
 const order = @import("resolve/order.zig");
 const timed = @import("timeout.zig");
 
-pub const Error = error{ NameNotResolved, InvalidPacket } || Io.Cancelable;
+/// A lookup's failures, by std's names (`HostName.LookupError`): the name does not
+/// exist or has no record of the family (`UnknownHostName`); no server gave a usable
+/// answer (`NameServerFailure`); an answer whose chain ends at no address
+/// (`NoAddressReturned`); `/etc/hosts` or `/etc/resolv.conf` there but unreadable
+/// (`DetectingNetworkConfigurationFailed`), a resolv.conf line too long to read
+/// (`ResolvConfParseFailed`); a reply, or a name, that is no DNS message
+/// (`InvalidPacket`).
+pub const Error = error{ UnknownHostName, NameServerFailure, NoAddressReturned, DetectingNetworkConfigurationFailed, ResolvConfParseFailed, InvalidPacket } || Io.Cancelable;
 
 pub const Name = struct {
     bytes: [254]u8 = undefined,
@@ -48,7 +55,11 @@ pub const Config = struct {
     pub fn read(io: Io) Error!Config {
         var c: Config = .{};
         const f = Io.Dir.openFileAbsolute(io, "/etc/resolv.conf", .{}) catch |err| {
-            if (err == error.Canceled) return error.Canceled;
+            switch (err) {
+                error.FileNotFound => {},
+                error.Canceled => return error.Canceled,
+                else => return error.DetectingNetworkConfigurationFailed,
+            }
             c.servers[0] = .{ .ip4 = .loopback(53) };
             c.server_count = 1;
             return c;
@@ -56,7 +67,10 @@ pub const Config = struct {
         defer f.close(io);
         var buffer: [4096]u8 = undefined;
         var reader = f.reader(io, &buffer);
-        while (reader.interface.takeDelimiter('\n') catch return stopped(reader.err)) |text| {
+        while (reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.ResolvConfParseFailed,
+            error.ReadFailed => return stopped(reader.err, error.DetectingNetworkConfigurationFailed),
+        }) |text| {
             c.line(text);
         }
         if (c.server_count == 0) {
@@ -108,10 +122,10 @@ pub const Config = struct {
 };
 
 /// A file or stream that could not be read or written to its end, by the
-/// error its reader or writer recorded: canceled, or no name resolved.
-fn stopped(recorded: anytype) Error {
+/// error its reader or writer recorded: canceled, or `otherwise`.
+fn stopped(recorded: anytype, otherwise: Error) Error {
     if (recorded) |err| if (err == error.Canceled) return error.Canceled;
-    return error.NameNotResolved;
+    return otherwise;
 }
 
 /// `value` taken into `R`'s range, as resolv.conf's options are read.
@@ -135,17 +149,43 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
     // ndots counts dots, and is compared with the name's count of them.
     const ndots: usize = config.ndots.raw();
     const first = absolute or std.mem.countScalar(u8, bare, '.') >= ndots;
-    if (first) if (queryNamed(io, bare, port, family, out, &config, canonical)) |n| return n else |err| if (err == error.Canceled) return error.Canceled;
+    var failure: Error = error.UnknownHostName;
+    if (first) if (queryNamed(io, bare, port, family, out, &config, canonical)) |n| return n else |err| {
+        if (err == error.Canceled) return error.Canceled;
+        failure = err;
+    };
     if (!absolute) {
         var domains = std.mem.tokenizeAny(u8, config.search[0..config.search_len], " \t");
         var candidate: [HostName.max_len]u8 = undefined;
         while (domains.next()) |domain| {
             const full = candidateIn(&candidate, bare, domain) orelse continue;
-            if (queryNamed(io, full, port, family, out, &config, canonical)) |n| return n else |err| if (err == error.Canceled) return error.Canceled;
+            if (queryNamed(io, full, port, family, out, &config, canonical)) |n| return n else |err| {
+                if (err == error.Canceled) return error.Canceled;
+                failure = worse(failure, err);
+            }
         }
     }
     if (!first) return queryNamed(io, bare, port, family, out, &config, canonical);
-    return error.NameNotResolved;
+    return failure;
+}
+
+/// Of two failures, the one a caller acts on: a server that gave no usable
+/// answer may answer later, so it outranks a name that does not exist, which
+/// outranks an answer with no address.
+fn worse(a: Error, b: Error) Error {
+    const rank = struct {
+        fn of(e: Error) u8 {
+            return switch (e) {
+                error.Canceled => 6,
+                error.DetectingNetworkConfigurationFailed, error.ResolvConfParseFailed => 5,
+                error.NameServerFailure => 4,
+                error.InvalidPacket => 3,
+                error.UnknownHostName => 2,
+                error.NoAddressReturned => 1,
+            };
+        }
+    }.of;
+    return if (rank(b) > rank(a)) b else a;
 }
 
 /// `bare` in the search domain `domain`, written into `buffer`: the name a
@@ -168,12 +208,16 @@ fn addressOf(text: []const u8, port: u16) ?net.IpAddress {
 }
 
 fn hosts(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Family, out: []net.IpAddress, canonical: *Name) Error!?usize {
-    const file = Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch |err| return if (err == error.Canceled) error.Canceled else null;
+    const file = Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch |err| return switch (err) {
+        error.FileNotFound => null,
+        error.Canceled => error.Canceled,
+        else => error.DetectingNetworkConfigurationFailed,
+    };
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
     var n: usize = 0;
-    lines: while (reader.interface.takeDelimiter('\n') catch return stopped(reader.err)) |line| {
+    lines: while (reader.interface.takeDelimiter('\n') catch return stopped(reader.err, error.DetectingNetworkConfigurationFailed)) |line| {
         var words = std.mem.tokenizeAny(u8, line[0 .. std.mem.findScalar(u8, line, '#') orelse line.len], " \t\r");
         const text = words.next() orelse continue;
         const primary = words.next() orelse continue;
@@ -199,7 +243,7 @@ const Request = struct {
     config: *const Config,
     out: []net.IpAddress,
     canonical: *Name,
-    result: Error!usize = error.NameNotResolved,
+    result: Error!usize = error.NameServerFailure,
 
     fn run(r: *Request) void {
         r.result = exchange(r.*);
@@ -230,8 +274,17 @@ pub fn queryNamed(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Fa
         }
         if (f) |*task| task.await(io) else aaaa.run();
     } else a.run();
-    const n4 = if (family == .ip6) 0 else a.result catch |err| if (err == error.Canceled) return err else 0;
-    const n6 = if (family == .ip4) 0 else aaaa.result catch |err| if (err == error.Canceled) return err else 0;
+    var failure: ?Error = null;
+    const n4 = if (family == .ip6) 0 else a.result catch |err| failed: {
+        if (err == error.Canceled) return err;
+        failure = err;
+        break :failed 0;
+    };
+    const n6 = if (family == .ip4) 0 else aaaa.result catch |err| failed: {
+        if (err == error.Canceled) return err;
+        failure = if (failure) |f| worse(f, err) else err;
+        break :failed 0;
+    };
     var n: usize = 0;
     // Preserve DNS order within each family's answer before route selection.
     for (v6[0..n6]) |address| {
@@ -244,7 +297,7 @@ pub fn queryNamed(io: Io, name: []const u8, port: u16, family: ?net.IpAddress.Fa
         out[n] = address;
         n += 1;
     }
-    if (n == 0) return error.NameNotResolved;
+    if (n == 0) return failure orelse error.NoAddressReturned;
     canonical.* = if (n6 != 0) cname6 else cname4;
     try order.sort(io, out[0..n]);
     return n;
@@ -262,7 +315,7 @@ fn exchange(r: Request) Error!usize {
             r.canonical.* = answer.canonical;
             return answer.count;
         }
-        if (answer.hops == 0) return error.NameNotResolved;
+        if (answer.hops == 0) return error.NoAddressReturned;
         hops += answer.hops;
         name = answer.canonical;
     }
@@ -302,21 +355,22 @@ fn exchangeOne(r: Request) Error!Answer {
             return decode(message.data, r.name, r.rr, r.port, r.out);
         }
     };
-    return error.NameNotResolved;
+    // No server, on any attempt, gave an answer.
+    return error.NameServerFailure;
 }
 
 fn sendQuery(io: Io, socket: net.Socket, server: *const net.IpAddress, packet: []const u8, deadline: Io.Timeout) Error!void {
     var message: net.OutgoingMessage = .{ .address = server, .data_ptr = packet.ptr, .data_len = packet.len };
     const result = timed.operate(io, .{ .net_send = .{ .socket_handle = socket.handle, .messages = (&message)[0..1], .flags = .{} } }, deadline) catch |err|
-        return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
-    if (result.net_send[0] != null or result.net_send[1] != 1 or message.data_len != packet.len) return error.NameNotResolved;
+        return if (err == error.Canceled) error.Canceled else error.NameServerFailure;
+    if (result.net_send[0] != null or result.net_send[1] != 1 or message.data_len != packet.len) return error.NameServerFailure;
 }
 
 fn receiveReply(io: Io, socket: net.Socket, buffer: []u8, deadline: Io.Timeout) Error!net.IncomingMessage {
     var message: net.IncomingMessage = .init;
     const result = timed.operate(io, .{ .net_receive = .{ .socket_handle = socket.handle, .message_buffer = (&message)[0..1], .data_buffer = buffer, .flags = .{} } }, deadline) catch |err|
-        return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
-    if (result.net_receive[0] != null or result.net_receive[1] != 1) return error.NameNotResolved;
+        return if (err == error.Canceled) error.Canceled else error.NameServerFailure;
+    if (result.net_receive[0] != null or result.net_receive[1] != 1) return error.NameServerFailure;
     return message;
 }
 
@@ -325,32 +379,34 @@ fn tcp(r: Request, server: net.IpAddress, q: []const u8, deadline: Io.Timeout) E
     var results: [2]Race = undefined;
     var race: Io.Select(Race) = .init(r.io, &results);
     defer while (race.cancel()) |_| {};
-    race.concurrent(.reply, tcpRequest, .{ r, server, q }) catch return error.NameNotResolved;
-    race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, r.io }) catch return error.NameNotResolved;
+    // A truncated answer asks for TCP, raced with the query's deadline: with no
+    // task for either, no usable answer is had.
+    race.concurrent(.reply, tcpRequest, .{ r, server, q }) catch return error.NameServerFailure;
+    race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, r.io }) catch return error.NameServerFailure;
     return switch (try race.await()) {
         .reply => |reply| reply,
         .expired => |expired| done: {
             try expired;
             while (race.cancel()) |late| switch (late) {
                 // A late reply that failed resolved nothing: the timeout's answer stands.
-                .reply => |reply| break :done reply catch error.NameNotResolved,
+                .reply => |reply| break :done reply catch error.NameServerFailure,
                 .expired => {},
             };
-            break :done error.NameNotResolved;
+            break :done error.NameServerFailure;
         },
     };
 }
 
 fn tcpRequest(r: Request, server: net.IpAddress, q: []const u8) Error!Answer {
-    const stream = server.connect(r.io, .{ .mode = .stream }) catch |err| return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
+    const stream = server.connect(r.io, .{ .mode = .stream }) catch |err| return if (err == error.Canceled) error.Canceled else error.NameServerFailure;
     defer stream.close(r.io);
     var storage: [512]u8 = undefined;
     var writer = stream.writer(r.io, &storage);
     var prefix: [2]u8 = undefined;
     std.mem.writeInt(u16, &prefix, @intCast(q.len), .big);
-    writer.interface.writeAll(&prefix) catch return stopped(writer.err);
-    writer.interface.writeAll(q) catch return stopped(writer.err);
-    writer.interface.flush() catch return stopped(writer.err);
+    writer.interface.writeAll(&prefix) catch return stopped(writer.err, error.NameServerFailure);
+    writer.interface.writeAll(q) catch return stopped(writer.err, error.NameServerFailure);
+    writer.interface.flush() catch return stopped(writer.err, error.NameServerFailure);
     try readAll(r.io, stream.socket.handle, &prefix, .none);
     const len = std.mem.readInt(u16, &prefix, .big);
     var buffer: [65535]u8 = undefined;
@@ -364,9 +420,9 @@ fn readAll(io: Io, socket: net.Socket.Handle, bytes: []u8, deadline: Io.Timeout)
     var n: usize = 0;
     while (n < bytes.len) {
         var data = [_][]u8{bytes[n..]};
-        const result = timed.operate(io, .{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return if (err == error.Canceled) error.Canceled else error.NameNotResolved;
-        const got = result.net_read catch return error.NameNotResolved;
-        if (got.data_len == 0) return error.NameNotResolved;
+        const result = timed.operate(io, .{ .net_read = .{ .socket_handle = socket, .data = &data } }, deadline) catch |err| return if (err == error.Canceled) error.Canceled else error.NameServerFailure;
+        const got = result.net_read catch return error.NameServerFailure;
+        if (got.data_len == 0) return error.NameServerFailure;
         n += got.data_len;
     }
 }
@@ -445,11 +501,18 @@ pub fn matches(reply: []const u8, query_bytes: []const u8) bool {
 /// loops and CNAME chains beyond eight links are rejected.
 pub fn answers(reply: []const u8, name: []const u8, rr: u16, port: u16, out: []net.IpAddress) Error!usize {
     const answer = try decode(reply, name, rr, port, out);
-    return if (answer.count == 0) error.NameNotResolved else answer.count;
+    return if (answer.count == 0) error.NoAddressReturned else answer.count;
 }
 
 fn decode(reply: []const u8, name: []const u8, rr: u16, port: u16, out: []net.IpAddress) Error!Answer {
-    if (reply.len < 12 or reply[3] & 15 != 0) return error.NameNotResolved;
+    if (reply.len < 12) return error.InvalidPacket;
+    // The response code: NXDOMAIN says the name does not exist; any other
+    // failure (a format error, SERVFAIL, NOTIMP, REFUSED) is the server's.
+    switch (reply[3] & 15) {
+        0 => {},
+        3 => return error.UnknownHostName,
+        else => return error.NameServerFailure,
+    }
     if (name.len > 254) return error.InvalidPacket;
     var current: [254]u8 = undefined;
     @memcpy(current[0..name.len], name);
@@ -488,7 +551,8 @@ fn decode(reply: []const u8, name: []const u8, rr: u16, port: u16, out: []net.Ip
             }
         }
         if (n != 0) return .{ .count = n, .canonical = try Name.init(current[0..current_len]), .hops = @intCast(hop) };
-        if (cname_len == 0) return if (hop == 0) error.NameNotResolved else .{ .count = 0, .canonical = try Name.init(current[0..current_len]), .hops = @intCast(hop) };
+        // NODATA: the name exists, with no record of this family.
+        if (cname_len == 0) return if (hop == 0) error.UnknownHostName else .{ .count = 0, .canonical = try Name.init(current[0..current_len]), .hops = @intCast(hop) };
         if (hop == 8 or std.ascii.eqlIgnoreCase(current[0..current_len], cname[0..cname_len])) return error.InvalidPacket;
         @memcpy(current[0..cname_len], cname[0..cname_len]);
         current_len = cname_len;

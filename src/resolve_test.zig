@@ -48,7 +48,64 @@ test "DNS rejects compression loops and unrelated answer owners" {
     var addresses: [1]Io.net.IpAddress = undefined;
     try testing.expectError(error.InvalidPacket, stub.answers(reply, "wanted.example", 1, 80, &addresses));
     reply[answer + 1] = 12;
-    try testing.expectError(error.NameNotResolved, stub.answers(reply, "other.example", 1, 80, &addresses));
+    try testing.expectError(error.UnknownHostName, stub.answers(reply, "other.example", 1, 80, &addresses));
+}
+
+test "a reply's response code is named as std names a lookup's failure: NXDOMAIN and NODATA no such name, the rest the server's" {
+    var qbuf: [288]u8 = undefined;
+    const q = try stub.makeQuery(&qbuf, "named.example", 1, 11);
+    var packet: [512]u8 = undefined;
+    var addresses: [1]Io.net.IpAddress = undefined;
+    // NODATA: the name is there, with no record of the family.
+    try testing.expectError(error.UnknownHostName, stub.answers(response(&packet, q, 0), "named.example", 1, 80, &addresses));
+    const reply = response(&packet, q, 1);
+    reply[3] = 0x83; // NXDOMAIN
+    try testing.expectError(error.UnknownHostName, stub.answers(reply, "named.example", 1, 80, &addresses));
+    for ([_]u8{ 1, 2, 4, 5 }) |code| { // FORMERR, SERVFAIL, NOTIMP, REFUSED
+        reply[3] = 0x80 | code;
+        try testing.expectError(error.NameServerFailure, stub.answers(reply, "named.example", 1, 80, &addresses));
+    }
+}
+
+test "getaddrinfo's and Winsock's codes are named as std names a lookup's failure" {
+    const getaddrinfo = @import("sys/getaddrinfo.zig");
+    if (getaddrinfo.available) {
+        try testing.expectEqual(error.UnknownHostName, getaddrinfo.failure(.NONAME));
+        try testing.expectEqual(error.NameServerFailure, getaddrinfo.failure(.AGAIN));
+        try testing.expectEqual(error.NameServerFailure, getaddrinfo.failure(.FAIL));
+        try testing.expectEqual(error.SystemResources, getaddrinfo.failure(.MEMORY));
+        if (@hasField(std.c.EAI, "NODATA")) try testing.expectEqual(error.UnknownHostName, getaddrinfo.failure(@field(std.c.EAI, "NODATA")));
+    }
+    if (@import("builtin").os.tag == .windows) {
+        const windows = @import("sys/lookup_windows.zig");
+        try testing.expectEqual(error.UnknownHostName, windows.failure(11001)); // WSAHOST_NOT_FOUND
+        try testing.expectEqual(error.UnknownHostName, windows.failure(11004)); // WSANO_DATA
+        try testing.expectEqual(error.NameServerFailure, windows.failure(11002)); // WSATRY_AGAIN
+        try testing.expectEqual(error.NameServerFailure, windows.failure(11003)); // WSANO_RECOVERY
+        try testing.expectEqual(error.SystemResources, windows.failure(10055)); // WSAENOBUFS
+    }
+}
+
+test "resolv.conf absent means the local server; there but unreadable, or a cancel, is said so" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const FaultIo = shakedown.FaultIo;
+    for ([_]struct { fault: anyerror, want: anyerror }{
+        .{ .fault = error.AccessDenied, .want = error.DetectingNetworkConfigurationFailed },
+        .{ .fault = error.Canceled, .want = error.Canceled },
+    }) |case| {
+        const faults = try FaultIo.init(testing.allocator, testing.io, .{ .plan = &.{
+            .{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1 } }, .fault = if (case.fault == error.Canceled) .cancel else .{ .fail = case.fault } },
+        } });
+        defer faults.deinit();
+        try testing.expectError(case.want, stub.Config.read(faults.io()));
+    }
+    const absent = try FaultIo.init(testing.allocator, testing.io, .{ .plan = &.{
+        .{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1 } }, .fault = .{ .fail = error.FileNotFound } },
+    } });
+    defer absent.deinit();
+    const config = try stub.Config.read(absent.io());
+    try testing.expectEqual(@as(usize, 1), config.server_count);
+    try testing.expectEqual(@as(u16, 53), config.servers[0].getPort());
 }
 
 test "DNS configuration honors bounds search and rotation" {

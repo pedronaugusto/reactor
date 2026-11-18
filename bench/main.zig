@@ -368,7 +368,7 @@ fn loopTimers(r: Report, gpa: std.mem.Allocator, c: Config) !void {
         error.BackendUnavailable => return,
         else => |e| return e,
     };
-    defer l.deinit(gpa);
+    defer l.deinit();
     const ops = try gpa.alloc(reactor.Loop.Op, n);
     defer gpa.free(ops);
     const io = Io.Threaded.global_single_threaded.io();
@@ -565,7 +565,7 @@ fn loopIdle(r: Report, gpa: std.mem.Allocator, c: Config) !void {
         error.BackendUnavailable => return,
         else => |e| return e,
     };
-    defer l.deinit(gpa);
+    defer l.deinit();
     const io = Io.Threaded.global_single_threaded.io();
     const n: usize = if (c.smoke) 100 else 1_000_000;
     const t0 = now(io);

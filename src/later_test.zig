@@ -48,7 +48,7 @@ test "later: callback delivery permits reuse and never also enters reap" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     var count: Count = .{};
     var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } }, .completion = &count.completion };
     try loop.submit(&op);
@@ -236,7 +236,7 @@ test "later: explicitly requested SQPOLL stays enabled and wakes after idle" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     try testing.expect(loop.backend.io_uring.ring.flags & linux.IORING_SETUP_SQPOLL != 0);
     try testing.io.sleep(.fromMilliseconds(10), .awake);
     const Request = struct {
@@ -382,11 +382,11 @@ test "later: cross-ring message wake reaches the target CQ and disabled support 
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer source.deinit(testing.allocator);
+    defer source.deinit();
     if (!source.backend.io_uring.features.msg_ring) return error.SkipZigTest;
     var target: Loop = undefined;
     try target.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8 });
-    defer target.deinit(testing.allocator);
+    defer target.deinit();
     loop_internal.wakeFrom(&target, &source);
     const ring = &source.backend.io_uring.ring;
     try testing.expectEqual(linux.IORING_OP.MSG_RING, ring.sq.sqes[(ring.sq.sqe_tail -% 1) & ring.sq.mask].opcode);
@@ -478,7 +478,7 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     var done = std.atomic.Value(bool).init(false);
     const guard = try std.Thread.spawn(.{}, ringGuard, .{&done});
     defer {
@@ -592,7 +592,7 @@ test "later: native zero-copy send completes ownership before payload reuse" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     if (!loop.backend.io_uring.features.zero_copy) return error.SkipZigTest;
     for ([_]bool{ false, true }) |invalid| {
         var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
@@ -883,7 +883,7 @@ test "later: SQPOLL close captures published fixed-file references before unregi
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     if (!loop.backend.io_uring.features.fixed_files) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1002,7 +1002,7 @@ test "later: canceling native zero-copy sends drains ownership before poisoning 
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    defer loop.deinit(testing.allocator);
+    defer loop.deinit();
     if (!loop.backend.io_uring.features.zero_copy) return error.SkipZigTest;
     for (0..32) |round| {
         var server = try (Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(testing.io, .{});
@@ -1034,7 +1034,7 @@ test "later: canceling native zero-copy sends drains ownership before poisoning 
 fn loopAllocationFailures(gpa: std.mem.Allocator) !void {
     var loop: Loop = undefined;
     try loop.init(gpa, .{ .max_ops = 8 });
-    defer loop.deinit(gpa);
+    defer loop.deinit();
     var op: Loop.Op = .{ .backend = .{ .kind = .{ .timer = .now(testing.io, .awake) } } };
     try loop.submit(&op);
     var out: [1]*Loop.Op = undefined;
@@ -1047,7 +1047,7 @@ test "later: native engine initialization releases every failed allocation" {
         error.BackendUnavailable => return error.SkipZigTest,
         else => return err,
     };
-    probe.deinit(testing.allocator);
+    probe.deinit();
     var allocator = shakedown.alloc.NoResize.init(testing.allocator);
     try testing.checkAllAllocationFailures(allocator.allocator(), loopAllocationFailures, .{});
 }

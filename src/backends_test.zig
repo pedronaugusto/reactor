@@ -696,7 +696,7 @@ test "the loop alone on each readiness backend: a timer, a wake, a read made at 
     for (readiness) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         const sys = Io.Threaded.global_single_threaded.io();
         const due = Io.Clock.Timestamp.now(sys, .awake).addDuration(.{ .raw = .fromMilliseconds(2), .clock = .awake });
         var timer: Loop.Op = .{ .backend = .{ .kind = .{ .timer = due } }, .user_data = 7 };
@@ -740,7 +740,7 @@ test "a descriptor closed outside the loop and announced with closing is waited 
     for (readiness) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         const sys = Io.Threaded.global_single_threaded.io();
         const first = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
         // A wait registers the read end, then is cancelled.
@@ -797,7 +797,7 @@ test "r6: a short final stream read preserves EOF readiness" {
     for (readiness) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         const io = testing.io;
         const pair = try tcpPair(io);
         defer {
@@ -871,7 +871,7 @@ test "a wait on a descriptor that is not open is ready, as a poll says, and does
     for (all) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         // A number no descriptor has, and one that was closed.
         try expectReady(&l, .{ .readable = -1 });
         try expectReady(&l, .{ .writable = -1 });
@@ -888,7 +888,7 @@ test "a stream read or write on a descriptor that is not open reports it, as Thr
     for (all) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         var buffer: [8]u8 = undefined;
         var data: [1][]u8 = .{&buffer};
         // In blocking mode a call is made only once the descriptor is ready.
@@ -1048,7 +1048,7 @@ test "a priority wait on the loop alone is a readiness operation where the kerne
     for (all) |backend| {
         var l: Loop = undefined;
         try loopOf(&l, backend);
-        defer l.deinit(testing.allocator);
+        defer l.deinit();
         const io = testing.io;
         const pair = try tcpPair(io);
         defer closePair(io, pair);

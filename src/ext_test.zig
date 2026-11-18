@@ -596,8 +596,8 @@ test "a reaped operation can alternate kernel and timer requests without reiniti
     var fake = Fake.init(testing.allocator, .{ .seeded = .{ .seed = 71, .virtual = &virtual } });
     defer fake.deinit();
     var loop: Loop = undefined;
-    loop_internal.initWith(&loop, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 8);
-    defer loop.deinit(testing.allocator);
+    loop_internal.initWith(&loop, testing.allocator, .{ .custom = fake.custom() }, .{ .virtual = &virtual }, 8);
+    defer loop.deinit();
     var operation: Loop.Op = .{ .backend = .{ .kind = .{ .sync = undefined } } };
     var reaped: [1]*Loop.Op = undefined;
     for (0..32) |round| {
