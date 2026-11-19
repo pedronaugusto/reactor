@@ -44,6 +44,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Development: names that were plan labels say what they hold (review 3): `src/later_test.zig` is `src/native_test.zig`, its tests `native: ...`, the native backends' lifetime regressions; `bench/v11/` is `bench/suite/`, the harness that runs a package's own suite on reactor's task stacks for the per-package measurements, its module `reactor_suite`, its step `reactor-suite` and its program `suite-prepare`. Still compiled by `check`, so the harness stays in the build's graph until those measurements run.
 - Development: pins preflight ci-standard b7bb2bb (from 158c176), whose machines give a test's scratch their memory (tmpfs) instead of the host's 9p share, which lost a shared mapping's write and refused a pipe: the conformance suites' `MapWriteLost` and the handoff tests on FreeBSD; CI regenerated (bay generate).
 - Development: the benches write standard output and standard error through a streaming writer, where a positional one wrote them at an offset: output appended to a file was written over from its start (glint P014).
 - `net.Deadlines` keeps its watching task in a group, the new field `net.Deadlines.watcher`, which `deinit` cancels; the task ends by that cancel, where it was a future whose cancel dropped the task's end.

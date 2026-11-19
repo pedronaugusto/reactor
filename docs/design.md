@@ -179,6 +179,18 @@ promise on a platform, the extension makes the call itself through
 | --- | --- | --- |
 | `net.connectUnix` | `Io.Threaded`'s Windows unix connect (Zig 0.17) drives AFD itself, and the system refuses it: the AF_UNIX endpoint will not open in a process that has not used AF_UNIX through Winsock, its unnamed bind fails once a listener is at the path (`INVALID_PARAMETER`), and every status but resources is `Unexpected`. | On Windows over any `Io` but a runtime, it connects through Winsock (`sys/unix_windows.zig`: `socket` and `connect` with the path as given), as Git for Windows and every Winsock program do; Winsock is started once for the process and left running. `WSAECONNREFUSED` (nothing listening, or no socket at the path) is `ConnectionRefused`, `WSAENETDOWN` (a directory missing on the way) `FileNotFound`. The handle is a socket std's streams read, write and close. A runtime, and every other system, connects by `UnixAddress.connect`. |
 
+### Waits on another Io
+
+`ext.wait` keeps its promise on any `Io` too: a wait is a cancelation point. On a runtime's task each
+descriptor member is a readiness operation of the task's own loop and holds no thread. On any other `Io` it
+waits on the calling thread: through that `Io`'s own concurrent batch where every member is a descriptor (a
+zero-length read or write per member, which `Io.Threaded` waits for in one `poll` it can interrupt for a
+cancel: 3 context switches over 2 s blocked, against 341 in slices; lookout on reactor, 2026-10-10), and
+otherwise in 5 ms slices, asking for a cancel between them: a member that is not a descriptor (a priority
+event, a process with no watch descriptor, a Windows object), an `Io` without concurrent batches, and Windows.
+The family's own cancellation slices are gone into these waits (conduit 9bbdf4c, lookout 61a6730); what a
+package still looks at between sleeps is what no kernel object announces (a process group's emptiness).
+
 ## Named pipes
 
 A named pipe is Windows' door to a local daemon, as a Unix socket is
@@ -270,7 +282,7 @@ on their own scheduler.
 ## Suite measurements
 
 Family-suite measurements belong to each package's move onto reactor. The
-[isolated harness](../bench/v11/prepare.zig) keeps the seams already
+[isolated harness](../bench/suite/prepare.zig) keeps the seams already
 investigated: cloak has no published TLS suite; airlock's raw close bypassed
 fixed-file invalidation on Linux (fixed in 0.8.6: such a file is never held)
 and its macOS write-call bound differs;

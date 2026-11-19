@@ -2,7 +2,7 @@
 //! The suite's Threaded test infrastructure remains available for std helpers.
 const std = @import("std");
 const builtin = @import("builtin");
-const v11 = @import("v11");
+const suite = @import("reactor_suite");
 const testing = std.testing;
 pub const fuzz = @import("preflight_default_test_runner").fuzz;
 pub const std_options: std.Options = .{ .logFn = log };
@@ -30,20 +30,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
         testing.random_seed = 0x726536;
         testing.log_level = .warn;
         log_errors.store(0, .monotonic);
-        var runtime: v11.reactor.Runtime = undefined;
+        var runtime: suite.reactor.Runtime = undefined;
         try runtime.init(std.heap.page_allocator, .{ .workers = 0, .measure_stacks = true, .environ = init.environ, .argv0 = .init(init.args) });
         var runtime_alive = true;
         defer if (runtime_alive) runtime.deinit();
         try runtime.start();
-        v11.select(runtime.io());
+        suite.select(runtime.io());
         try output.interface.print("{{\"event\":\"start\",\"test\":{f}}}\n", .{std.json.fmt(test_fn.name, .{})});
         try output.interface.flush();
         var watchdog: Watchdog = .{ .runtime = &runtime };
         const watcher = try std.Thread.spawn(.{}, Watchdog.watch, .{&watchdog});
         var watcher_alive = true;
         defer if (watcher_alive) watchdog.stop(log_io, watcher);
-        var task = try v11.io.concurrent(runTest, .{test_fn.func});
-        const result = task.await(v11.io);
+        var task = try suite.io.concurrent(runTest, .{test_fn.func});
+        const result = task.await(suite.io);
         watchdog.stop(log_io, watcher);
         watcher_alive = false;
         const stats = runtime.stats();
@@ -86,7 +86,7 @@ fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime f
 }
 
 const Watchdog = struct {
-    runtime: *v11.reactor.Runtime,
+    runtime: *suite.reactor.Runtime,
     done: std.atomic.Value(u32) = .init(0),
 
     fn stop(w: *Watchdog, io: std.Io, thread: std.Thread) void {
@@ -112,7 +112,7 @@ const Watchdog = struct {
         if (w.done.load(.acquire) != 0) return;
         var buffer: [4096]u8 = undefined;
         var output = std.Io.File.stderr().writerStreaming(io, &buffer);
-        output.interface.writeAll("V11 test watchdog: actual suite did not complete in 120 seconds\n") catch {};
+        output.interface.writeAll("Suite test watchdog: actual suite did not complete in 120 seconds\n") catch {};
         w.runtime.dump(&output.interface) catch {};
         output.interface.flush() catch {};
         std.process.exit(70);

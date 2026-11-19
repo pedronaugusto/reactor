@@ -329,7 +329,7 @@ fn writeLater(io: Io, file: Io.File, bytes: []const u8) !void {
 
 test "a pipe in blocking mode is read when it is ready, and written in pieces it takes whole" {
     // A POSIX pipe's blocking mode: Windows has no `pipe2`; its pipes are
-    // pipe_test's, handoff_test's and later_test's.
+    // pipe_test's, handoff_test's and native_test's.
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     for (all) |backend| {
         var r: Runtime = undefined;
@@ -447,7 +447,7 @@ test "a stream read fills every buffer it is given, a reader's slice and then it
         try testing.expectEqualSlices(u8, sent[100..], buffer[0 .. sent.len - 100]);
 
         // A POSIX pipe, the same. Windows has no `pipe2`; its pipes are
-        // pipe_test's, handoff_test's and later_test's.
+        // pipe_test's, handoff_test's and native_test's.
         if (comptime builtin.os.tag != .windows) {
             const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
             const read_end: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };

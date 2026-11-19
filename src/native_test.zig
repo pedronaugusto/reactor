@@ -1,4 +1,4 @@
-//! LATER ownership, bounded scheduling, replay and native kernel evidence.
+//! The native backends' lifetime regressions: ownership, bounded scheduling, replay and native kernel evidence.
 const builtin = @import("builtin");
 const std = @import("std");
 const testing = std.testing;
@@ -29,7 +29,7 @@ fn ms(value: i64) Io.Timeout {
     return .{ .duration = .{ .raw = .fromMilliseconds(value), .clock = .awake } };
 }
 
-test "later: callback delivery permits reuse and never also enters reap" {
+test "native: callback delivery permits reuse and never also enters reap" {
     const Count = struct {
         const Self = @This();
         count: usize = 0,
@@ -79,7 +79,7 @@ fn ownershipProperty(_: void, c: *shakedown.Case) !void {
     try testing.expectEqual(@as(i32, 100), state.primary.res);
 }
 
-test "later: linked timeout and zero-copy notifications retain every completion ordering" {
+test "native: linked timeout and zero-copy notifications retain every completion ordering" {
     const searched = try shakedown.explore(testing.allocator, {}, ownershipProperty, .{});
     try testing.expect(searched.complete);
     try testing.expectEqual(@as(u64, 6), searched.runs);
@@ -111,7 +111,7 @@ fn raceProperty(_: void, c: *shakedown.Case) !void {
     try testing.expectEqual(@as(u32, 0), d.runtime.core.processors[0].loop.in_flight);
 }
 
-test "later: cancellation schedules share a shrinkable source with the production scheduler" {
+test "native: cancellation schedules share a shrinkable source with the production scheduler" {
     try shakedown.check(testing.allocator, {}, raceProperty, .{ .cases = 128, .regressions = &.{ "0", "7:1:0:1" } });
 }
 
@@ -136,7 +136,7 @@ fn searchedRace(_: void, c: *shakedown.Case) !void {
     try testing.expectEqual(@as(u32, 0), d.runtime.core.processors[0].loop.in_flight);
 }
 
-test "later: every completion and cancel order of up to three requests, searched through the production scheduler" {
+test "native: every completion and cancel order of up to three requests, searched through the production scheduler" {
     const searched = try shakedown.explore(testing.allocator, {}, searchedRace, .{ .max_deviations = 6 });
     try testing.expect(searched.complete);
 }
@@ -150,7 +150,7 @@ fn witness(_: void, c: *shakedown.Case) !void {
     if (c.source.below(1) == 1) return error.ExpectedWitness;
 }
 
-test "later: a scheduler property failure shrinks and its tape replays" {
+test "native: a scheduler property failure shrinks and its tape replays" {
     var report: shakedown.CheckReport = undefined;
     try testing.expectError(error.PropertyFailed, shakedown.check(testing.allocator, {}, witness, .{ .cases = 32, .seed = 7, .diagnostics = &report, .fuzz = false }));
     defer report.deinit();
@@ -165,7 +165,7 @@ test "later: a scheduler property failure shrinks and its tape replays" {
     try testing.expectEqualSlices(u64, report.tape, replay.tape);
 }
 
-test "later: each failed submission leaves no operation or frame retained" {
+test "native: each failed submission leaves no operation or frame retained" {
     for (1..9) |step| {
         var d: Driver = undefined;
         try d.init(testing.allocator, 0, .{ .max_tasks = 16, .offload = .none });
@@ -181,7 +181,7 @@ test "later: each failed submission leaves no operation or frame retained" {
     }
 }
 
-test "later: a registered pool uses fixed reads and writes and unregisters after draining" {
+test "native: a registered pool uses fixed reads and writes and unregisters after draining" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try native(&r, .io_uring);
@@ -229,7 +229,7 @@ test "later: a registered pool uses fixed reads and writes and unregisters after
     try testing.expectEqual(@as(u32, 0), ring.buffers.slots[slot].users);
 }
 
-test "later: explicitly requested SQPOLL stays enabled and wakes after idle" {
+test "native: explicitly requested SQPOLL stays enabled and wakes after idle" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var loop: Loop = undefined;
     loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .sqpoll = .{ .idle_ms = 1 } }) catch |err| switch (err) {
@@ -268,7 +268,7 @@ fn boundPair(io: Io, interface: Io.net.Interface) !void {
     try testing.expect(connected.timeout_enforced);
 }
 
-test "later: native and foreign dialing bind the requested address and interface" {
+test "native: native and foreign dialing bind the requested address and interface" {
     const name = if (builtin.os.tag == .linux) "lo" else if (builtin.os.tag == .macos) "lo0" else return error.SkipZigTest;
     const interface_name = try Io.net.Interface.Name.fromSlice(name);
     const selected = try interface_name.resolve(testing.io);
@@ -345,7 +345,7 @@ fn differential(_: void, c: *shakedown.Case) !void {
     try testing.expectEqualSlices(u8, a[0..n], b[0..n]);
 }
 
-test "later: generated native file contents metadata and errors match Threaded" {
+test "native: generated native file contents metadata and errors match Threaded" {
     try shakedown.check(testing.allocator, {}, differential, .{ .cases = 64, .regressions = &.{ "0:0:0:0:0", "3:0:3f:20:ff:1:3f:20" } });
 }
 
@@ -375,7 +375,7 @@ test "V3 owned lane cancellation interrupts a blocked Threaded pipe read" {
     try testing.expectEqual(@as(u64, 0), r.stats().lanes[@backingInt(Runtime.Lane.wait)].@"inline");
 }
 
-test "later: cross-ring message wake reaches the target CQ and disabled support uses eventfd" {
+test "native: cross-ring message wake reaches the target CQ and disabled support uses eventfd" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var source: Loop = undefined;
     source.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8 }) catch |err| switch (err) {
@@ -439,7 +439,7 @@ fn pressureLoop() !Loop {
     try loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 128, .submission_entries = 2 });
     return loop;
 }
-test "later: a spawner that never returns to its loop still wakes a sleeping worker" {
+test "native: a spawner that never returns to its loop still wakes a sleeping worker" {
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .workers = 1, .max_tasks = 64 }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
@@ -471,7 +471,7 @@ test "later: a spawner that never returns to its loop still wakes a sleeping wor
     try testing.expect(woken);
 }
 
-test "later: full SQ and CQ drain ownership without invoking callbacks during submit" {
+test "native: full SQ and CQ drain ownership without invoking callbacks during submit" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     // A host may return an initialized empty loop by value before entry.
     var loop = pressureLoop() catch |err| switch (err) {
@@ -510,7 +510,7 @@ test "later: full SQ and CQ drain ownership without invoking callbacks during su
     try testing.expectEqual(@as(usize, 0), loop.backend.io_uring.active);
 }
 
-test "later: native linked connect deadline drains timer and socket before releasing the frame" {
+test "native: native linked connect deadline drains timer and socket before releasing the frame" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try native(&r, .io_uring);
@@ -545,7 +545,7 @@ test "later: native linked connect deadline drains timer and socket before relea
     later.stream.deinit(io);
 }
 
-test "later: a read under a deadline drains timer and read before releasing the frame" {
+test "native: a read under a deadline drains timer and read before releasing the frame" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     try native(&r, .io_uring);
@@ -585,7 +585,7 @@ fn drainPayload(socket: Io.net.Socket, total: usize) !void {
         received += n;
     }
 }
-test "later: native zero-copy send completes ownership before payload reuse" {
+test "native: native zero-copy send completes ownership before payload reuse" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var loop: Loop = undefined;
     loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = .fromRaw(1) }) catch |err| switch (err) {
@@ -659,7 +659,7 @@ const FaultContext = struct {
         self.tmp.cleanup();
     }
 };
-test "later: every native file fault short transfer and cancellation leaves ownership drained" {
+test "native: every native file fault short transfer and cancellation leaves ownership drained" {
     var r: Runtime = undefined;
     try native(&r, .auto);
     defer r.deinit();
@@ -679,7 +679,7 @@ fn measured(io: Io) !void {
     try testing.expectEqual(@as(u8, 0x39), touchWithoutPark());
     try io.sleep(.fromMilliseconds(1), .awake);
 }
-test "later: diagnostic overall depth includes returned frames and survives task release" {
+test "native: diagnostic overall depth includes returned frames and survives task release" {
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .workers = 0, .max_tasks = 4, .stack_size = .fromRaw(256 << 10), .measure_stacks = true }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,
@@ -778,7 +778,7 @@ fn networkDifferential(backend: Loop.Backend, c: *shakedown.Case) !void {
     try testing.expectEqual(@as(u32, 0), r.stats().tasks);
     try testing.expectEqual(@as(u32, 0), r.core.processors[0].loop.in_flight);
 }
-test "later: generated streams EOF batch retry and futex cancellation match Threaded" {
+test "native: generated streams EOF batch retry and futex cancellation match Threaded" {
     for (if (builtin.os.tag == .linux) @as([]const Loop.Backend, &.{ .io_uring, .epoll }) else @as([]const Loop.Backend, &.{.auto})) |backend| {
         var probe: Runtime = undefined;
         native(&probe, backend) catch |err| switch (err) {
@@ -790,7 +790,7 @@ test "later: generated streams EOF batch retry and futex cancellation match Thre
     }
 }
 
-test "later: canceled fixed-buffer pipe read drains before unregister and a full table rolls back" {
+test "native: canceled fixed-buffer pipe read drains before unregister and a full table rolls back" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var r: Runtime = undefined;
     r.init(testing.allocator, .{ .workers = 0, .backend = .io_uring, .max_tasks = 8, .registered_pools = 1 }) catch |err| switch (err) {
@@ -837,7 +837,7 @@ fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
     stacks.give(explicit);
     stacks.give(ordinary);
 }
-test "later: stack class initialization rolls back every allocation failure" {
+test "native: stack class initialization rolls back every allocation failure" {
     var allocator = shakedown.alloc.NoResize.init(testing.allocator);
     try testing.checkAllAllocationFailures(allocator.allocator(), stackAllocationFailures, .{});
 }
@@ -845,7 +845,7 @@ test "later: stack class initialization rolls back every allocation failure" {
 fn fixedRead(io: Io, file: Io.File, bytes: []u8) !usize {
     return file.readPositionalAll(io, bytes, 0);
 }
-test "later: fixed-buffer registrations survive worker adoption and owner teardown" {
+test "native: fixed-buffer registrations survive worker adoption and owner teardown" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var runtime: Runtime = undefined;
     runtime.init(testing.allocator, .{ .workers = 2, .backend = .io_uring, .max_tasks = 8 }) catch |err| switch (err) {
@@ -874,7 +874,7 @@ test "later: fixed-buffer registrations survive worker adoption and owner teardo
     }
 }
 
-test "later: SQPOLL close captures published fixed-file references before unregister" {
+test "native: SQPOLL close captures published fixed-file references before unregister" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var kept = try Loop.Kept.init(testing.allocator);
     defer kept.deinit(testing.allocator);
@@ -927,7 +927,7 @@ noinline fn deepLive(io: Io, address: *usize) !u8 {
     for (0..data.len) |at| try testing.expectEqual(@as(u8, 73), bytes[at]);
     return bytes[31];
 }
-test "later: idle trimming preserves live bytes and skips short shallow parks" {
+test "native: idle trimming preserves live bytes and skips short shallow parks" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     for ([_]Io.Duration{ .fromMilliseconds(500), .fromMilliseconds(1500) }, 0..) |duration, at| {
         var driver: Driver = undefined;
@@ -939,7 +939,7 @@ test "later: idle trimming preserves live bytes and skips short shallow parks" {
     }
 }
 
-test "later: waking an idle trim candidate unlinks it before stack reuse" {
+test "native: waking an idle trim candidate unlinks it before stack reuse" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var driver: Driver = undefined;
     try driver.init(testing.allocator, 7, .{ .max_tasks = 1, .stack_size = .fromRaw(512 << 10), .offload = .none });
@@ -961,7 +961,7 @@ test "later: waking an idle trim candidate unlinks it before stack reuse" {
     }
 }
 
-test "later: shared idle trim survives head middle and tail candidate cancellation" {
+test "native: shared idle trim survives head middle and tail candidate cancellation" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     for ([_]usize{ 0, 1, 3 }) |canceled| {
         var driver: Driver = undefined;
@@ -995,7 +995,7 @@ fn drainCanceledPayload(socket: Io.net.Socket) !void {
         for (bytes[0..n]) |byte| try testing.expectEqual(@as(u8, 0x61), byte);
     }
 }
-test "later: canceling native zero-copy sends drains ownership before poisoning payloads" {
+test "native: canceling native zero-copy sends drains ownership before poisoning payloads" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var loop: Loop = undefined;
     loop.init(testing.allocator, .{ .backend = .io_uring, .max_ops = 8, .zero_copy_min = .fromRaw(1) }) catch |err| switch (err) {
@@ -1041,7 +1041,7 @@ fn loopAllocationFailures(gpa: std.mem.Allocator) !void {
     while (loop.reap(&out).len == 0) _ = try loop.run(.once);
     try testing.expectEqual(@as(u32, 0), loop.in_flight);
 }
-test "later: native engine initialization releases every failed allocation" {
+test "native: native engine initialization releases every failed allocation" {
     var probe: Loop = undefined;
     probe.init(testing.allocator, .{ .max_ops = 8 }) catch |err| switch (err) {
         error.BackendUnavailable => return error.SkipZigTest,

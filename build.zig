@@ -71,15 +71,15 @@ pub fn dev(b: *std.Build, tools: type) void {
 
     // The test doubles and the conformance suite are shakedown's.
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
-    // bench/v11's harness, as the nested build bench/v11/prepare.zig writes compiles it: a test
-    // whose runner is bench/v11/runner.zig and whose modules bind `v11` to bench/v11/state.zig
+    // bench/suite's harness, as the nested build bench/suite/prepare.zig writes compiles it: a test
+    // whose runner is bench/suite/runner.zig and whose modules bind `reactor_suite` to bench/suite/state.zig
     // (reactor and shakedown). Compiled by `check` and never run here (its runner decides what runs, at bench time): it
     // puts the harness in this build's graph with its bindings, so what reads the graph reads runner.zig and state.zig.
-    const v11_state = b.createModule(.{ .root_source_file = p.path("bench/v11/state.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "reactor", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } } });
-    v11_state.addImport("v11", v11_state);
-    v11_state.addAnonymousImport("preflight_default_test_runner", .{ .root_source_file = std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig") });
-    const v11_harness = b.addTest(.{ .name = "v11-harness", .root_module = v11_state, .test_runner = .{ .path = p.path("bench/v11/runner.zig"), .mode = .simple } });
-    check.dependOn(&v11_harness.step);
+    const suite_state = b.createModule(.{ .root_source_file = p.path("bench/suite/state.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "reactor", .module = module }, .{ .name = "shakedown", .module = shakedown.module("shakedown") } } });
+    suite_state.addImport("reactor_suite", suite_state);
+    suite_state.addAnonymousImport("preflight_default_test_runner", .{ .root_source_file = std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig") });
+    const suite_harness = b.addTest(.{ .name = "suite-harness", .root_module = suite_state, .test_runner = .{ .path = p.path("bench/suite/runner.zig"), .mode = .simple } });
+    check.dependOn(&suite_harness.step);
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     // The seam's tests install its hook as a project's do.
     test_module.addImport("reactor.testing", testing(package, shakedown.module("shakedown")));
@@ -94,7 +94,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         // thread that awaits it shows.
         .hardened = .{ .fuzz_step = "unit", .tsan_step = "unit" },
         .bench = .{
-            .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "v11-prepare", .source = "bench/v11/prepare.zig", .timed = false } },
+            .programs = &.{ .{ .name = "bench", .source = "bench/main.zig" }, .{ .name = "costs", .source = "bench/costs.zig", .timed = false }, .{ .name = "suite-prepare", .source = "bench/suite/prepare.zig", .timed = false } },
             .imports = tools.preflight.Bench.importsFrom(benchImports),
             .target = target,
             .optimize = optimize,

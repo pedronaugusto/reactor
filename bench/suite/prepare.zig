@@ -15,12 +15,12 @@ pub fn main(init: std.process.Init) !void {
     const fixture = args[3];
     const clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, fixture } });
     if (clone.term != .exited or clone.term.exited != 0) return error.CloneFailed;
-    const working = try gpa.print("{s}/.v11-compiled", .{fixture});
+    const working = try gpa.print("{s}/.suite-compiled", .{fixture});
     const work_clone = try std.process.run(gpa, io, .{ .argv = &.{ "git", "clone", "--no-hardlinks", source, working } });
     if (work_clone.term != .exited or work_clone.term.exited != 0) return error.CloneFailed;
     var dir = try Io.Dir.cwd().openDir(io, fixture, .{ .iterate = true });
     defer dir.close(io);
-    var sources = try dir.openDir(io, ".v11-compiled/src", .{ .iterate = true });
+    var sources = try dir.openDir(io, ".suite-compiled/src", .{ .iterate = true });
     defer sources.close(io);
     var walker = try sources.walk(gpa);
     defer walker.deinit();
@@ -33,33 +33,33 @@ pub fn main(init: std.process.Init) !void {
     }
     const original_build = try aegis.own.readFile(io, dir, "build.zig", gpa, .literal("1MiB"));
     const build = try compileSources(gpa, try planning(gpa, original_build));
-    const call = "    v11(b, tests, target, optimize);\n";
+    const call = "    reactorSuite(b, tests, target, optimize);\n";
     const at = if (std.mem.find(u8, build, "    return needed;")) |pos| pos else try buildEnd(gpa, build);
     const helper = try gpa.print(
-        \\fn v11(b: *std.Build, tests: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {{
+        \\fn reactorSuite(b: *std.Build, tests: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {{
         \\    const shakedown = tests.root_module.import_table.get("shakedown") orelse return;
         \\    const reactor = b.createModule(.{{ .root_source_file = .{{ .cwd_relative = "{s}/src/reactor.zig" }}, .target = target, .optimize = optimize }});
-        \\    const state = b.createModule(.{{ .root_source_file = .{{ .cwd_relative = "{s}/bench/v11/state.zig" }}, .target = target, .optimize = optimize, .imports = &.{{.{{ .name = "reactor", .module = reactor }}, .{{ .name = "shakedown", .module = shakedown }}}} }});
+        \\    const state = b.createModule(.{{ .root_source_file = .{{ .cwd_relative = "{s}/bench/suite/state.zig" }}, .target = target, .optimize = optimize, .imports = &.{{.{{ .name = "reactor", .module = reactor }}, .{{ .name = "shakedown", .module = shakedown }}}} }});
         \\    var seen: std.AutoHashMap(*std.Build.Module, void) = .init(b.allocator);
-        \\    v11Imports(tests.root_module, state, &seen);
-        \\    tests.test_runner = .{{ .path = .{{ .cwd_relative = "{s}/bench/v11/runner.zig" }}, .mode = .simple }};
+        \\    reactorSuiteImports(tests.root_module, state, &seen);
+        \\    tests.test_runner = .{{ .path = .{{ .cwd_relative = "{s}/bench/suite/runner.zig" }}, .mode = .simple }};
         \\    const run = b.addRunArtifact(tests);
         \\    run.setCwd(b.path("."));
-        \\    b.step("v11", "Measure the actual suite on reactor task stacks").dependOn(&run.step);
+        \\    b.step("reactor-suite", "Measure the actual suite on reactor task stacks").dependOn(&run.step);
         \\}}
-        \\fn v11Imports(module: *std.Build.Module, state: *std.Build.Module, seen: *std.AutoHashMap(*std.Build.Module, void)) void {{
+        \\fn reactorSuiteImports(module: *std.Build.Module, state: *std.Build.Module, seen: *std.AutoHashMap(*std.Build.Module, void)) void {{
         \\    const found = seen.getOrPut(module) catch @panic("OOM");
         \\    if (found.found_existing) return;
         \\    var children = module.import_table.iterator();
-        \\    while (children.next()) |child| v11Imports(child.value_ptr.*, state, seen);
-        \\    module.addImport("v11", state);
+        \\    while (children.next()) |child| reactorSuiteImports(child.value_ptr.*, state, seen);
+        \\    module.addImport("reactor_suite", state);
         \\}}
         \\
     , .{ reactor, reactor, reactor });
     try dir.writeFile(io, .{ .sub_path = "build.zig", .data = try std.mem.concat(gpa, u8, &.{ build[0..at], call, build[at..], "\n", helper }) });
     var buffer: [4096]u8 = undefined;
     var output = Io.File.stdout().writerStreaming(io, &buffer);
-    try output.interface.print("V11 adapted {d} test Io selections in {s}; original {s} untouched\n", .{ sites, fixture, source });
+    try output.interface.print("Adapted {d} test Io selections in {s}; original {s} untouched\n", .{ sites, fixture, source });
     try output.interface.flush();
 }
 
@@ -81,7 +81,7 @@ fn replaceIo(gpa: std.mem.Allocator, bytes: []const u8, sites: *usize) ![]const 
         var start = before.loc.start;
         if (i >= 4 and tokens.items[i - 3].tag == .period and std.mem.eql(u8, input[tokens.items[i - 4].loc.start..tokens.items[i - 4].loc.end], "std")) start = tokens.items[i - 4].loc.start;
         try output.appendSlice(gpa, input[copied..start]);
-        try output.appendSlice(gpa, "@import(\"v11\").io");
+        try output.appendSlice(gpa, "@import(\"reactor_suite\").io");
         copied = token.loc.end;
         sites.* += 1;
     }
@@ -137,7 +137,7 @@ fn compileSources(gpa: std.mem.Allocator, build: []const u8) ![]const u8 {
         const literal = input[token.loc.start..token.loc.end];
         if (!std.mem.startsWith(u8, literal, "\"src/") and !std.mem.eql(u8, literal, "\"src\"")) continue;
         try output.appendSlice(gpa, input[copied..token.loc.start]);
-        try output.appendSlice(gpa, "\".v11-compiled/");
+        try output.appendSlice(gpa, "\".suite-compiled/");
         try output.appendSlice(gpa, literal[1..]);
         copied = token.loc.end;
     }

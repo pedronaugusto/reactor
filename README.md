@@ -100,7 +100,7 @@ arithmetic on macOS sets `workers` to the CPUs it has.
 `stats().parked_high_water` is retained across task release;
 `stack_high_water` is available with painting enabled. Profiling commits and
 scans stack memory, so leave it off when timing production workloads.
-Family-suite V11 measurements belong to each package's adoption.
+Family-suite measurements belong to each package's adoption.
 
 Architecture and ownership: [design](docs/design.md).
 Benchmarks are code in `bench/`; measurements are maintained separately.
@@ -247,11 +247,11 @@ Use `bay test -Dtest-filter=<name>` for a focused test, `bay lint`
 for source and architecture checks, and `bay check` to compile tests,
 examples and the own benchmarks. `bay bench` runs manual timings; CI
 compiles them without timing. Native lifetime regressions live in
-[src/later_test.zig](src/later_test.zig) and
+[src/native_test.zig](src/native_test.zig) and
 [src/r1_regression_test.zig](src/r1_regression_test.zig).
 
-V11 suite measurements belong to each package's move onto reactor. The
-[isolated harness](bench/v11/prepare.zig) preserves the measurements and consumer
+Suite measurements belong to each package's move onto reactor. The
+[isolated harness](bench/suite/prepare.zig) preserves the measurements and consumer
 seams already investigated here. Stacks stay at 1 MiB until those suite and
 guard measurements justify a different default.
 
