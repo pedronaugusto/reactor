@@ -265,7 +265,6 @@ fn boundPair(io: Io, interface: Io.net.Interface) !void {
     defer accepted.close(io);
     try testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &accepted.socket.address.ip4.bytes);
     try testing.expectEqual(connected.stream.borrow().socket.address.getPort(), accepted.socket.address.getPort());
-    try testing.expect(connected.timeout_enforced);
 }
 
 test "native: native and foreign dialing bind the requested address and interface" {

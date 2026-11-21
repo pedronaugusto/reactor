@@ -37,19 +37,29 @@ test "connect with a timeout on Threaded connects, the timeout kept by a racing 
     defer listener.deinit(io);
     var connected = try net.connect(io, &listener.socket.address, .{ .timeout = ms(5000) });
     defer connected.stream.deinit(io);
-    try testing.expect(connected.timeout_enforced);
     var plain = try net.connect(io, &listener.socket.address, .{});
     plain.stream.deinit(io);
 }
 
-test "connect with no task to spare runs unbounded and says so" {
+/// That `connect` refused with `ConcurrencyUnavailable`; a connection it
+/// made is a failure, closed.
+fn expectRefused(io: Io, result: anytype) !void {
+    if (result) |made| {
+        var connected = made;
+        connected.stream.deinit(io);
+        return error.TestUnexpectedResult;
+    } else |err| try testing.expectEqual(@as(anyerror, error.ConcurrencyUnavailable), @as(anyerror, err));
+}
+
+test "connect with a timeout and no task to spare is refused before it starts, never run unbounded" {
     const io = testing.io;
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     var serial: Serial = .init(io, 0);
-    var connected = try net.connect(serial.io(), &listener.socket.address, .{ .timeout = ms(5000) });
-    defer connected.stream.deinit(io);
-    try testing.expect(!connected.timeout_enforced);
+    try expectRefused(io, net.connect(serial.io(), &listener.socket.address, .{ .timeout = ms(5000) }));
+    // With no timeout asked, nothing needs a task: it connects.
+    var plain = try net.connect(serial.io(), &listener.socket.address, .{});
+    plain.stream.deinit(io);
 }
 
 test "a connect that hangs ends at its deadline, and the attempt is cancelled" {
@@ -334,7 +344,7 @@ test "a receiver holds no buffer while idle and lends one per read" {
     try testing.expectError(error.EndOfStream, receiver.next(io, ms(5000)));
 }
 
-test "connect keeps a successful attempt when no task can run its timer" {
+test "connect with a task for its timer and none for its attempt is refused" {
     const OneTask = struct {
         var attempts: std.atomic.Value(u32) = .init(0);
         fn concurrent(_: ?*anyopaque, group: *Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
@@ -347,9 +357,7 @@ test "connect keeps a successful attempt when no task can run its timer" {
     var layer: OnlyConnect = .init(testing.io, 0);
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(testing.io, .{ .reuse_address = true });
     defer listener.deinit(testing.io);
-    var result = try net.connect(layer.io(), &listener.socket.address, .{ .timeout = ms(5000) });
-    defer result.stream.deinit(testing.io);
-    try testing.expect(!result.timeout_enforced);
+    try expectRefused(testing.io, net.connect(layer.io(), &listener.socket.address, .{ .timeout = ms(5000) }));
 }
 
 test "connect binds its requested local endpoint" {

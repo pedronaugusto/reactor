@@ -47,12 +47,12 @@ pub const Options = struct {
 pub const Connected = struct {
     /// The caller's to close, with `deinit(io)`.
     stream: owned.Stream,
-    /// False when a timeout was asked for and this `Io` could not keep it.
-    timeout_enforced: bool = true,
 };
 
-/// `error.Timeout` when the timeout passed first.
-pub const Error = net.IpAddress.ConnectError;
+/// `error.Timeout` when the timeout passed first. `ConcurrencyUnavailable`
+/// when a timeout was asked for and no task could be had to keep it: the
+/// connect was not started, and never runs unbounded.
+pub const Error = net.IpAddress.ConnectError || error{ConcurrencyUnavailable};
 
 /// Whether the caller is one of `core`'s tasks, read as a call in.
 fn onTask(core: *Core) bool {
@@ -72,11 +72,13 @@ pub fn connect(io: Io, address: *const net.IpAddress, options: Options) Error!Co
     if (own_socket) {
         if (options.socket.connected().any()) try options_file.applyThrough(io, stream.socket.handle, address.*, options.socket.connected());
     } else if (options.socket.any()) try options_file.setOptions(io, stream.socket, options.socket);
-    return .{ .stream = .init(stream), .timeout_enforced = connected.timeout_enforced };
+    return .{ .stream = .init(stream) };
 }
 
-/// A connection made by `io`'s own connect, with `options.timeout` kept as
-/// this `Io` best can.
+/// A connection made by `io`'s own connect, with `options.timeout` kept: in
+/// the kernel on a runtime's task, else by racing the connect against a
+/// timer, each a task of its own, the timer started first; with no task
+/// for either the connect is refused before it starts.
 fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Connected {
     const plain: net.IpAddress.ConnectOptions = .{ .mode = options.mode, .protocol = options.protocol };
     if (options.timeout == .none) return .{ .stream = .init(try address.connect(io, plain)) };
@@ -100,15 +102,9 @@ fn throughIo(io: Io, address: *const net.IpAddress, options: Options) Error!Conn
         },
         .expired => {},
     };
-    race.concurrent(.connected, connectOwned, .{ address, io, plain }) catch
-        return .{ .stream = .init(try address.connect(io, plain)), .timeout_enforced = false };
-    race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, io }) catch {
-        // The connect runs already: wait for it, unbounded.
-        return switch (try race.await()) {
-            .connected => |result| .{ .stream = try result, .timeout_enforced = false },
-            .expired => unreachable, // unreachable: no timer task was started
-        };
-    };
+    // The timer first: the connect is started only once its bound is kept.
+    race.concurrent(.expired, Io.Timeout.sleep, .{ deadline, io }) catch return error.ConcurrencyUnavailable;
+    race.concurrent(.connected, connectOwned, .{ address, io, plain }) catch return error.ConcurrencyUnavailable;
     return switch (try race.await()) {
         .connected => |result| .{ .stream = try result },
         .expired => |result| expired: {
@@ -198,6 +194,8 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
         };
         op.backend.result.connect catch |err| return switch (err) {
             inline else => |e| narrow: {
+                // Every name of each error compared at compile time.
+                @setEvalBranchQuota(4000);
                 inline for (@typeInfo(Error).error_set.error_names.?) |name| if (comptime std.mem.eql(u8, name, @errorName(e))) break :narrow @field(Error, name);
                 break :narrow error.Unexpected;
             },
@@ -212,14 +210,14 @@ fn made(io: Io, address: *const net.IpAddress, options: Options) Error!Connected
         var buffer: [2]Race = undefined;
         var race: Io.Select(Race) = .init(io, &buffer);
         defer while (race.cancel()) |_| {};
+        // The timer first: the connect is started only once its bound is
+        // kept. With no timeout asked the connect runs on this task when no
+        // other can be had.
+        if (options.timeout != .none) race.concurrent(.expired, Io.Timeout.sleep, .{ options.timeout.toDeadline(io), io }) catch return error.ConcurrencyUnavailable;
         race.concurrent(.connected, dial.windowsConnect, .{ io, socket.handle, address }) catch {
+            if (options.timeout != .none) return error.ConcurrencyUnavailable;
             try dial.windowsConnect(io, socket.handle, address);
-            return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }), .timeout_enforced = options.timeout == .none };
-        };
-        if (options.timeout != .none) race.concurrent(.expired, Io.Timeout.sleep, .{ options.timeout.toDeadline(io), io }) catch {
-            const outcome = try race.await();
-            try outcome.connected;
-            return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }), .timeout_enforced = false };
+            return .{ .stream = .init(.{ .socket = .{ .handle = socket.handle, .address = try dial.local(io, socket.handle) } }) };
         };
         switch (try race.await()) {
             .connected => |result| try result,

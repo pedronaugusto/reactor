@@ -127,7 +127,6 @@ fn tcpPair(io: Io) ![2]Io.net.Stream {
     var connecting = try io.concurrent(reactor.net.connect, .{ io, &server.socket.address, .{ .timeout = ms(5000) } });
     const accepted = try server.accept(io);
     var connected = try connecting.await(io);
-    try testing.expect(connected.timeout_enforced);
     var stream: Io.net.Stream = undefined;
     connected.stream.take(&stream);
     return .{ accepted, stream };
