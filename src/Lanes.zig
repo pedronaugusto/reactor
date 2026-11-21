@@ -292,7 +292,7 @@ pub fn init(l: *Lanes, gpa: Allocator, config: Config, env: Environment) Allocat
 pub fn deinit(l: *Lanes, gpa: Allocator) void {
     for (l.admission.teardown().admitted) |n| assert(n == 0, "n == 0");
     if (l.mode == .owned) {
-        for (l.reserve_entries) |*entry| if (entry.state == .holding) entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
+        for (l.reserve_entries) |*entry| if (entry.state == .holding) aegis.assert.invariant(entry.gate.set(system(), {}), "a holding reserve is let go once");
         for (&l.reserve_groups, 0..) |*group, i| group.await(l.threaded[i].io()) catch aegis.assert.never("shutdown runs outside a cancelable executor task");
         // std's instances restore the signal handlers they saw: last first.
         var i: usize = count;
@@ -616,7 +616,7 @@ fn awaitIdle(l: *Lanes, lane: Lane, launching: *Launch) void {
             for (launching.reserve) |*entry| if (entry.state == .holding) {
                 entry.state = .let_go;
                 launching.held -= 1;
-                entry.gate.set(system(), {}) catch aegis.assert.never("a holding reserve is let go once");
+                aegis.assert.invariant(entry.gate.set(system(), {}), "a holding reserve is let go once");
                 break;
             };
         }

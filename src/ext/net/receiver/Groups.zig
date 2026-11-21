@@ -101,7 +101,7 @@ const Command = struct {
         }
         // Direct setup before start has no waiter and must not enter std.Io: setting the signal
         // wakes through the runtime's futex, which only a started runtime serves.
-        if (c.awaiting) c.ready.set(c.io, {}) catch aegis.assert.never("a command runs once");
+        if (c.awaiting) aegis.assert.invariant(c.ready.set(c.io, {}), "a command runs once");
     }
 
     fn execute(c: *Command, p: *Scheduler.Processor) void {
