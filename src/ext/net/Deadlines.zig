@@ -2,78 +2,40 @@
 //!
 //! On a runtime each operation carries its own deadline into the kernel
 //! (`operateTimeout`, which never returns while the kernel holds the
-//! buffer), and no task watches. Any other `Io` cannot always bound a
-//! socket operation itself (`Io.Threaded` refuses a timed read or write on
-//! Windows, and on POSIX a timed write waits only for the socket to take
-//! bytes, then blocks in `sendmsg` while the peer keeps its window shut),
-//! so one task watches every armed operation and ends the late ones by
-//! aborting their sockets. It ticks at a tenth of the shortest timeout
-//! while operations are armed and parks when none has been for a tick, so
-//! an idle set costs no wake-ups.
+//! buffer). Any other `Io` cannot always bound a socket operation itself
+//! (`Io.Threaded` refuses a timed read or write on Windows, and on POSIX a
+//! timed write waits only for the socket to take bytes, then blocks in
+//! `sendmsg` while the peer keeps its window shut), so there the operation
+//! runs in a task of its own, raced against its deadline, and a deadline
+//! that comes first ends it by the `Io`'s own cancel: a signal that breaks
+//! the blocked call on POSIX, the pending request canceled on Windows. That
+//! ends a wait on any socket, a datagram socket's receive as well as a
+//! stream's read, where a shutdown ends only a connection's.
 //!
-//! Either way a deadline that fires poisons the socket: it is aborted, so
-//! whatever the operation left half done, nothing more moves on it.
+//! Either way a deadline that fires poisons the socket: every later
+//! operation on it reports the deadline, and a connection is shut down
+//! (`abort`) so its peer sees it ended too.
 const Deadlines = @This();
 
 const std = @import("std");
-const aegis = @import("aegis");
-const assert = aegis.assert.invariant;
 const Io = std.Io;
 
-const clock = @import("../../clock.zig");
 const native = @import("../native.zig");
 const abort = @import("abort.zig").abort;
+const timeout = @import("../../ops/timeout.zig");
 const Raised = @import("../../sync/Raised.zig");
-
-/// Watches with an operation armed.
-const Armed = aegis.units.Count(Watch, u32);
-
-/// What the lock holds: the watched, and whether the task that keeps their
-/// deadlines was started. Held by the task while it scans.
-const Watching = struct {
-    watches: std.DoublyLinkedList = .{},
-    started: bool = false,
-};
-
-watching: aegis.BlockingGuarded(Watching) = .init(.{}),
-/// The task that keeps the deadlines, once started: it runs until the
-/// group's cancel ends it.
-watcher: Io.Group = .init,
-/// Watches with an operation armed.
-armed: aegis.Atomic(Armed) = .init(.fromRaw(0)),
-/// Whether the task waits for an operation to be armed; the futex it waits
-/// on.
-parked: aegis.Atomic(Parked) = .init(.running),
-/// How often the task looks at the armed deadlines. It only shortens, and
-/// `tighten` is what does.
-tick: aegis.Atomic(clock.Span),
-/// Bumped to cut the task's wait between ticks short, a count that wraps;
-/// the futex it waits on.
-nudge: aegis.Atomic(Nudges) = .init(.fromRaw(0)),
-
-const Parked = enum(u32) { running, parked };
-const Nudges = aegis.units.Count(Deadlines, u32);
-
-const unarmed: clock.Awake = .fromRaw(0);
-/// What an `Awake` of zero is armed as: the first nanosecond.
-const soonest: clock.Awake = .fromRaw(1);
 
 /// One socket's or named pipe's operation deadline.
 pub const Watch = struct {
-    /// Its place among the watched; not to be touched.
-    node: std.DoublyLinkedList.Node = .{},
     target: Target,
-    /// The armed operation's deadline; `unarmed` when none is.
-    deadline: aegis.Atomic(clock.Awake) = .init(unarmed),
-    /// Raised once a deadline fired and the socket was aborted.
+    /// Raised once a deadline fired: the socket is poisoned.
     fired: Raised = .{},
 
     /// What the operations are on.
     pub const Target = union(enum) {
         socket: Io.net.Socket.Handle,
         /// A named pipe, Windows': its deadlines are kept on a runtime,
-        /// where each operation carries its own. No other `Io` can end
-        /// one of its operations from outside, so `add` refuses it there.
+        /// where each operation carries its own; off one `add` refuses it.
         /// Named by its handle: the watch does not own the pipe.
         pipe: Io.File.Handle,
     };
@@ -86,9 +48,9 @@ pub const Watch = struct {
         return .{ .target = .{ .pipe = pipe.handle } };
     }
 
-    /// Ends what is under way on the target and after: a socket's
-    /// operations by `abort`; a pipe's operation was ended by its own
-    /// deadline, and `fired` refuses the ones after it.
+    /// Poisons the target once its deadline fired: a socket's connection
+    /// is shut down; a pipe's operation was ended by its own deadline, and
+    /// `fired` refuses the ones after it.
     fn end(w: *const Watch, io: Io) void {
         switch (w.target) {
             .socket => |socket| abort(io, socket),
@@ -97,79 +59,40 @@ pub const Watch = struct {
     }
 };
 
-/// Deadlines no shorter than `shortest`: the watching task ticks at a
-/// tenth of it, between a millisecond and a second.
+/// Deadlines no shorter than `shortest`, which nothing needs any more:
+/// each operation ends at its own.
 pub fn init(shortest: Io.Duration) Deadlines {
-    return .{ .tick = .init(tickFor(shortest)) };
+    _ = shortest;
+    return .{};
 }
 
-/// A tenth of `d`, between a millisecond and a second.
-fn tickFor(d: Io.Duration) clock.Span {
-    const tenth = clock.spanOf(d).divTrunc(10) catch aegis.assert.never("the divisor is a nonzero constant");
-    const shortest: clock.Span = .literal("1ms");
-    const longest: clock.Span = .literal("1s");
-    if (tenth.compare(shortest) == .lt) return shortest;
-    if (tenth.compare(longest) == .gt) return longest;
-    return tenth;
-}
-
-/// Keep deadlines as short as `d` too, which `init` was not told of: the
-/// tick shortens to match, at once, even while the task waits out a longer
-/// one. A longer `d` changes nothing. On a runtime nothing ticks, and this
-/// does nothing.
+/// Nothing to do: each operation ends at its own deadline.
 pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
-    if (native.runtimeOf(io) != null) return;
-    const want = tickFor(shorter);
-    var current = d.tick.load(.monotonic);
-    while (want.compare(current) == .lt) {
-        current = d.tick.cmpxchgWeak(current, want, .monotonic, .monotonic) orelse {
-            _ = d.nudge.fetchAddWrapping(.fromRaw(1), .release);
-            d.nudge.wake(io, 1);
-            return;
-        };
-    }
+    _ = .{ d, io, shorter };
 }
 
-/// Every watch must have been removed.
 pub fn deinit(d: *Deadlines, io: Io) void {
-    var held = d.watching.acquireUncancelable(io);
-    assert(held.value().watches.first == null, "held.value().watches.first == null");
-    held.deinit(io);
-    // Outside the lock, which the task takes to scan.
-    d.watcher.cancel(io);
+    _ = io;
     d.* = undefined;
 }
 
-/// Watches `w`. False when this `Io` has no task to keep deadlines with,
-/// or `w` is a pipe's off a runtime: `w` is not added, and operations on
-/// it run unbounded.
+/// Watches `w`. False when `w` is a pipe's off a runtime: std's own wait
+/// on an overlapped call is not one a race can end, and its operations run
+/// unbounded.
 pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
-    if (native.runtimeOf(io) != null) return true;
-    // std's own wait on an overlapped call cannot be ended from outside:
-    // a cancel it did not ask for is a state it does not expect.
-    if (w.target == .pipe) return false;
-    var held = d.watching.acquireUncancelable(io);
-    defer held.deinit(io);
-    const watching = held.value();
-    if (!watching.started) {
-        d.watcher.concurrent(io, watch, .{ d, io }) catch return false;
-        watching.started = true;
-    }
-    watching.watches.append(&w.node);
-    return true;
+    _ = d;
+    return native.runtimeOf(io) != null or w.target != .pipe;
 }
 
-/// Stops watching `w`, which has no operation under way. Once this
-/// returns, nothing touches `w` or its socket.
+/// Stops watching `w`, which has no operation under way.
 pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
-    assert(w.deadline.load(.monotonic).eql(unarmed), "w.deadline.load(.monotonic).eql(unarmed)");
-    if (native.runtimeOf(io) != null or w.target == .pipe) return;
-    var held = d.watching.acquireUncancelable(io);
-    defer held.deinit(io);
-    held.value().watches.remove(&w.node);
+    _ = .{ d, io, w };
 }
 
-pub const OperateError = Io.Cancelable || error{Timeout};
+/// `Timeout` when the deadline ended the operation; `ConcurrencyUnavailable`
+/// off a runtime when no task could be had to run it in, and it was not
+/// started.
+pub const OperateError = Io.Cancelable || error{ Timeout, ConcurrencyUnavailable };
 
 /// One operation on `w`'s socket, ended at `deadline`: `Timeout` when the
 /// deadline ended it, else its result. A result the operation reached
@@ -191,73 +114,17 @@ pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadli
     }
     // A pipe's operation off a runtime runs unbounded, as `add` said.
     if (w.target == .pipe) return io.operate(operation);
-    d.arm(io, w, deadline);
-    const result = io.operate(operation);
-    d.disarm(w);
-    const r = try result;
-    if (w.fired.raised(.acquire) and failed(r)) return error.Timeout;
-    return r;
-}
-
-fn failed(r: Io.Operation.Result) bool {
-    return switch (r) {
-        .file_read_streaming => |x| if (x) |_| false else |_| true,
-        .file_write_streaming => |x| if (x) |_| false else |_| true,
-        .net_read => |x| if (x) |v| v.data_len == 0 else |_| true,
-        .net_write => |x| if (x) |_| false else |_| true,
-        .net_receive => |x| x[0] != null,
-        .net_send => |x| x[0] != null,
-        .device_io_control => false,
+    _ = d;
+    // The operation in a task of its own, ended at the deadline by the
+    // `Io`'s cancel: a wait on any socket ends so, a datagram socket's
+    // receive too, which no shutdown can end.
+    return timeout.race(io, operation, .{ .deadline = deadline }) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+        error.Timeout => {
+            _ = w.fired.raise(.acq_rel);
+            w.end(io);
+            return error.Timeout;
+        },
     };
-}
-
-fn arm(d: *Deadlines, io: Io, w: *Watch, deadline: Io.Clock.Timestamp) void {
-    // The watching task reads the awake clock.
-    const stamp = if (deadline.clock == .awake) clock.awakeOf(deadline.raw) else clock.carried(deadline.raw, deadline.clock.now(io), Io.Clock.awake.now(io));
-    // Zero means unarmed, so a deadline at the very start is the next tick.
-    w.deadline.store(if (stamp.eql(unarmed)) soonest else stamp, .release);
-    if (d.armed.fetchAddWrapping(.fromRaw(1), .seq_cst).eql(.fromRaw(0)) and d.parked.load(.seq_cst) == .parked) {
-        d.parked.store(.running, .seq_cst);
-        d.parked.wake(io, 1);
-    }
-}
-
-fn disarm(d: *Deadlines, w: *Watch) void {
-    w.deadline.store(unarmed, .release);
-    _ = d.armed.fetchSubWrapping(.fromRaw(1), .seq_cst);
-}
-
-/// The watching task: it ends canceled, as its group's cancel ends it.
-fn watch(d: *Deadlines, io: Io) Io.Cancelable!void {
-    var idle_ticks: u32 = 0;
-    while (true) {
-        if (d.armed.load(.seq_cst).eql(.fromRaw(0))) {
-            idle_ticks += 1;
-            if (idle_ticks > 1) {
-                idle_ticks = 0;
-                d.parked.store(.parked, .seq_cst);
-                if (d.armed.load(.seq_cst).eql(.fromRaw(0))) try d.parked.wait(io, .parked);
-                d.parked.store(.running, .seq_cst);
-                continue;
-            }
-        } else idle_ticks = 0;
-        const seen = d.nudge.load(.acquire);
-        const tick = d.tick.load(.monotonic).toIoDuration();
-        try d.nudge.waitTimeout(io, seen, .{ .duration = .{ .raw = tick, .clock = .awake } });
-        d.scan(io);
-    }
-}
-
-fn scan(d: *Deadlines, io: Io) void {
-    var held = d.watching.acquireUncancelable(io);
-    defer held.deinit(io);
-    const now = clock.awakeOf(Io.Clock.awake.now(io));
-    var it = held.value().watches.first;
-    while (it) |node| : (it = node.next) {
-        const w: *Watch = @fieldParentPtr("node", node);
-        const deadline = w.deadline.load(.acquire);
-        if (deadline.eql(unarmed) or now.compare(deadline) == .lt or w.fired.raised(.acquire)) continue;
-        _ = w.fired.raise(.acq_rel);
-        w.end(io);
-    }
 }

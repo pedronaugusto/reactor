@@ -3,7 +3,6 @@
 //! and a lookup with too many answers.
 const builtin = @import("builtin");
 const std = @import("std");
-const timeline = @import("clock.zig");
 const testing = std.testing;
 const Io = std.Io;
 const IpAddress = Io.net.IpAddress;
@@ -212,7 +211,7 @@ test "a timed read over an Io without concurrent batches drains its fallback" {
     for (buffer) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
 }
 
-test "a deadline passed aborts the operation's socket, and one disarmed in time does not" {
+test "a deadline passed ends the operation and poisons its socket" {
     const io = testing.io;
     var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
@@ -235,39 +234,24 @@ test "a deadline passed aborts the operation's socket, and one disarmed in time 
     try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
 }
 
-test "the watching task ticks at a tenth of the shortest timeout, between a millisecond and a second" {
-    try testing.expectEqual(timeline.Span.literal("1ms"), net.Deadlines.init(.fromMilliseconds(2)).tick.load(.monotonic));
-    try testing.expectEqual(timeline.Span.literal("300ms"), net.Deadlines.init(.fromSeconds(3)).tick.load(.monotonic));
-    try testing.expectEqual(timeline.Span.literal("1s"), net.Deadlines.init(.fromSeconds(300)).tick.load(.monotonic));
-}
-
-test "tighten only shortens the tick, and wakes the task that waits out a longer one" {
+test "a deadline ends a receive on a datagram socket no one sends to" {
+    // A datagram socket has no connection a shutdown could end, so the
+    // deadline ends the receive itself.
     const io = testing.io;
-    var deadlines: net.Deadlines = .init(.fromSeconds(300));
+    const socket = try (IpAddress{ .ip4 = .loopback(0) }).bind(io, .{ .mode = .dgram });
+    defer socket.close(io);
+    var deadlines: net.Deadlines = .init(.fromMilliseconds(20));
     defer deadlines.deinit(io);
-    deadlines.tighten(io, .fromMilliseconds(50));
-    try testing.expectEqual(timeline.Span.literal("5ms"), deadlines.tick.load(.monotonic));
-    deadlines.tighten(io, .fromSeconds(5));
-    try testing.expectEqual(timeline.Span.literal("5ms"), deadlines.tick.load(.monotonic));
-
-    // A task that has waited out one second between looks ends an operation
-    // within a few ticks of the shorter deadline asked for afterwards.
-    var listener = try (try IpAddress.parse("127.0.0.1", 0)).listen(io, .{ .reuse_address = true });
-    defer listener.deinit(io);
-    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
-    var slow: net.Deadlines = .init(.fromSeconds(300));
-    defer slow.deinit(io);
-    var watch: net.Deadlines.Watch = .init(stream.socket.handle);
-    if (!slow.add(io, &watch)) return error.SkipZigTest;
-    defer slow.remove(io, &watch);
-    var buffer: [16]u8 = undefined;
-    var data: [1][]u8 = .{&buffer};
-    const read: Io.Operation = .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } };
+    var watch: net.Deadlines.Watch = .init(socket.handle);
+    if (!deadlines.add(io, &watch)) return error.SkipZigTest;
+    defer deadlines.remove(io, &watch);
+    var message: Io.net.IncomingMessage = .init;
+    var buffer: [64]u8 = undefined;
+    const receive: Io.Operation = .{ .net_receive = .{ .socket_handle = socket.handle, .message_buffer = (&message)[0..1], .data_buffer = &buffer, .flags = .{} } };
     const start = Io.Clock.awake.now(io);
-    slow.tighten(io, .fromMilliseconds(50));
-    try testing.expectError(error.Timeout, slow.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(60)) }));
-    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 500 * std.time.ns_per_ms);
+    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, receive, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
+    try testing.expect(watch.fired.raised(.acquire));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 5 * std.time.ns_per_s);
 }
 
 // abort

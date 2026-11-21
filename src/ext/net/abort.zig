@@ -4,12 +4,16 @@ const std = @import("std");
 const aegis = @import("aegis");
 const Io = std.Io;
 
-/// A shutdown of both directions, which ends a read or write waiting on
-/// the socket and every one after it; on Windows an abortive disconnect,
-/// since AFD's graceful one leaves a pending receive waiting for the peer.
-/// The socket stays open: its owner closes it. A socket that answers it is
-/// not connected, or was reset or disconnected, is ended already, which is
-/// what this asks.
+/// A connection shut down both ways, which ends a read or write waiting on
+/// it and every one after it, and tells the peer; on Windows an abortive
+/// disconnect, since AFD's graceful one leaves a pending receive waiting for
+/// the peer. The socket stays open: its owner closes it.
+///
+/// It ends waits on a connection only. A socket with none (a datagram
+/// socket, which answers that it is not connected) has nothing a shutdown
+/// ends, and a wait on it goes on: such a wait is ended by its own cancel,
+/// as `Deadlines` ends one. A connection the peer reset or disconnected
+/// has already ended every wait on it.
 ///
 /// Any other refusal leaves what waits on the socket waiting, and nothing
 /// can end it from outside: a Debug build stops there, so the hang is a
@@ -37,7 +41,10 @@ pub fn abort(io: Io, socket: Io.net.Socket.Handle) void {
     }
     io.vtable.netShutdown(io.userdata, socket, .both) catch |err| switch (err) {
         error.Canceled => io.recancel(),
-        error.ConnectionAborted, error.ConnectionResetByPeer, error.SocketUnconnected => {},
+        // Reset or disconnected: its waits have ended already.
+        error.ConnectionAborted, error.ConnectionResetByPeer => {},
+        // No connection: nothing for a shutdown to end (see above).
+        error.SocketUnconnected => {},
         error.NetworkDown, error.SystemResources, error.Unexpected => aegis.assert.debug(false, "a shutdown the socket refused leaves its operations waiting"),
     };
 }
