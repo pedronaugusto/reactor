@@ -120,7 +120,7 @@ test "a server's disconnect ends its client's read under way" {
     try testing.expect(std.meta.isError(reading.await(io)));
 }
 
-test "off a runtime a pipe's deadlines are refused, and its reads unbounded" {
+test "off a runtime a pipe's readiness wait is unbounded, and a deadline ends its read" {
     try skipOffWindows();
     const io = testing.io;
     var name_buffer: [64]u8 = undefined;
@@ -130,13 +130,13 @@ test "off a runtime a pipe's deadlines are refused, and its reads unbounded" {
     var connected = try net.connectPipe(io, name, .{});
     defer connected.deinit(io);
     const client = connected.borrow().*;
-    var deadlines: net.Deadlines = .init(.fromMilliseconds(100));
-    defer deadlines.deinit(io);
-    var watch: net.Deadlines.Watch = .initPipe(client);
-    try testing.expect(!deadlines.add(io, &watch));
-    deadlines.remove(io, &watch);
     var buffer: [8]u8 = undefined;
     try testing.expectEqual(pipe.Readiness.unbounded, try pipe.readPipeWithin(io, client, &buffer, .fromMilliseconds(10)));
+    // A deadline ends a read off a runtime too, by the Io's own cancel.
+    var watch: net.Deadlines.Watch = .initPipe(client);
+    var data: [1][]u8 = .{&buffer};
+    const read: Io.Operation = .{ .file_read_streaming = .{ .file = client, .data = &data } };
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = Io.Clock.awake.now(io).addDuration(.fromMilliseconds(50)) }));
 }
 
 fn runtime(r: *Runtime) !void {

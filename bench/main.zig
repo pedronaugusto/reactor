@@ -667,11 +667,7 @@ fn lanes(r: Report, io: Io, c: Config) !void {
 fn deadlineClient(io: Io, address: Io.net.IpAddress, messages: usize) !void {
     const stream = try address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    var d: reactor.net.Deadlines = .init(.fromSeconds(10));
-    defer d.deinit(io);
     var watch: reactor.net.Deadlines.Watch = .init(stream.socket.handle);
-    _ = d.add(io, &watch);
-    defer d.remove(io, &watch);
     var message: [64]u8 = @splat('x');
     for (0..messages) |_| {
         var out: [1][]const u8 = .{&message};
@@ -680,7 +676,7 @@ fn deadlineClient(io: Io, address: Io.net.IpAddress, messages: usize) !void {
         while (got < message.len) {
             var data: [1][]u8 = .{message[got..]};
             const at = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = .fromSeconds(10), .clock = .awake });
-            const result = try d.operate(io, &watch, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, at);
+            const result = try reactor.net.Deadlines.operate(io, &watch, .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, at);
             const n = (try result.net_read).data_len;
             if (n == 0) return error.EndOfStream;
             got += n;
