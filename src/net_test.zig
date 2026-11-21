@@ -278,6 +278,38 @@ test "a deadline ends a receive on a datagram socket no one sends to" {
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 5 * std.time.ns_per_s);
 }
 
+/// An `Io` whose datagram receive reports its cancel as Windows'
+/// `Io.Threaded` does: inside the result, `.{ error.Canceled, 0 }`, where
+/// POSIX's returns `error.Canceled`.
+const CancelInside = shakedown.Layer(u8, .{
+    .operate = struct {
+        fn operate(_: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+            if (operation != .net_receive) return testing.io.vtable.operate(testing.io.userdata, operation);
+            var never: Io.Event = .unset;
+            never.wait(testing.io) catch |err| switch (err) {
+                error.Canceled => return .{ .net_receive = .{ error.Canceled, 0 } },
+            };
+            unreachable; // unreachable: nothing sets `never`
+        }
+    }.operate,
+});
+
+test "a deadline ends a receive whose cancel the Io reports inside the result, as Windows' does" {
+    var layer: CancelInside = .init(testing.io, 0);
+    const io = layer.io();
+    const socket = try (IpAddress{ .ip4 = .loopback(0) }).bind(testing.io, .{ .mode = .dgram });
+    defer socket.close(testing.io);
+    var watch: net.Deadlines.Watch = .init(socket.handle);
+    var message: Io.net.IncomingMessage = .init;
+    var buffer: [64]u8 = undefined;
+    const receive: Io.Operation = .{ .net_receive = .{ .socket_handle = socket.handle, .message_buffer = (&message)[0..1], .data_buffer = &buffer, .flags = .{} } };
+    const start = Io.Clock.awake.now(testing.io);
+    // The cancel the deadline made is the deadline's, never a receive that
+    // finished with nothing.
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, receive, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
+    try testing.expect(watch.fired.raised(.acquire));
+}
+
 // abort
 
 fn readOne(io: Io, socket: Io.net.Socket.Handle) !usize {

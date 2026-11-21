@@ -31,15 +31,35 @@ pub fn race(io: Io, operation: Io.Operation, deadline: Io.Timeout) Error!Io.Oper
     // consume bytes and then report that no bounded operation was started.
     try select.concurrent(.completed, Io.operate, .{ io, operation });
     return switch (try select.await()) {
-        .completed => |result| result,
+        .completed => |result| try canceledInside(try result),
         .expired => |result| expired: {
             try result;
             while (select.cancel()) |late| switch (late) {
-                // A late operation that failed gave no value: the timeout stands.
-                .completed => |completed| break :expired completed catch error.Timeout,
+                // A late operation that failed, or that the cancel ended with
+                // nothing moved, gave no value: the timeout stands.
+                .completed => |completed| {
+                    const value = completed catch break :expired error.Timeout;
+                    break :expired canceledInside(value) catch error.Timeout;
+                },
                 .expired => {},
             };
             break :expired error.Timeout;
         },
     };
+}
+
+/// `result`, with a cancel the `Io` reports inside it read as the cancel it
+/// is. Windows' `Io.Threaded` gives a canceled datagram receive or send as
+/// `.{ error.Canceled, n }` in the result, where POSIX's returns
+/// `error.Canceled`: with nothing moved it is `error.Canceled`, and after
+/// some messages moved it keeps their count, as POSIX's send does.
+fn canceledInside(result: Io.Operation.Result) Io.Cancelable!Io.Operation.Result {
+    switch (result) {
+        inline .net_receive, .net_send => |moved, tag| if (moved[0]) |err| if (err == error.Canceled) {
+            if (moved[1] == 0) return error.Canceled;
+            return @unionInit(Io.Operation.Result, @tagName(tag), .{ null, moved[1] });
+        },
+        else => {},
+    }
+    return result;
 }
