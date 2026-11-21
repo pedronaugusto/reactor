@@ -208,10 +208,9 @@ security descriptor from the caller and has no default, since a pipe is
 a door into the server, and refuses clients of other machines.
 
 A pipe's deadlines are kept where each operation carries its own, on a
-runtime. Elsewhere `Deadlines.add` refuses a pipe's watch and its
-operations run unbounded, said rather than guessed at: std's own wait on
-an overlapped call ends only as the call does, and a cancel from outside
-reaches it as a state it does not expect. `pipe.readPipeWithin` is the
+runtime. Elsewhere `Deadlines.operate` races the operation against its
+deadline and ends it by the `Io`'s own cancel, which std's wait on an
+overlapped call expects; nothing cancels it from outside. `pipe.readPipeWithin` is the
 bounded wait for bytes a connection's idle check needs, on a runtime;
 elsewhere it says `unbounded`.
 
@@ -311,8 +310,7 @@ code before.
 - **Guards.** A lock beside its data is a `BlockingGuarded` (`Guarded`, the
   spin form, for a few stores that never park): the lane queue, launch workers
   and admission counts, the global inject queue, the spare-thread pool, a
-  receiver's mailbox and a buffer ring's publication, `net.Deadlines`' watch
-  list, a Windows job's notification mailbox, and a futex bucket's waiters. A
+  receiver's mailbox and a buffer ring's publication, a Windows job's notification mailbox, and a futex bucket's waiters. A
   parked task keeps its bucket's guard until it is off its stack; the
   scheduler releases it there.
 - **Limits.** Executor capacity is a `Budget`: two units per admitted call,

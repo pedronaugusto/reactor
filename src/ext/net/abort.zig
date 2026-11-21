@@ -18,8 +18,8 @@ const Io = std.Io;
 /// Any other refusal leaves what waits on the socket waiting, and nothing
 /// can end it from outside: a Debug build stops there, so the hang is a
 /// failure that names its cause. No caller has a way on from one (a
-/// deadline's watching task, a server closing its connections), which is
-/// why it is a check and not an error returned.
+/// server closing its connections, a deadline poisoning one), which is why
+/// it is a check and not an error returned.
 pub fn abort(io: Io, socket: Io.net.Socket.Handle) void {
     if (builtin.os.tag == .windows) {
         const windows = std.os.windows;
@@ -49,8 +49,10 @@ pub fn abort(io: Io, socket: Io.net.Socket.Handle) void {
     };
 }
 
-/// Whether an abortive disconnect's status leaves the socket ended: done
-/// now, or ended before by a reset, a disconnect or no connection.
+/// Whether an abortive disconnect's status is one this asks no more of:
+/// done now, the connection ended before by a reset or a disconnect, or no
+/// connection at all, where there is nothing for it to end (a wait on such
+/// a socket is ended by its own cancel, as on POSIX).
 fn endedBy(status: std.os.windows.NTSTATUS) bool {
     return switch (status) {
         .SUCCESS, .INVALID_CONNECTION, .CONNECTION_INVALID, .CONNECTION_RESET, .CONNECTION_ABORTED, .CONNECTION_DISCONNECTED, .LOCAL_DISCONNECT, .REMOTE_DISCONNECT => true,

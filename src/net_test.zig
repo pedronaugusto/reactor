@@ -217,21 +217,39 @@ test "a deadline passed ends the operation and poisons its socket" {
     defer listener.deinit(io);
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    var deadlines: net.Deadlines = .init(.fromMilliseconds(20));
-    defer deadlines.deinit(io);
     var watch: net.Deadlines.Watch = .init(stream.socket.handle);
-    if (!deadlines.add(io, &watch)) return error.SkipZigTest;
-    defer deadlines.remove(io, &watch);
 
     var buffer: [16]u8 = undefined;
     var data: [1][]u8 = .{&buffer};
     const read: Io.Operation = .{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } };
     // A read that never gets an answer ends at its deadline.
     const start = Io.Clock.awake.now(io);
-    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
     try testing.expect(watch.fired.raised(.acquire));
     // The socket is poisoned: the next operation reports the deadline.
-    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
+}
+
+test "a deadline with no task to run the operation in refuses it, and the operation never starts" {
+    const base = testing.io;
+    var layer: Serial = .init(base, 0);
+    const io = layer.io();
+    const sender = try (IpAddress{ .ip4 = .loopback(0) }).bind(base, .{ .mode = .dgram });
+    defer sender.close(base);
+    const receiver = try (IpAddress{ .ip4 = .loopback(0) }).bind(base, .{ .mode = .dgram });
+    defer receiver.close(base);
+    var watch: net.Deadlines.Watch = .init(sender.handle);
+    var outgoing: [1]Io.net.OutgoingMessage = .{.{ .address = &receiver.address, .data_ptr = "never".ptr, .data_len = 5 }};
+    const send: Io.Operation = .{ .net_send = .{ .socket_handle = sender.handle, .messages = &outgoing, .flags = .{} } };
+    const later = Io.Clock.awake.now(base).addDuration(.fromSeconds(5));
+    try testing.expectError(error.ConcurrencyUnavailable, net.Deadlines.operate(io, &watch, send, .{ .clock = .awake, .raw = later }));
+    try testing.expect(!watch.fired.raised(.acquire));
+    // Nothing was sent: the receiver's deadline ends its wait empty.
+    var into: net.Deadlines.Watch = .init(receiver.handle);
+    var message: Io.net.IncomingMessage = .init;
+    var buffer: [16]u8 = undefined;
+    const receive: Io.Operation = .{ .net_receive = .{ .socket_handle = receiver.handle, .message_buffer = (&message)[0..1], .data_buffer = &buffer, .flags = .{} } };
+    try testing.expectError(error.Timeout, net.Deadlines.operate(base, &into, receive, .{ .clock = .awake, .raw = Io.Clock.awake.now(base).addDuration(.fromMilliseconds(50)) }));
 }
 
 test "a deadline ends a receive on a datagram socket no one sends to" {
@@ -240,16 +258,12 @@ test "a deadline ends a receive on a datagram socket no one sends to" {
     const io = testing.io;
     const socket = try (IpAddress{ .ip4 = .loopback(0) }).bind(io, .{ .mode = .dgram });
     defer socket.close(io);
-    var deadlines: net.Deadlines = .init(.fromMilliseconds(20));
-    defer deadlines.deinit(io);
     var watch: net.Deadlines.Watch = .init(socket.handle);
-    if (!deadlines.add(io, &watch)) return error.SkipZigTest;
-    defer deadlines.remove(io, &watch);
     var message: Io.net.IncomingMessage = .init;
     var buffer: [64]u8 = undefined;
     const receive: Io.Operation = .{ .net_receive = .{ .socket_handle = socket.handle, .message_buffer = (&message)[0..1], .data_buffer = &buffer, .flags = .{} } };
     const start = Io.Clock.awake.now(io);
-    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, receive, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, receive, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(40)) }));
     try testing.expect(watch.fired.raised(.acquire));
     try testing.expect(start.durationTo(Io.Clock.awake.now(io)).nanoseconds < 5 * std.time.ns_per_s);
 }

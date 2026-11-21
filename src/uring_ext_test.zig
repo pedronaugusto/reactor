@@ -223,16 +223,12 @@ test "a native deadline ends a read in the kernel, poisons the socket, and nothi
     const io = r.io();
     const pair = try tcpPair(io);
     defer for (pair) |s| s.close(io);
-    var deadlines: reactor.net.Deadlines = .init(.fromMilliseconds(5));
-    defer deadlines.deinit(io);
     var watch: reactor.net.Deadlines.Watch = .init(pair[0].socket.handle);
-    try testing.expect(deadlines.add(io, &watch));
-    defer deadlines.remove(io, &watch);
     var buffer: [16]u8 = @splat(0xaa);
     var data: [1][]u8 = .{&buffer};
     const read: Io.Operation = .{ .net_read = .{ .socket_handle = pair[0].socket.handle, .data = &data } };
     const at = Io.Clock.awake.now(io).addDuration(.fromMilliseconds(5));
-    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = at }));
+    try testing.expectError(error.Timeout, reactor.net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = at }));
     @memset(&buffer, 0xdd);
     var send: [1][]const u8 = .{"late"};
     const sent = (try io.operate(.{ .net_write = .{ .socket_handle = pair[1].socket.handle, .data = &send } })).net_write;
@@ -241,7 +237,7 @@ test "a native deadline ends a read in the kernel, poisons the socket, and nothi
     if (sent) |_| {} else |_| {}
     try io.sleep(.fromMilliseconds(5), .awake);
     for (buffer) |byte| try testing.expectEqual(@as(u8, 0xdd), byte);
-    try testing.expectError(error.Timeout, deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = at.addDuration(.fromSeconds(60)) }));
+    try testing.expectError(error.Timeout, reactor.net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = at.addDuration(.fromSeconds(60)) }));
 }
 
 test "resolve on a runtime is bounded inline; blocking runs on a lane" {

@@ -1,8 +1,9 @@
-//! Per-operation deadlines over many sockets, on any `Io`.
+//! An operation on a socket or a named pipe ended at its deadline, on any
+//! `Io`: one call, `operate`, on the target's `Watch`.
 //!
 //! On a runtime each operation carries its own deadline into the kernel
 //! (`operateTimeout`, which never returns while the kernel holds the
-//! buffer). Any other `Io` cannot always bound a socket operation itself
+//! buffer). Any other `Io` cannot always bound an operation itself
 //! (`Io.Threaded` refuses a timed read or write on Windows, and on POSIX a
 //! timed write waits only for the socket to take bytes, then blocks in
 //! `sendmsg` while the peer keeps its window shut), so there the operation
@@ -10,13 +11,12 @@
 //! that comes first ends it by the `Io`'s own cancel: a signal that breaks
 //! the blocked call on POSIX, the pending request canceled on Windows. That
 //! ends a wait on any socket, a datagram socket's receive as well as a
-//! stream's read, where a shutdown ends only a connection's.
+//! stream's read, where a shutdown ends only a connection's, and a pipe's
+//! read as well.
 //!
-//! Either way a deadline that fires poisons the socket: every later
-//! operation on it reports the deadline, and a connection is shut down
-//! (`abort`) so its peer sees it ended too.
-const Deadlines = @This();
-
+//! Either way a deadline that fires poisons the target: every later
+//! operation on it reports the deadline, and a socket's connection is shut
+//! down (`abort`) so its peer sees it ended too.
 const std = @import("std");
 const Io = std.Io;
 
@@ -25,18 +25,17 @@ const abort = @import("abort.zig").abort;
 const timeout = @import("../../ops/timeout.zig");
 const Raised = @import("../../sync/Raised.zig");
 
-/// One socket's or named pipe's operation deadline.
+/// One socket's or named pipe's operations under deadlines: whether one
+/// fired. It owns nothing: the target is named by its handle.
 pub const Watch = struct {
     target: Target,
-    /// Raised once a deadline fired: the socket is poisoned.
+    /// Raised once a deadline fired: the target is poisoned.
     fired: Raised = .{},
 
     /// What the operations are on.
     pub const Target = union(enum) {
         socket: Io.net.Socket.Handle,
-        /// A named pipe, Windows': its deadlines are kept on a runtime,
-        /// where each operation carries its own; off one `add` refuses it.
-        /// Named by its handle: the watch does not own the pipe.
+        /// A named pipe, Windows'.
         pipe: Io.File.Handle,
     };
 
@@ -49,8 +48,8 @@ pub const Watch = struct {
     }
 
     /// Poisons the target once its deadline fired: a socket's connection
-    /// is shut down; a pipe's operation was ended by its own deadline, and
-    /// `fired` refuses the ones after it.
+    /// is shut down; a pipe's is left to `fired`, which refuses the
+    /// operations after.
     fn end(w: *const Watch, io: Io) void {
         switch (w.target) {
             .socket => |socket| abort(io, socket),
@@ -59,46 +58,21 @@ pub const Watch = struct {
     }
 };
 
-/// Deadlines no shorter than `shortest`, which nothing needs any more:
-/// each operation ends at its own.
-pub fn init(shortest: Io.Duration) Deadlines {
-    _ = shortest;
-    return .{};
-}
-
-/// Nothing to do: each operation ends at its own deadline.
-pub fn tighten(d: *Deadlines, io: Io, shorter: Io.Duration) void {
-    _ = .{ d, io, shorter };
-}
-
-pub fn deinit(d: *Deadlines, io: Io) void {
-    _ = io;
-    d.* = undefined;
-}
-
-/// Watches `w`. False when `w` is a pipe's off a runtime: std's own wait
-/// on an overlapped call is not one a race can end, and its operations run
-/// unbounded.
-pub fn add(d: *Deadlines, io: Io, w: *Watch) bool {
-    _ = d;
-    return native.runtimeOf(io) != null or w.target != .pipe;
-}
-
-/// Stops watching `w`, which has no operation under way.
-pub fn remove(d: *Deadlines, io: Io, w: *Watch) void {
-    _ = .{ d, io, w };
-}
-
-/// `Timeout` when the deadline ended the operation; `ConcurrencyUnavailable`
-/// off a runtime when no task could be had to run it in, and it was not
-/// started.
+/// `Timeout` when the deadline ended the operation, or one fired before on
+/// the target. `ConcurrencyUnavailable` off a runtime when no task could be
+/// had to run the operation in: it was not started.
 pub const OperateError = Io.Cancelable || error{ Timeout, ConcurrencyUnavailable };
 
-/// One operation on `w`'s socket, ended at `deadline`: `Timeout` when the
+/// One operation on `w`'s target, ended at `deadline`: `Timeout` when the
 /// deadline ended it, else its result. A result the operation reached
 /// before the deadline is returned even when the deadline fired, though
-/// the socket is aborted then.
-pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
+/// the target is poisoned then.
+///
+/// Off a runtime it needs one concurrent task beside the caller's (and the
+/// deadline's own): with none to be had it returns `ConcurrencyUnavailable`
+/// before the operation starts, and never runs it unbounded. What to do
+/// then is the caller's: run it unbounded and count that, or fail.
+pub fn operate(io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
     if (w.fired.raised(.acquire)) return error.Timeout;
     if (native.runtimeOf(io) != null) {
         return io.operateTimeout(operation, .{ .deadline = deadline }) catch |err| switch (err) {
@@ -112,12 +86,6 @@ pub fn operate(d: *Deadlines, io: Io, w: *Watch, operation: Io.Operation, deadli
             },
         };
     }
-    // A pipe's operation off a runtime runs unbounded, as `add` said.
-    if (w.target == .pipe) return io.operate(operation);
-    _ = d;
-    // The operation in a task of its own, ended at the deadline by the
-    // `Io`'s cancel: a wait on any socket ends so, a datagram socket's
-    // receive too, which no shutdown can end.
     return timeout.race(io, operation, .{ .deadline = deadline }) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
