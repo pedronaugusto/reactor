@@ -1,8 +1,6 @@
 //! The handles reactor's own calls hand back, each with its one owner,
 //! which closes it once: `deinit(io)`, or `take` it out to keep it.
-const std = @import("std");
 const aegis = @import("aegis");
-const Io = std.Io;
 
 /// A file handle with its one owner: a named pipe's end. aegis's `own.File`, the one owner type of
 /// an open file, so a handle reactor hands back passes to any package as the same type.
