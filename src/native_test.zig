@@ -829,7 +829,7 @@ test "native: canceled fixed-buffer pipe read drains before unregister and a ful
 
 fn stackAllocationFailures(gpa: std.mem.Allocator) !void {
     var stacks = try stacks_.init(gpa, .{ .count = 12, .size = .fromRaw(64 << 10), .classes = &.{ .{ .count = 3, .size = .fromRaw(128 << 10) }, .{ .count = 2, .size = .fromRaw(256 << 10) } } });
-    defer stacks.deinit(gpa);
+    defer stacks.deinit();
     const ordinary = stacks_.take(&stacks, .fromRaw(64 << 10), null).?;
     const explicit = stacks_.take(&stacks, .fromRaw(64 << 10), .fromRaw(200 << 10)).?;
     try testing.expectEqual(@as(usize, 256 << 10), explicit.size().raw());

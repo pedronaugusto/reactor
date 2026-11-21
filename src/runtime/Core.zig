@@ -125,7 +125,7 @@ pub fn init(c: *Core, gpa: Allocator, options: Options, how: Construction, vtabl
         error.TooManyTasks => error.TooManyTasks,
         error.SystemResources => error.SystemResources,
     };
-    errdefer stacks.deinit(gpa);
+    errdefer stacks.deinit();
     var records = try Records.init(gpa, options.max_tasks);
     errdefer records.deinit(gpa);
     var trims = try Trims.init(gpa, options.max_tasks, count);
@@ -316,7 +316,7 @@ pub fn deinit(c: *Core) void {
     c.scheduler.trims.deinit(c.gpa);
     for (c.processors) |*p| p.loop.deinit();
     c.home_stack.deinit();
-    c.scheduler.stacks.deinit(c.gpa);
+    c.scheduler.stacks.deinit();
     c.scheduler.records.deinit(c.gpa);
     if (builtin.os.tag == .windows) c.jobs.deinit(c.gpa);
     if (builtin.os.tag == .linux) c.kept.deinit(c.gpa);
