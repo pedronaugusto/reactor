@@ -16,7 +16,12 @@ pub fn operate(io: Io, operation: Io.Operation, timeout: Io.Timeout) Error!Io.Op
     };
 }
 
-fn race(io: Io, operation: Io.Operation, deadline: Io.Timeout) Error!Io.Operation.Result {
+/// `operation` raced against `deadline` on any `Io`: the operation runs in
+/// a task of its own, and a deadline that comes first cancels it through
+/// the `Io`'s own cancel, which ends a wait on any handle (a datagram
+/// socket's receive as well as a stream's read) without touching the
+/// handle.
+pub fn race(io: Io, operation: Io.Operation, deadline: Io.Timeout) Error!Io.Operation.Result {
     const Result = union(enum) { completed: Io.Cancelable!Io.Operation.Result, expired: Io.Cancelable!void };
     var storage: [2]Result = undefined;
     var select: Io.Select(Result) = .init(io, &storage);
