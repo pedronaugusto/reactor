@@ -54,7 +54,7 @@ fn alloc(context: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize)
     const p: *SlotPool = @ptrCast(@alignCast(context));
     if (len > p.size or alignment.compare(.gt, slot_alignment)) return null;
     const index = p.pop() orelse return null;
-    return p.buffer.ptr + @as(usize, index) * p.size;
+    return p.buffer[@as(usize, index) * p.size ..].ptr;
 }
 
 fn free(context: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {

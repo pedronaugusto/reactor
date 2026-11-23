@@ -158,10 +158,10 @@ const exact_scan = 32;
 pub fn advance(w: *Wheel, to: Tick, sink: anytype) void {
     const now = to.raw();
     w.fireList(&w.due, sink);
-    if (now < w.elapsed) return;
+    if (to.compare(.fromRaw(w.elapsed)) == .lt) return;
     while (true) {
         const level, const slot, const start = w.nextSlot() orelse break;
-        if (start > now) break;
+        if (Tick.fromRaw(start).compare(to) == .gt) break;
         var list = w.lists[level][slot];
         w.lists[level][slot] = .{};
         w.occupied[level] &= ~(@as(u64, 1) << @intCast(slot));
@@ -201,12 +201,12 @@ fn fireList(w: *Wheel, list: *List, sink: anytype) void {
 }
 
 fn place(w: *Wheel, n: *Node) void {
-    const deadline = n.deadline.raw();
-    if (deadline <= w.elapsed) {
+    if (n.deadline.compare(.fromRaw(w.elapsed)) != .gt) {
         w.due.append(n);
         n.place = .due;
         return;
     }
+    const deadline = n.deadline.raw();
     const masked = (w.elapsed ^ deadline) | slot_mask;
     const significant = 63 - @clz(masked);
     const level = significant / slot_bits;
