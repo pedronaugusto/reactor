@@ -262,6 +262,65 @@ test "a deadline with no task to run the operation in refuses it, and the operat
     try testing.expectError(error.Timeout, net.Deadlines.operate(base, &into, receive, .{ .clock = .awake, .raw = Io.Clock.awake.now(base).addDuration(.fromMilliseconds(50)) }));
 }
 
+test "with no task to spare, a stream read is served when bytes come and ends at its deadline" {
+    const base = testing.io;
+    var layer: Serial = .init(base, 0);
+    const io = layer.io();
+    var listener = try (IpAddress{ .ip4 = .loopback(0) }).listen(base, .{});
+    defer listener.deinit(base);
+    const client = try listener.socket.address.connect(base, .{ .mode = .stream });
+    defer client.close(base);
+    const server = try listener.accept(base);
+    defer server.close(base);
+    var watch: net.Deadlines.Watch = .init(server.socket.handle);
+    var buffer: [16]u8 = undefined;
+    var data: [1][]u8 = .{&buffer};
+    const read: Io.Operation = .{ .net_read = .{ .socket_handle = server.socket.handle, .data = &data } };
+    // Bytes that came are read, though no task could race the read.
+    var out = [_][]const u8{"served"};
+    _ = try (try base.operate(.{ .net_write = .{ .socket_handle = client.socket.handle, .data = &out } })).net_write;
+    const got = try (try net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = Io.Clock.awake.now(base).addDuration(.fromSeconds(5)) })).net_read;
+    try testing.expectEqualStrings("served", buffer[0..got.data_len]);
+    try testing.expect(!watch.fired.raised(.acquire));
+    // None come: the read ends at its deadline, the socket poisoned.
+    const start = Io.Clock.awake.now(base);
+    try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(50)) }));
+    try testing.expect(watch.fired.raised(.acquire));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(base)).nanoseconds < 5 * std.time.ns_per_s);
+}
+
+test "with no task to spare, a large write to a peer that stops reading ends at its deadline" {
+    const base = testing.io;
+    var layer: Serial = .init(base, 0);
+    const io = layer.io();
+    var listener = try (IpAddress{ .ip4 = .loopback(0) }).listen(base, .{});
+    defer listener.deinit(base);
+    const client = try listener.socket.address.connect(base, .{ .mode = .stream });
+    defer client.close(base);
+    // The peer never reads: once both buffers are full nothing more is taken.
+    const server = try listener.accept(base);
+    defer server.close(base);
+    var watch: net.Deadlines.Watch = .init(client.socket.handle);
+    const chunk = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(chunk);
+    @memset(chunk, 'w');
+    var out = [_][]const u8{chunk};
+    const write: Io.Operation = .{ .net_write = .{ .socket_handle = client.socket.handle, .data = &out } };
+    const start = Io.Clock.awake.now(base);
+    const deadline: Io.Clock.Timestamp = .{ .clock = .awake, .raw = start.addDuration(.fromMilliseconds(300)) };
+    // Each write takes what the socket takes, and may be short; the one
+    // that finds no room left waits for it until the deadline.
+    var sent: usize = 0;
+    const ended = while (sent < 1 << 30) {
+        const result = net.Deadlines.operate(io, &watch, write, deadline) catch |err| break err;
+        sent += try result.net_write;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(error.Timeout, ended);
+    try testing.expect(sent > 0);
+    try testing.expect(watch.fired.raised(.acquire));
+    try testing.expect(start.durationTo(Io.Clock.awake.now(base)).nanoseconds < 5 * std.time.ns_per_s);
+}
+
 test "a deadline ends a receive on a datagram socket no one sends to" {
     // A datagram socket has no connection a shutdown could end, so the
     // deadline ends the receive itself.

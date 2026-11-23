@@ -128,6 +128,7 @@ pub const layers: []const gantry.rules.Layer = &.{
         "src/ext/net/abort.zig",
         "src/ext/net/peek.zig",
         "src/ext/net/Deadlines.zig",
+        "src/ext/net/bounded.zig",
         "src/ext/net/message.zig",
         "src/ext/net/Receiver.zig",
         "src/ext/net/receiver/Groups.zig",
