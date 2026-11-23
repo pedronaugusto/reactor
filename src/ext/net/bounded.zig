@@ -1,8 +1,7 @@
 //! A stream socket's read or write ended at its deadline with no task to
-//! race it in, on an `Io` that is not a runtime: what `Deadlines.operate`
-//! does when no task can be had, where `Io.Threaded` cannot bound the
-//! operation itself (it refuses a timed socket operation on Windows, and on
-//! POSIX a timed write waits only for room, then blocks in `sendmsg`).
+//! race it in, on the system's sockets: what `Deadlines.operate` does when
+//! no task can be had and the `Io` cannot bound the operation itself
+//! (`Io.Threaded` refuses a timed socket operation on Windows).
 //!
 //! A read waits on the calling thread for the socket to be readable, until
 //! the deadline, and then reads, which finds bytes, the end or an error at
@@ -56,7 +55,7 @@ fn ready(io: Io, what: wait.Waitable, deadline: Io.Clock.Timestamp) Error!void {
 }
 
 /// The first bytes a write would send, as one buffer: a write may be short.
-fn firstChunk(w: Io.Operation.NetWrite) []const u8 {
+pub fn firstChunk(w: Io.Operation.NetWrite) []const u8 {
     if (w.header.len > 0) return w.header;
     for (w.data[0 .. w.data.len - 1]) |d| if (d.len > 0) return d;
     const last = w.data[w.data.len - 1];
@@ -74,7 +73,7 @@ fn writePosix(io: Io, socket: Io.net.Socket.Handle, w: Io.Operation.NetWrite, de
     defer if (!sys_socket.send_honors_dontwait) holdSends(socket, .fromRaw(0)) catch aegis.assert.never("a socket that took a send timeout takes it back");
     while (true) {
         try ready(io, .{ .writable = socket }, deadline);
-        const rc = posix.system.send(socket, chunk.ptr, chunk.len, posix.MSG.NOSIGNAL | if (sys_socket.send_honors_dontwait) posix.MSG.DONTWAIT else 0);
+        const rc = posix.system.sendto(socket, chunk.ptr, chunk.len, posix.MSG.NOSIGNAL | if (sys_socket.send_honors_dontwait) posix.MSG.DONTWAIT else 0, null, 0);
         return .{
             .net_write = switch (posix.errno(rc)) {
                 .SUCCESS => @intCast(rc),

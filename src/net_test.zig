@@ -240,9 +240,28 @@ test "a deadline passed ends the operation and poisons its socket" {
     try testing.expectError(error.Timeout, net.Deadlines.operate(io, &watch, read, .{ .clock = .awake, .raw = start.addDuration(.fromSeconds(60)) }));
 }
 
-test "a deadline with no task to run the operation in refuses it, and the operation never starts" {
+/// An `Io` with no task to spare and no bound of its own on an operation.
+const Unbounding = shakedown.Layer(u8, .{
+    .concurrent = struct {
+        fn concurrent(_: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) Io.ConcurrentError!*Io.AnyFuture {
+            return error.ConcurrencyUnavailable;
+        }
+    }.concurrent,
+    .groupConcurrent = struct {
+        fn groupConcurrent(_: ?*anyopaque, _: *Io.Group, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.groupConcurrent,
+    .batchAwaitConcurrent = struct {
+        fn awaitBatch(_: ?*anyopaque, _: *Io.Batch, _: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+            return error.ConcurrencyUnavailable;
+        }
+    }.awaitBatch,
+});
+
+test "a datagram send with no task to run it in and no bound of the Io's own is refused, and never starts" {
     const base = testing.io;
-    var layer: Serial = .init(base, 0);
+    var layer: Unbounding = .init(base, 0);
     const io = layer.io();
     const sender = try (IpAddress{ .ip4 = .loopback(0) }).bind(base, .{ .mode = .dgram });
     defer sender.close(base);
@@ -262,10 +281,7 @@ test "a deadline with no task to run the operation in refuses it, and the operat
     try testing.expectError(error.Timeout, net.Deadlines.operate(base, &into, receive, .{ .clock = .awake, .raw = Io.Clock.awake.now(base).addDuration(.fromMilliseconds(50)) }));
 }
 
-test "with no task to spare, a stream read is served when bytes come and ends at its deadline" {
-    const base = testing.io;
-    var layer: Serial = .init(base, 0);
-    const io = layer.io();
+fn streamRead(base: Io, io: Io) !void {
     var listener = try (IpAddress{ .ip4 = .loopback(0) }).listen(base, .{});
     defer listener.deinit(base);
     const client = try listener.socket.address.connect(base, .{ .mode = .stream });
@@ -289,10 +305,17 @@ test "with no task to spare, a stream read is served when bytes come and ends at
     try testing.expect(start.durationTo(Io.Clock.awake.now(base)).nanoseconds < 5 * std.time.ns_per_s);
 }
 
-test "with no task to spare, a large write to a peer that stops reading ends at its deadline" {
+test "with no task to spare, a stream read is served when bytes come and ends at its deadline" {
     const base = testing.io;
-    var layer: Serial = .init(base, 0);
-    const io = layer.io();
+    // Bounded by the Io where it can (Io.Threaded on POSIX)...
+    var serial: Serial = .init(base, 0);
+    try streamRead(base, serial.io());
+    // ...and on the calling thread where it cannot.
+    var unbounding: Unbounding = .init(base, 0);
+    try streamRead(base, unbounding.io());
+}
+
+fn largeWrite(base: Io, io: Io) !void {
     var listener = try (IpAddress{ .ip4 = .loopback(0) }).listen(base, .{});
     defer listener.deinit(base);
     const client = try listener.socket.address.connect(base, .{ .mode = .stream });
@@ -319,6 +342,16 @@ test "with no task to spare, a large write to a peer that stops reading ends at 
     try testing.expect(sent > 0);
     try testing.expect(watch.fired.raised(.acquire));
     try testing.expect(start.durationTo(Io.Clock.awake.now(base)).nanoseconds < 5 * std.time.ns_per_s);
+}
+
+test "with no task to spare, a large write to a peer that stops reading ends at its deadline" {
+    const base = testing.io;
+    // Bounded by the Io where it can (Io.Threaded on POSIX)...
+    var serial: Serial = .init(base, 0);
+    try largeWrite(base, serial.io());
+    // ...and on the calling thread where it cannot.
+    var unbounding: Unbounding = .init(base, 0);
+    try largeWrite(base, unbounding.io());
 }
 
 test "a deadline ends a receive on a datagram socket no one sends to" {

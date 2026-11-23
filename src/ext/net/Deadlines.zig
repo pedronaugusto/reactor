@@ -12,8 +12,9 @@
 //! the blocked call on POSIX, the pending request canceled on Windows. That
 //! ends a wait on any socket, a datagram socket's receive as well as a
 //! stream's read, where a shutdown ends only a connection's, and a pipe's
-//! read as well. With no task to spare, a stream socket's read or write is
-//! bounded on the calling thread instead (`bounded.zig`).
+//! read as well. With no task to spare, the `Io` bounds the operation where
+//! it can, and where it cannot (`Io.Threaded` on Windows) a stream socket's
+//! read or write is bounded on the calling thread (`bounded.zig`).
 //!
 //! Either way a deadline that fires poisons the target: every later
 //! operation on it reports the deadline, and a socket's connection is shut
@@ -79,11 +80,12 @@ pub const OperateError = Io.Cancelable || error{ Timeout, ConcurrencyUnavailable
 /// the target is poisoned then.
 ///
 /// Off a runtime it races the operation in a task of its own. With no task
-/// to be had, a stream socket's read or write is bounded on the calling
-/// thread (`bounded.zig`): a read waits for the socket to be readable until
-/// the deadline, a write sends what the socket takes without waiting, and
-/// may be short. Anything else (a datagram send, a pipe's operation)
-/// returns `ConcurrencyUnavailable` before it starts, never run unbounded.
+/// to be had, the `Io` bounds it where it can (`operateTimeout`, a write
+/// sent a piece at a time, and so short), and where it cannot, a stream
+/// socket's read or write is bounded on the calling thread (`bounded.zig`).
+/// Anything else (a datagram send, a pipe's operation the `Io` cannot
+/// bound) returns `ConcurrencyUnavailable` before it starts, never run
+/// unbounded.
 pub fn operate(io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
     if (w.fired.raised(.acquire)) return error.Timeout;
     if (native.runtimeOf(io) != null) {
@@ -98,16 +100,44 @@ pub fn operate(io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Ti
     }
     return timeout.race(io, operation, .{ .deadline = deadline }) catch |err| switch (err) {
         error.Canceled => error.Canceled,
-        // No task to race it in: a stream socket's read or write is bounded
-        // on the calling thread instead.
-        error.ConcurrencyUnavailable => switch (w.target) {
-            .socket => |socket| bounded.operate(io, socket, operation, deadline) catch |e| switch (e) {
-                error.Canceled => error.Canceled,
-                error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
-                error.Timeout => w.expire(io),
-            },
-            .pipe => error.ConcurrencyUnavailable,
-        },
+        error.ConcurrencyUnavailable => alone(io, w, operation, deadline),
         error.Timeout => w.expire(io),
+    };
+}
+
+/// The most a write sends with no task to race it in, where the `Io`
+/// bounds it: a socket reported writable takes this much at once on every
+/// system reactor targets (at least `SO_SNDLOWAT`'s 2048 bytes on Darwin
+/// and the BSDs; on Linux one segment, which a send that saw room is never
+/// held for), so the send after the wait cannot block.
+const alone_write_max = 1024;
+
+/// `operation` with no task to race it in: bounded by the `Io` itself
+/// (`operateTimeout`, a write capped at `alone_write_max`), which keeps an
+/// `Io` that is no system's (a simulation) to its own sockets; where the
+/// `Io` cannot (`Io.Threaded` on Windows), a stream socket's operation is
+/// bounded on the calling thread (`bounded.zig`).
+fn alone(io: Io, w: *Watch, operation: Io.Operation, deadline: Io.Clock.Timestamp) OperateError!Io.Operation.Result {
+    var first: [1][]const u8 = undefined;
+    const asked: Io.Operation = switch (operation) {
+        .net_write => |o| capped: {
+            first[0] = bounded.firstChunk(o);
+            first[0] = first[0][0..@min(first[0].len, alone_write_max)];
+            break :capped .{ .net_write = .{ .socket_handle = o.socket_handle, .data = &first, .control = o.control } };
+        },
+        else => operation,
+    };
+    if (io.operateTimeout(asked, .{ .deadline = deadline })) |result| return result else |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Timeout => return w.expire(io),
+        error.ConcurrencyUnavailable => {},
+    }
+    return switch (w.target) {
+        .socket => |socket| bounded.operate(io, socket, operation, deadline) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+            error.Timeout => w.expire(io),
+        },
+        .pipe => error.ConcurrencyUnavailable,
     };
 }
