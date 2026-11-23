@@ -146,9 +146,7 @@ pub fn lookupNamed(io: Io, name: HostName, port: u16, family: ?net.IpAddress.Fam
     const config = try Config.read(io);
     const bare = std.mem.trimEnd(u8, name.bytes, ".");
     const absolute = name.bytes.len != bare.len;
-    // ndots counts dots, and is compared with the name's count of them.
-    const ndots: usize = config.ndots.raw();
-    const first = absolute or std.mem.countScalar(u8, bare, '.') >= ndots;
+    const first = absolute or reaches(std.mem.countScalar(u8, bare, '.'), config.ndots);
     var failure: Error = error.UnknownHostName;
     if (first) if (queryNamed(io, bare, port, family, out, &config, canonical)) |n| return n else |err| {
         if (err == error.Canceled) return error.Canceled;
@@ -191,6 +189,14 @@ fn worse(a: Error, b: Error) Error {
 /// `bare` in the search domain `domain`, written into `buffer`: the name a
 /// lookup tries for that domain; null where the two make no host name (too
 /// long, or a domain that is none).
+/// Whether a name with `dots` dots has at least `ndots` of them, so it is tried as given first:
+/// past `Ndots`'s range it has more than any.
+fn reaches(dots: usize, ndots: Config.Ndots) bool {
+    const small = aegis.int.cast(u8, dots) catch return true;
+    const count = Config.Ndots.init(small) catch return true;
+    return count.compare(ndots) != .lt;
+}
+
 fn candidateIn(buffer: *[HostName.max_len]u8, bare: []const u8, domain: []const u8) ?[]const u8 {
     const full = std.mem.print(buffer, "{s}.{s}", .{ bare, domain }) catch |err| switch (err) {
         error.NoSpaceLeft => return null,
