@@ -65,7 +65,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         func: @TypeOf(func),
         args: @TypeOf(args),
         result: R = undefined,
-        finished: std.Io.Event = .unset,
+        finished: aegis.Signal(void) = .init(),
 
         fn run(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the waiting caller owns the record
@@ -73,7 +73,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         }
         fn done(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the caller retains it through executor retirement
-            c.finished.set(Scheduler.system());
+            c.finished.set(Scheduler.system(), {}) catch aegis.assert.never("a lane call finishes once a round");
         }
     };
     var c: Call = .{
@@ -83,13 +83,14 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
     };
     while (true) {
         c.job = .{ .run = Call.run, .done = Call.done, .lane = lane, .control = control_ };
-        c.finished = .unset;
+        // A new round, a new signal: the last round's set has returned (`held` below).
+        c.finished = .init();
         while (!lanes.admit(&c.job)) {
             if (comptime raw) return error.ConcurrencyUnavailable;
             std.Thread.yield() catch std.atomic.spinLoopHint();
         }
         lanes.submit(&c.job);
-        c.finished.waitUncancelable(Scheduler.system());
+        _ = c.finished.waitUncancelable(Scheduler.system());
         // Completion precedes the executor releasing its group token. No
         // cancelable wait may abandon the caller's frame in this interval.
         while (c.job.held()) std.Thread.yield() catch std.atomic.spinLoopHint();
