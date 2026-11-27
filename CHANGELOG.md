@@ -56,7 +56,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On io_uring, a regular file the ring cannot register keeps its slot as a file that is no regular one does, going by its own descriptor without a registration tried on each submission, where the slot stayed free and the next submission on the file tried again.
 - Pins aegis c43e90d, still 0.2.4: additive commits after 3c0b13e (the role declarations a linter reads, `lint_rules`; `Signal`; `io.ReadEnd` and `io.WriteEnd`; fault points), the aegis that the development build's shakedown (1ffc7b0, `Sim.socketsOf`) and preflight select. Nothing reactor calls changed.
 - On aegis 0.3.0: the condition waits in the IOCP notifications and the network receiver are the guard's (`held.wait(&condition, io, deadline)`), as aegis 0.3.0 has them. No public API changes.
-- A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish) is std's `Io.Event` again; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
+- A signal set once that another side waits for (a lane's gate, a receiver's ready, a lane call's finish, a new one each round) is aegis's `Signal`, set once and waited on; reactor's own `sync.Done`, which stood in for it, is gone. Nothing outside reactor named it.
 - `net.connectUnix` returns `net.ConnectUnixError`, std's `UnixAddress.ConnectError` with `NameTooLong`.
 - The idle test backend's wake word is an aegis `Atomic` that waits and wakes on itself, where it was a `std.atomic.Value` whose `.raw` word went to std's futex. Tests only; no public API changes.
 
