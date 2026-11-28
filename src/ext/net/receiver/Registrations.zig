@@ -56,7 +56,7 @@ const Command = struct {
             .unregister => |index| ring.buffers.unregister(&ring.ring, index),
         }
         // Direct setup before start has no waiter and must not enter std.Io.
-        if (command.awaiting) command.ready.set(command.io, {}) catch aegis.assert.never("a command runs once");
+        if (command.awaiting) aegis.assert.invariant(command.ready.set(command.io, {}), "a command runs once");
     }
 
     fn execute(command: *Command, owner: *Scheduler.Processor) void {

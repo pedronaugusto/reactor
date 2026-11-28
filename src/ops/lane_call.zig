@@ -73,7 +73,7 @@ fn fromThread(comptime R: type, comptime raw: bool, comptime control_: bool, lan
         }
         fn done(job: *Lanes.Job) void {
             const c: *Self = @alignCast(@fieldParentPtr("job", job)); // safe: the caller retains it through executor retirement
-            c.finished.set(Scheduler.system(), {}) catch aegis.assert.never("a lane call finishes once a round");
+            aegis.assert.invariant(c.finished.set(Scheduler.system(), {}), "a lane call finishes once a round");
         }
     };
     var c: Call = .{
